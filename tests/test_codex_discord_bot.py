@@ -4235,11 +4235,17 @@ class DiscordBotHelperTests(unittest.IsolatedAsyncioTestCase):
         original_resolve_target_ref = bot.resolve_target_ref
         original_run_ask_stream = bot.run_ask_stream
         original_get_mirrored = bot.get_mirrored_codex_thread_id
+        original_prime_cursor = bot.prime_session_mirror_cursor_for_target
+        order: list[tuple[str, str | None]] = []
         try:
             bot.resolve_target_ref = lambda target_thread_id: (target_thread_id, "taxlab:1")
             bot.get_mirrored_codex_thread_id = lambda channel_id: "thread-1" if channel_id == 222 else None
+            bot.prime_session_mirror_cursor_for_target = lambda target_thread_id: order.append(
+                ("prime", target_thread_id)
+            )
 
             def fake_run_ask_stream(prompt, relay, *, force_while_busy=False, wait=True, target_thread_id=None):
+                order.append(("ask", target_thread_id))
                 relay.feed_line("[commentary]")
                 relay.feed_line("working")
                 relay.feed_line("[final_answer]")
@@ -4264,11 +4270,13 @@ class DiscordBotHelperTests(unittest.IsolatedAsyncioTestCase):
                 log_text = log_path.read_text(encoding="utf-8")
 
             self.assertEqual(channel.messages, [])
+            self.assertEqual(order[:2], [("prime", "thread-1"), ("ask", "thread-1")])
             self.assertIn("ask_stream_delegated_to_session_mirror target=thread-1", log_text)
         finally:
             bot.resolve_target_ref = original_resolve_target_ref
             bot.run_ask_stream = original_run_ask_stream
             bot.get_mirrored_codex_thread_id = original_get_mirrored
+            bot.prime_session_mirror_cursor_for_target = original_prime_cursor
 
     async def test_ask_stream_live_without_final_sends_fallback(self) -> None:
         original_resolve_target_ref = bot.resolve_target_ref

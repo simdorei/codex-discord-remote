@@ -576,6 +576,30 @@ def update_session_mirror_cursor(codex_thread_id: str, rollout_path: str, cursor
     )
 
 
+def prime_session_mirror_cursor_for_target(target_thread_id: str | None) -> int | None:
+    if not discord_session_mirror_enabled() or not target_thread_id:
+        return None
+    try:
+        codex_thread = bridge.choose_thread(target_thread_id, None)
+        session_path = Path(codex_thread.rollout_path)
+        if not session_path.exists():
+            return None
+        rollout_path = str(session_path)
+        cursor = get_or_init_session_mirror_cursor(
+            target_thread_id,
+            rollout_path,
+            session_path.stat().st_size,
+        )
+        log_line(f"session_mirror_cursor_primed target={target_thread_id} cursor={cursor}")
+        return cursor
+    except Exception:
+        log_line(
+            f"session_mirror_cursor_prime_failed target={target_thread_id or '-'}\n"
+            + traceback.format_exc()
+        )
+        return None
+
+
 def claim_session_mirror_event(event_digest: str, codex_thread_id: str) -> bool:
     return discord_store.claim_session_mirror_event(
         MIRROR_DB_PATH,
@@ -4702,6 +4726,8 @@ async def run_prompt_and_send(
     started_at = time.monotonic()
     target_thread_id, target_ref = resolve_target_ref(target_thread_id)
     delegate_to_session_mirror = should_delegate_output_to_session_mirror(channel, target_thread_id)
+    if delegate_to_session_mirror:
+        await asyncio.to_thread(prime_session_mirror_cursor_for_target, target_thread_id)
     relay = DiscordAskRelay(
         asyncio.get_running_loop(),
         channel,
