@@ -4510,13 +4510,15 @@ class DiscordBotHelperTests(unittest.IsolatedAsyncioTestCase):
     async def test_run_prompt_and_send_waits_for_different_active_app_target(self) -> None:
         original_resolve_target_ref = bot.resolve_target_ref
         original_run_ask_stream = bot.run_ask_stream
+        original_run_steering_prompt = bot.run_steering_prompt
+        original_stream_steering = bot.stream_steering_prompt_result_to_channel
         old_condition = bot.CODEX_APP_TURN_CONDITION
         old_active_key = bot.CODEX_APP_ACTIVE_TARGET_KEY
         old_active_count = bot.CODEX_APP_ACTIVE_TARGET_COUNT
         first_started = threading.Event()
         release_first = threading.Event()
         second_started = threading.Event()
-        calls: list[str | None] = []
+        calls: list[tuple[str, str | None]] = []
         try:
             bot.CODEX_APP_TURN_CONDITION = None
             bot.CODEX_APP_ACTIVE_TARGET_KEY = None
@@ -4524,12 +4526,10 @@ class DiscordBotHelperTests(unittest.IsolatedAsyncioTestCase):
             bot.resolve_target_ref = lambda target_thread_id: (target_thread_id, target_thread_id or "selected")
 
             def fake_run_ask_stream(prompt, relay, *, force_while_busy=False, wait=True, target_thread_id=None):
-                calls.append(target_thread_id)
+                calls.append(("ask", target_thread_id))
                 if target_thread_id == "thread-a":
                     first_started.set()
                     release_first.wait(2)
-                if target_thread_id == "thread-b":
-                    second_started.set()
                 relay.feed_line("[final_answer]")
                 relay.feed_line(f"done {target_thread_id}")
                 relay.feed_line("[ready]")
@@ -4538,12 +4538,35 @@ class DiscordBotHelperTests(unittest.IsolatedAsyncioTestCase):
 
             bot.run_ask_stream = fake_run_ask_stream
 
+            def fake_run_steering_prompt(prompt, target_thread_id):
+                calls.append(("steer", target_thread_id))
+                if target_thread_id == "thread-b":
+                    second_started.set()
+                return bot.SteeringPromptResult(
+                    0,
+                    "[delivery_verified] thread-b",
+                    target_thread_id=target_thread_id,
+                    target_ref=target_thread_id or "selected",
+                    session_path="session.jsonl",
+                    start_offset=10,
+                )
+
+            async def fake_stream_steering(channel, result, target_thread_id, **kwargs):
+                calls.append(("watch", target_thread_id))
+                await channel.send(f"watched {target_thread_id}")
+                return True
+
+            bot.run_steering_prompt = fake_run_steering_prompt
+            bot.stream_steering_prompt_result_to_channel = fake_stream_steering
+
             with tempfile.TemporaryDirectory() as temp_dir:
                 log_path = Path(temp_dir) / "discord-smoke.log"
                 with EnvPatch("CODEX_DISCORD_LOG_PATH", str(log_path)):
+                    target_a = FakeTarget()
+                    target_b = FakeTarget()
                     task_a = asyncio.create_task(
                         bot.run_prompt_and_send(
-                            FakeTarget(),
+                            target_a,
                             "first",
                             ack_sent=True,
                             target_thread_id="thread-a",
@@ -4552,7 +4575,7 @@ class DiscordBotHelperTests(unittest.IsolatedAsyncioTestCase):
                     await asyncio.to_thread(first_started.wait, 1)
                     task_b = asyncio.create_task(
                         bot.run_prompt_and_send(
-                            FakeTarget(),
+                            target_b,
                             "second",
                             ack_sent=True,
                             target_thread_id="thread-b",
@@ -4564,9 +4587,12 @@ class DiscordBotHelperTests(unittest.IsolatedAsyncioTestCase):
                     await asyncio.wait_for(asyncio.gather(task_a, task_b), timeout=3)
                 log_text = log_path.read_text(encoding="utf-8")
 
-            self.assertEqual(calls, ["thread-a", "thread-b"])
+            self.assertEqual(calls, [("ask", "thread-a"), ("steer", "thread-b"), ("watch", "thread-b")])
+            self.assertEqual(target_a.messages, [("done thread-a", None)])
+            self.assertEqual(target_b.messages, [("watched thread-b", None)])
             self.assertIn("codex_app_turn_wait target=thread-b active=thread-a", log_text)
             self.assertIn("codex_app_turn_wait_done target=thread-b", log_text)
+            self.assertIn("ask_after_cross_session_wait_done exit=0 target=thread-b", log_text)
         finally:
             release_first.set()
             bot.CODEX_APP_TURN_CONDITION = old_condition
@@ -4574,6 +4600,8 @@ class DiscordBotHelperTests(unittest.IsolatedAsyncioTestCase):
             bot.CODEX_APP_ACTIVE_TARGET_COUNT = old_active_count
             bot.resolve_target_ref = original_resolve_target_ref
             bot.run_ask_stream = original_run_ask_stream
+            bot.run_steering_prompt = original_run_steering_prompt
+            bot.stream_steering_prompt_result_to_channel = original_stream_steering
 
     async def test_run_prompt_and_send_allows_same_active_app_target_for_steering(self) -> None:
         original_resolve_target_ref = bot.resolve_target_ref

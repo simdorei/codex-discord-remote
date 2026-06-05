@@ -1203,6 +1203,10 @@ async def stream_steering_prompt_result_to_channel(
     channel: discord.abc.Messageable,
     steering_result: object,
     target_thread_id: str | None,
+    *,
+    label: str = "Steering",
+    send_commentary_blocks: bool | None = None,
+    send_final_blocks: bool = True,
 ) -> bool:
     if not isinstance(steering_result, SteeringPromptResult):
         return False
@@ -1217,6 +1221,8 @@ async def stream_steering_prompt_result_to_channel(
         steering_result.target_ref or target_thread_id or "-",
         suppress_after_steering_since=started_at,
         send_timeout_blocks=False,
+        send_commentary_blocks=send_commentary_blocks,
+        send_final_blocks=send_final_blocks,
     )
     timeout_sec = get_steering_pending_watch_timeout()
     async with channel_typing(channel, context="steer_watch"):
@@ -1244,9 +1250,15 @@ async def stream_steering_prompt_result_to_channel(
                     f"steer_watch_no_final_fallback target={target_thread_id or '-'} "
                     f"output_len={format_log_text_len(output)}"
                 )
-                await send_chunks(channel, f"Steering finished\n\n{output or '(no final answer captured)'}")
+                await send_chunks(channel, f"{label} finished\n\n{output or '(no final answer captured)'}")
         elif not relay.saw_aborted and not relay.saw_timeout:
-            await send_chunks(channel, f"Steering watch failed (exit {exit_code})\n\n{output or '(no output)'}")
+            await send_chunks(channel, f"{label} watch failed (exit {exit_code})\n\n{output or '(no output)'}")
+        return True
+    if exit_code == 0 and relay.saw_final and not relay.sent_live:
+        log_line(
+            f"steer_watch_final_suppressed target={target_thread_id or '-'} "
+            f"label={label.replace(chr(10), ' ')[:40]} output_len={format_log_text_len(output)}"
+        )
         return True
     if exit_code != 0 and relay.saw_timeout:
         log_line(
@@ -1258,9 +1270,9 @@ async def stream_steering_prompt_result_to_channel(
             channel,
             "\n".join(
                 [
-                    "Steering is still running in Codex.",
+                    f"{label} is still running in Codex.",
                     "",
-                    "No final answer was captured before the Discord watch timeout. Do not resend the same steering message yet; check the Codex thread or wait for the next relay.",
+                    "No final answer was captured before the Discord watch timeout. Do not resend the same message yet; check the Codex thread or wait for the next relay.",
                 ]
             ),
         )
@@ -1277,7 +1289,7 @@ async def stream_steering_prompt_result_to_channel(
             f"pending={steering_result.delivery_pending}"
         )
         return True
-    title = "Steering finished" if exit_code == 0 else f"Steering watch failed (exit {exit_code})"
+    title = f"{label} finished" if exit_code == 0 else f"{label} watch failed (exit {exit_code})"
     await send_chunks(channel, f"{title}\n\n{output or '(no output)'}")
     return True
 
@@ -4712,6 +4724,54 @@ def should_delegate_output_to_session_mirror(channel: object, target_thread_id: 
         return False
 
 
+async def run_delayed_prompt_via_watch(
+    channel: discord.abc.Messageable,
+    prompt: str,
+    *,
+    target_thread_id: str | None,
+    delegate_to_session_mirror: bool,
+) -> None:
+    async with channel_typing(channel, context="ask_after_cross_session_wait"):
+        steering_result = await asyncio.to_thread(
+            run_steering_prompt,
+            prompt,
+            target_thread_id,
+        )
+    exit_code, output = steering_result
+    log_line(
+        f"ask_after_cross_session_wait_done exit={exit_code} target={target_thread_id or '-'} "
+        f"pending={getattr(steering_result, 'delivery_pending', False)} "
+        f"output_len={format_log_text_len(output)}"
+    )
+    if is_selected_thread_busy_error(exit_code, output):
+        if await send_codex_app_menu_if_available(
+            channel,
+            target_thread_id,
+            output,
+            reason="ask_after_cross_session_wait_busy",
+        ):
+            return
+        _resolved_thread_id, target_ref = resolve_target_ref(target_thread_id)
+        await send_chunks(channel, build_codex_app_steering_not_accepted_message(target_ref))
+        return
+    if exit_code != 0:
+        await send_chunks(channel, f"Ask failed (exit {exit_code})\n\n{output or '(no output)'}")
+        return
+
+    mark_steering_handoff(target_thread_id)
+    streamed = await stream_steering_prompt_result_to_channel(
+        channel,
+        steering_result,
+        target_thread_id,
+        label="Ask",
+        send_commentary_blocks=False if delegate_to_session_mirror else None,
+        send_final_blocks=not delegate_to_session_mirror,
+    )
+    if streamed:
+        return
+    await send_chunks(channel, f"Ask sent\n\n{output or '(no output)'}")
+
+
 async def run_prompt_and_send(
     channel: discord.abc.Messageable,
     prompt: str,
@@ -4723,21 +4783,29 @@ async def run_prompt_and_send(
 ) -> None:
     if not ack_sent:
         await channel.send(build_ask_start_message(prompt, queued=queued))
-    started_at = time.monotonic()
     target_thread_id, target_ref = resolve_target_ref(target_thread_id)
     delegate_to_session_mirror = should_delegate_output_to_session_mirror(channel, target_thread_id)
     if delegate_to_session_mirror:
         await asyncio.to_thread(prime_session_mirror_cursor_for_target, target_thread_id)
-    relay = DiscordAskRelay(
-        asyncio.get_running_loop(),
-        channel,
-        target_thread_id,
-        target_ref,
-        suppress_after_steering_since=started_at,
-        send_commentary_blocks=False if delegate_to_session_mirror else None,
-        send_final_blocks=not delegate_to_session_mirror,
-    )
-    async with codex_app_turn_slot(target_thread_id):
+    async with codex_app_turn_slot(target_thread_id) as waited_for_app_turn:
+        if waited_for_app_turn:
+            await run_delayed_prompt_via_watch(
+                channel,
+                prompt,
+                target_thread_id=target_thread_id,
+                delegate_to_session_mirror=delegate_to_session_mirror,
+            )
+            return
+        started_at = time.monotonic()
+        relay = DiscordAskRelay(
+            asyncio.get_running_loop(),
+            channel,
+            target_thread_id,
+            target_ref,
+            suppress_after_steering_since=started_at,
+            send_commentary_blocks=False if delegate_to_session_mirror else None,
+            send_final_blocks=not delegate_to_session_mirror,
+        )
         async with channel_typing(channel, context="ask_stream"):
             exit_code, output = await asyncio.to_thread(
                 run_ask_stream,
