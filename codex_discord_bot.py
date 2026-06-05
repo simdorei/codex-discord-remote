@@ -129,6 +129,8 @@ SESSION_MIRROR_TARGET_LIMIT = 100
 SESSION_MIRROR_EVENT_RETENTION_SECONDS = 7 * 86400.0
 SESSION_MIRROR_RECENT_TEXT_TTL_SECONDS = 600.0
 DISCORD_ORIGIN_PROMPT_TTL_SECONDS = 900.0
+RECENT_CODEX_APP_PROMPT_DEDUPE_SECONDS = 120.0
+RECENT_CODEX_APP_PROMPT_SCAN_BYTES = 4 * 1024 * 1024
 DISCORD_ATTACHMENT_MAX_BYTES_DEFAULT = 25 * 1024 * 1024
 DISCORD_ATTACHMENT_TEXT_INLINE_MAX_BYTES_DEFAULT = 32 * 1024
 DISCORD_ATTACHMENT_TEXT_PREVIEW_CHARS = 12000
@@ -2348,6 +2350,94 @@ def should_skip_discord_origin_prompt(target_thread_id: str | None, text: str) -
         return False
     RECENT_DISCORD_ORIGIN_PROMPTS.pop(digest, None)
     return True
+
+
+def parse_session_event_timestamp(event: dict) -> datetime | None:
+    raw_timestamp = str(event.get("timestamp") or "").strip()
+    if not raw_timestamp:
+        return None
+    try:
+        parsed = datetime.fromisoformat(raw_timestamp.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def extract_user_text_from_session_event(event: dict) -> str:
+    payload = event.get("payload") or {}
+    if not isinstance(payload, dict):
+        return ""
+    if event.get("type") == "event_msg" and payload.get("type") == "user_message":
+        return str(payload.get("message") or "").strip()
+    if event.get("type") != "response_item":
+        return ""
+    if payload.get("type") != "message" or payload.get("role") != "user":
+        return ""
+    return bridge.extract_message_text(payload).strip()
+
+
+def iter_recent_session_tail_events(
+    session_path: Path,
+    *,
+    scan_bytes: int = RECENT_CODEX_APP_PROMPT_SCAN_BYTES,
+) -> list[dict]:
+    if not session_path.exists():
+        return []
+    size = session_path.stat().st_size
+    start = max(0, size - max(1, scan_bytes))
+    with session_path.open("rb") as handle:
+        handle.seek(start)
+        data = handle.read()
+    lines = data.decode("utf-8", errors="replace").splitlines()
+    if start > 0 and lines:
+        lines = lines[1:]
+    events: list[dict] = []
+    for line in lines:
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(event, dict):
+            events.append(event)
+    return events
+
+
+def has_recent_codex_app_user_prompt(
+    target_thread_id: str | None,
+    prompt: str,
+    *,
+    max_age_seconds: float = RECENT_CODEX_APP_PROMPT_DEDUPE_SECONDS,
+) -> bool:
+    normalized_prompt = bridge.normalize_prompt_text(prompt)
+    if not normalized_prompt:
+        return False
+    try:
+        thread = bridge.choose_thread(target_thread_id, None)
+    except Exception:
+        log_line(
+            f"recent_codex_prompt_dedupe_unavailable target={target_thread_id or '-'} "
+            "reason=choose_thread_failed\n" + traceback.format_exc()
+        )
+        return False
+    session_path = Path(thread.rollout_path)
+    now = datetime.now(timezone.utc)
+    for event in reversed(iter_recent_session_tail_events(session_path)):
+        user_text = extract_user_text_from_session_event(event)
+        if not user_text:
+            continue
+        timestamp = parse_session_event_timestamp(event)
+        if timestamp is None:
+            continue
+        age_seconds = (now - timestamp).total_seconds()
+        if age_seconds < 0:
+            age_seconds = 0
+        if age_seconds > max_age_seconds:
+            return False
+        if bridge.normalize_prompt_text(user_text) == normalized_prompt:
+            return True
+    return False
 
 
 def remember_recent_session_text(seen: dict[str, float], text: str) -> None:
@@ -5189,6 +5279,17 @@ async def handle_plain_ask(
             target_ref,
             interactive_state,
             normalized_reply,
+        )
+        return
+
+    if await asyncio.to_thread(has_recent_codex_app_user_prompt, target_thread_id, prompt):
+        log_line(
+            f"plain_ask_duplicate_recent_app_prompt_skipped target={target_thread_id or '-'} "
+            f"prompt_len={format_log_text_len(prompt)}"
+        )
+        await send_chunks(
+            message.channel,
+            "Already in Codex app. Skipping duplicate Discord delivery for this mapped thread.",
         )
         return
 
