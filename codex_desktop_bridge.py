@@ -5740,8 +5740,8 @@ def command_open(args: argparse.Namespace) -> int:
         labels = ", ".join(get_thread_label(item) for item in busy_now[:3])
         if not args.abort:
             raise RuntimeError(
-                "A Codex reply is still in progress. Changing threads will stop the current reply. "
-                f"Busy thread(s): {labels}. Wait for `[ready]` or rerun with `open --abort ...`."
+                "The current thread has a reply in progress. Changing threads will stop it. "
+                f"Active thread(s): {labels}. Wait for `[ready]` or rerun with `open --abort ...`."
             )
         cancelled_labels, cancel_remaining = cancel_codex_reply_if_busy(timeout_sec=3.0)
     set_selected_thread_id(thread.id)
@@ -5797,15 +5797,6 @@ def command_ask(args: argparse.Namespace) -> int:
     busy_state = get_thread_busy_state(thread, allow_resume=True)
     if busy_state != "idle" and not args.force_while_busy:
         raise RuntimeError(describe_thread_busy_state(busy_state))
-
-    busy_threads = get_busy_threads(limit=50)
-    busy_thread_ids = {item.id for item in busy_threads}
-    if busy_threads and not args.force_while_busy and thread.id not in busy_thread_ids:
-        labels = ", ".join(get_thread_label(item) for item in busy_threads[:3])
-        raise RuntimeError(
-            "A Codex reply is still in progress. You can `open` other threads, but `ask` is blocked until it finishes. "
-            f"Busy thread(s): {labels}. Pass --force-while-busy to override."
-        )
 
     start_offset = session_path.stat().st_size
     recent_offsets = snapshot_recent_session_offsets(limit=10, include_threads=[thread])

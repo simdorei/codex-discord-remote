@@ -1,9 +1,10 @@
 """Windows-local frontend harness for Codex app/web bridge decisions.
 
-This module keeps Codex state/preflight decisions out of Discord UI code.
+This module keeps local Codex app facts out of Discord UI code.
 It is intentionally small: Discord owns routing and buttons, while this
-harness reports structured target/global busy state and local runtime facts.
-Codex CLI probing is diagnostic only; Discord remains the frontend surface.
+harness reports structured runtime facts. Ask preflight resolves only the
+target thread; idle/busy is not a delivery policy anymore. Codex CLI probing
+is diagnostic only; Discord remains the frontend surface.
 """
 
 from __future__ import annotations
@@ -50,7 +51,6 @@ class AskPreflight:
     accepted: bool
     can_steer: bool
     not_sent_reason: str
-    global_busy_threads: list[HarnessThread] = field(default_factory=list)
     events: list[dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
@@ -101,43 +101,6 @@ def choose_target_thread(
     return thread, thread_ref(thread, bridge_module=bridge_module)
 
 
-def get_target_state(
-    thread: bridge.ThreadInfo | None,
-    *,
-    bridge_module: object = bridge,
-) -> str:
-    if thread is None:
-        return "idle"
-    try:
-        return bridge_module.get_thread_busy_state(thread, allow_resume=True) or "idle"
-    except Exception:
-        return "idle"
-
-
-def get_global_busy_thread_snapshots(
-    *,
-    exclude_thread_id: str | None,
-    bridge_module: object = bridge,
-    limit: int = 50,
-) -> list[HarnessThread]:
-    try:
-        busy_threads = bridge_module.get_busy_threads(limit=limit)
-    except Exception:
-        return []
-    snapshots: list[HarnessThread] = []
-    for thread in busy_threads:
-        if exclude_thread_id and thread.id == exclude_thread_id:
-            continue
-        snapshots.append(
-            thread_snapshot(
-                thread,
-                state=get_target_state(thread, bridge_module=bridge_module),
-                bridge_module=bridge_module,
-            )
-        )
-    return snapshots
-
-
 def preflight_ask(
     target_thread_id: str | None,
     *,
@@ -147,7 +110,7 @@ def preflight_ask(
     checked_at = time.time() if now is None else now
     target_thread, target_ref = choose_target_thread(target_thread_id, bridge_module=bridge_module)
     resolved_target_id = target_thread.id if target_thread is not None else target_thread_id
-    target_state = get_target_state(target_thread, bridge_module=bridge_module)
+    target_state = "not_checked"
     events = [
         {
             "type": "preflight_checked",
@@ -158,44 +121,7 @@ def preflight_ask(
         }
     ]
 
-    if target_state != "idle":
-        events.append({"type": "not_sent", "reason": "target_busy"})
-        return AskPreflight(
-            target_thread_id=resolved_target_id,
-            target_ref=target_ref,
-            target_state=target_state,
-            route="target_busy",
-            accepted=False,
-            can_steer=True,
-            not_sent_reason="target_busy",
-            events=events,
-        )
-
-    global_busy_threads = get_global_busy_thread_snapshots(
-        exclude_thread_id=resolved_target_id,
-        bridge_module=bridge_module,
-    )
-    if global_busy_threads:
-        events.append(
-            {
-                "type": "accepted",
-                "reason": "target_idle_other_threads_busy",
-                "busy_thread_ids": [thread.id for thread in global_busy_threads],
-            }
-        )
-        return AskPreflight(
-            target_thread_id=resolved_target_id,
-            target_ref=target_ref,
-            target_state=target_state,
-            route="ask",
-            accepted=True,
-            can_steer=False,
-            not_sent_reason="",
-            global_busy_threads=global_busy_threads,
-            events=events,
-        )
-
-    events.append({"type": "accepted", "reason": "target_idle"})
+    events.append({"type": "accepted", "reason": "target_resolved"})
     return AskPreflight(
         target_thread_id=resolved_target_id,
         target_ref=target_ref,

@@ -18,6 +18,7 @@ class DiscordAskRelay:
         quiet_notice_delay_sec: float,
         suppress_after_steering_since: float | None = None,
         send_timeout_blocks: bool = True,
+        send_commentary_blocks: bool = False,
         send_chunks_func,
         parse_interactive_notice_func,
         send_interactive_prompt_func,
@@ -34,6 +35,7 @@ class DiscordAskRelay:
         self.quiet_notice_delay_sec = quiet_notice_delay_sec
         self.suppress_after_steering_since = suppress_after_steering_since
         self.send_timeout_blocks = send_timeout_blocks
+        self.send_commentary_blocks = send_commentary_blocks
         self._send_chunks = send_chunks_func
         self._parse_interactive_notice = parse_interactive_notice_func
         self._send_interactive_prompt = send_interactive_prompt_func
@@ -153,8 +155,9 @@ class DiscordAskRelay:
             return
         if self.mode == "commentary":
             if not self._send_interactive_notice_if_detected(text):
-                self._send(f"In progress\n\n{text}")
-                self.sent_live = True
+                if self.send_commentary_blocks:
+                    self._send(f"In progress\n\n{text}")
+                    self.sent_live = True
         elif self.mode == "final":
             if not self._send_interactive_notice_if_detected(text):
                 self._send(text)

@@ -1,18 +1,16 @@
 # Worklog
 
-## 2026-06-05 Discord-Only Split
+## 2026-06-05 Discord Harness Stabilization
 
-Goal: split the legacy mixed Telegram/Discord bridge into a Discord-only Windows-local Codex frontend harness.
+Goal: keep this repository as a Discord-only Windows-local Codex frontend harness.
 
 ### Current State
 
-- New repo path: `C:\repos\simdorei\codex-discord-harness`
-- Initial commit: `3f9b3d7 Initial Discord-only Codex harness`
-- Runtime bot is currently running from the new repo.
-- Runtime PID observed: `17404`
-- Tray check observed: `running pid=17404`
-- Legacy repo watchdog is disabled with `C:\repos\simdorei\codex-telegram\.codex_discord_bot.disabled`.
-- Legacy bot duplicate process was stopped.
+- Repo path: `C:\repos\simdorei\codex-discord-harness`
+- Runtime bot is running from this repo.
+- Windows scheduled task `Codex Discord Bot` now points to this repo's watchdog.
+- Runtime startup can also be handled by the user Startup shortcut.
+- Local runtime files such as `.env`, logs, SQLite state, and lock files are ignored.
 
 ### Product Direction
 
@@ -20,31 +18,15 @@ Goal: split the legacy mixed Telegram/Discord bridge into a Discord-only Windows
 - Windows-local operator tool for a signed-in Codex app/web session.
 - Not a Codex CLI harness.
 - Not an official mobile Codex replacement.
-- Telegram adapter and Telegram launcher are intentionally excluded from the new repo.
 
 ### Behavior Decisions
 
-- Plain Discord asks route to the mapped target Codex thread.
-- If the same target Codex thread is busy, the Discord message is queued for that target thread.
-- Other Codex threads being busy should not block a mapped Discord thread.
-- `Steer now` should be an explicit Discord control, not an automatic fallback for every busy condition.
-- App-side steering mode can be useful, but should be documented as an operator choice rather than hidden config drift.
-
-### Fixes/Changes Already Done
-
-- Created `C:\repos\simdorei\codex-discord-harness`.
-- Copied only Discord/harness/desktop bridge files, Discord launchers, watchdog, tray script, requirements, and tests.
-- Added Discord-only `README.md`.
-- Added Discord-only `.env.example`.
-- Added `.gitignore`.
-- Removed Telegram wording from new repo user-facing bot docstring.
-- Removed Telegram wording from a bridge decline-message error.
-- Removed risky default context keyword `chat`, because it matched `chatter`.
-- Added Korean operational context fallback coverage for messages such as `디코 봇 응답 없어`.
-- Adjusted slash ask expectation: target-busy slash ask queues without creating a `Steer now` view.
-- Added/kept tray script for headless bot visibility.
-- Added stop/disabled marker support to watchdog scripts.
-- Restored Codex Desktop config by removing `[desktop] followUpQueueMode = "steer"` from `C:\Users\banpo\.codex\config.toml`.
+- Plain Discord asks go straight to the mapped Codex thread.
+- Discord does not run global idle/busy preflight for ordinary asks.
+- Discord does not auto-queue ordinary asks before sending.
+- If the Codex app exposes approval/input/follow-up choices, Discord mirrors those choices.
+- Other Codex threads being active should not block a mapped Discord thread.
+- Existing explicit busy-choice controls are treated as legacy interactive controls and cleaned up when stale.
 
 ### Validation Completed
 
@@ -58,52 +40,19 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\codex-discord-tray.ps1
 git diff --check
 ```
 
-Observed results:
+Observed latest results:
 
-- `176 tests OK`
+- `179 tests OK`
 - `py_compile OK`
 - watchdog dry-run: `running`
-- tray once: `running pid=17404`
+- tray once: `running pid=11084`
+- scheduled task manual run: `Last Result=0`
 - `git diff --check OK`
 
-### Remaining Blocker
+### Live QA Checklist
 
-The existing Windows scheduled task named `Codex Discord Bot` still points to the legacy repo:
-
-```text
-C:\repos\simdorei\codex-telegram\codex-discord-watchdog.ps1
-```
-
-Updating the task action to the new repo failed from the current shell with `Access is denied`.
-
-Current mitigation:
-
-- Old repo watchdog has `.codex_discord_bot.disabled`, so the old scheduled task does not restart the old bot.
-- New repo bot is already running headless.
-
-Needed admin action:
-
-Update the scheduled task action to:
-
-```text
-powershell.exe -WindowStyle Hidden -NoProfile -ExecutionPolicy Bypass -File "C:\repos\simdorei\codex-discord-harness\codex-discord-watchdog.ps1"
-```
-
-Working directory:
-
-```text
-C:\repos\simdorei\codex-discord-harness
-```
-
-### Next Live QA
-
-Use Discord with the new bot:
-
-- Send unmentioned chatter in a gated channel: should be ignored.
-- Mention configured bot/user for a plain ask: should strip mention and submit.
-- Send Korean operational text with context fallback enabled: should be accepted only when it matches bridge/Codex context.
-- Send two different mapped Discord threads close together: should not global-block each other.
-- Send while the same mapped target thread is busy: should queue without showing `Steer now`.
-- Confirm no duplicate bot replies.
+- Send an ordinary ask in a mapped Discord thread: should submit without local steering prompt.
+- Send into two different mapped Discord threads close together: each should target its own Codex thread.
+- Confirm no duplicate bot replies after a newer relay supersedes an older relay.
 - Confirm no second bot process owns the Discord websocket.
 - Confirm tray icon or `codex-discord-tray.ps1 -Once` reports running.

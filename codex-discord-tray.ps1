@@ -12,6 +12,10 @@ $RestartRequestPath = Join-Path $ScriptDir '.codex_discord_bot.restart'
 $HeadlessLauncher = Join-Path $ScriptDir 'codex-discord-bot-headless.vbs'
 $LauncherLogPath = Join-Path $ScriptDir 'discord_launcher.log'
 $BotLogPath = Join-Path $ScriptDir 'codex_discord_bot.log'
+$StoppedGraceSeconds = 30
+$script:MissingSince = $null
+$script:LastRunningStatus = $null
+$script:LastTrayIcon = $null
 
 function Write-LauncherLog {
     param([string]$Message)
@@ -179,12 +183,35 @@ $notify.ContextMenuStrip = $menu
 
 function Update-TrayStatus {
     $status = Get-BotStatus
+
+    if ($status.Running) {
+        $script:MissingSince = $null
+        $script:LastRunningStatus = $status
+    } else {
+        if ($script:MissingSince -eq $null) {
+            $script:MissingSince = Get-Date
+        }
+        $missingSeconds = ((Get-Date) - $script:MissingSince).TotalSeconds
+        if ($script:LastRunningStatus -ne $null -and $missingSeconds -lt $StoppedGraceSeconds) {
+            $status = [pscustomobject]@{
+                Running = $true
+                Pid = $script:LastRunningStatus.Pid
+                Text = "Codex Discord bridge restarting (last PID $($script:LastRunningStatus.Pid))"
+                Icon = 'Application'
+            }
+        }
+    }
+
     $statusItem.Text = $status.Text
     $notify.Text = Limit-TrayText $status.Text
-    if ($status.Running) {
-        $notify.Icon = [Drawing.SystemIcons]::Application
-    } else {
-        $notify.Icon = [Drawing.SystemIcons]::Warning
+    $nextIcon = if ($status.Running) { 'Application' } else { 'Warning' }
+    if ($script:LastTrayIcon -ne $nextIcon) {
+        if ($status.Running) {
+            $notify.Icon = [Drawing.SystemIcons]::Application
+        } else {
+            $notify.Icon = [Drawing.SystemIcons]::Warning
+        }
+        $script:LastTrayIcon = $nextIcon
     }
 }
 

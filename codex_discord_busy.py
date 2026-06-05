@@ -10,18 +10,11 @@ def is_selected_thread_busy_error(exit_code: int, output: str) -> bool:
     return (
         "selected thread is still busy" in text
         or "target thread is still busy" in text
-        or "a codex reply is still in progress" in text
         or "--force-while-busy" in text and "still busy" in text
         or "selected thread is waiting on a follow-up choice or input" in text
         or "selected thread is waiting on an approval prompt" in text
         or "timed out waiting for ipc data" in text and "codex-ipc" in text
     )
-
-
-def is_global_codex_busy_error(exit_code: int, output: str) -> bool:
-    if exit_code == 0:
-        return False
-    return "a codex reply is still in progress" in (output or "").lower()
 
 
 def has_busy_choice_source(source_message: object) -> bool:

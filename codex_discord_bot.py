@@ -239,6 +239,52 @@ def message_mentions_required_plain_ask_user(
     return bool(required_user_ids.intersection(get_discord_message_mention_ids(message)))
 
 
+def get_bridge_mention_user_ids(discord_client: object) -> set[int]:
+    mention_user_ids: set[int] = set()
+    for user_id in getattr(discord_client, "plain_ask_mention_user_ids", set()) or set():
+        try:
+            mention_user_ids.add(int(user_id))
+        except (TypeError, ValueError):
+            continue
+    self_user_id = getattr(getattr(discord_client, "user", None), "id", None)
+    try:
+        if self_user_id is not None:
+            mention_user_ids.add(int(self_user_id))
+    except (TypeError, ValueError):
+        pass
+    return mention_user_ids
+
+
+def message_mentions_bridge_user(message: object, discord_client: object) -> bool:
+    return message_mentions_required_plain_ask_user(
+        message,
+        get_bridge_mention_user_ids(discord_client),
+    )
+
+
+def is_bot_authored_bridge_mention(message: object, discord_client: object) -> bool:
+    if not getattr(getattr(message, "author", None), "bot", False):
+        return False
+    return message_mentions_bridge_user(message, discord_client)
+
+
+def message_mentions_other_bot(
+    message: object,
+    required_user_ids: set[int],
+) -> bool:
+    for user in getattr(message, "mentions", []) or []:
+        user_id = getattr(user, "id", None)
+        try:
+            normalized_user_id = int(user_id)
+        except (TypeError, ValueError):
+            continue
+        if normalized_user_id in required_user_ids:
+            continue
+        if getattr(user, "bot", False):
+            return True
+    return False
+
+
 def plain_ask_context_fallback_enabled() -> bool:
     return env_flag("DISCORD_PLAIN_ASK_CONTEXT_FALLBACK", default=False)
 
@@ -800,7 +846,7 @@ def run_ask(
         ui_argv = build_ui_ask_argv(
             prompt,
             target_thread_id=target_thread_id,
-            force_while_busy=True,
+            force_while_busy=force_while_busy,
             wait=wait,
             timeout_sec=timeout_sec,
         )
@@ -1627,7 +1673,17 @@ class CodexDiscordBot(discord.Client):
 
     async def on_message(self, message: discord.Message) -> None:
         if getattr(getattr(message, "author", None), "bot", False):
-            return
+            author_id = getattr(getattr(message, "author", None), "id", None)
+            self_user_id = getattr(getattr(self, "user", None), "id", None)
+            if self_user_id is not None and str(author_id) == str(self_user_id):
+                return
+            if not message_mentions_bridge_user(message, self):
+                log_line(
+                    f"ignored_message reason=bot_author_without_bridge_mention "
+                    f"chat={getattr(getattr(message, 'channel', None), 'id', '-')} "
+                    f"user={author_id or '-'}"
+                )
+                return
         if not claim_discord_message(self, message):
             log_line(
                 f"duplicate_message_skipped source=gateway "
@@ -1659,7 +1715,8 @@ class CodexDiscordBot(discord.Client):
                     f"category={getattr(category, 'name', '-')}"
                 )
                 return
-            if not self.is_allowed_user(message.author.id):
+            bot_bridge_mention = is_bot_authored_bridge_mention(message, self)
+            if not bot_bridge_mention and not self.is_allowed_user(message.author.id):
                 log_line(f"ignored_message reason=user_not_allowed user={message.author.id}")
                 return
             content = (message.content or "").strip()
@@ -1670,51 +1727,63 @@ class CodexDiscordBot(discord.Client):
                 )
                 await maybe_send_empty_content_notice(message)
                 return
+            target_thread_id = get_mirrored_codex_thread_id(message.channel.id)
             if not content.startswith("!"):
-                plain_ask_mention_user_ids = set(getattr(self, "plain_ask_mention_user_ids", set()))
+                plain_ask_mention_user_ids = get_bridge_mention_user_ids(self)
                 if plain_ask_mention_user_ids:
-                    content, matched_mention = strip_required_plain_ask_mentions(
+                    stripped_content, matched_mention = strip_required_plain_ask_mentions(
                         content,
                         plain_ask_mention_user_ids,
                     )
-                    if not matched_mention:
+                    if matched_mention:
+                        content = stripped_content
+                    if not matched_mention and target_thread_id is None:
                         matched_mention = message_mentions_required_plain_ask_user(
                             message,
                             plain_ask_mention_user_ids,
                         )
-                    if not matched_mention and should_accept_plain_ask_without_required_mention(
-                        message,
-                        content,
+                    if (
+                        not matched_mention
+                        and target_thread_id is None
+                        and should_accept_plain_ask_without_required_mention(
+                            message,
+                            content,
+                        )
                     ):
                         log_line(
                             f"plain_ask_context_fallback chat={message.channel.id} "
                             f"user={message.author.id}"
                         )
                         matched_mention = True
-                    if not matched_mention:
+                    if not matched_mention and target_thread_id is None:
                         log_line(
                             f"ignored_message reason=required_mention_missing chat={message.channel.id} "
                             f"user={message.author.id}"
                         )
                         return
-                    if not content:
+                    if matched_mention and not content:
                         log_line(
                             f"ignored_message reason=mention_only_content chat={message.channel.id} "
                             f"user={message.author.id}"
                         )
                         await send_chunks(message.channel, "Add a prompt after the mention.")
                         return
-            target_thread_id = get_mirrored_codex_thread_id(message.channel.id)
+                else:
+                    matched_mention = False
+                if (
+                    target_thread_id is not None
+                    and not matched_mention
+                    and message_mentions_other_bot(message, plain_ask_mention_user_ids)
+                ):
+                    log_line(
+                        f"ignored_message reason=other_bot_mention_in_mirrored_thread "
+                        f"chat={message.channel.id} user={message.author.id}"
+                    )
+                    return
             target_source = "mirror" if target_thread_id else "selected"
-            runner_busy = await is_thread_runner_busy(target_thread_id)
-            codex_busy_state, _busy_thread_id, _busy_ref = await asyncio.to_thread(
-                get_busy_state_for_thread,
-                target_thread_id,
-            )
             log_line(
                 f"message chat={message.channel.id} user={message.author.id} "
-                f"prefix={content.startswith('!')} runner_busy={runner_busy} "
-                f"codex_busy={codex_busy_state} "
+                f"prefix={content.startswith('!')} "
                 f"target_source={target_source} target={target_thread_id or '-'} "
                 f"text_len={format_log_text_len(content)}"
             )
@@ -2855,6 +2924,65 @@ async def get_or_create_mirror_category(guild: discord.Guild) -> discord.Categor
     return await guild.create_category("Codex", reason="Codex mirror setup")
 
 
+def upsert_mirror_project(project_key: str, project_name: str, channel_id: int) -> None:
+    init_mirror_db()
+    with sqlite3.connect(MIRROR_DB_PATH) as conn:
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO mirror_projects
+                (project_key, project_name, discord_channel_id, updated_at)
+            VALUES (?, ?, ?, ?)
+            """,
+            (project_key, project_name, int(channel_id), time.time()),
+        )
+
+
+def upsert_mirror_thread(
+    codex_thread: bridge.ThreadInfo,
+    project_key: str,
+    thread_name: str,
+    project_channel_id: int,
+    discord_thread_id: int,
+) -> None:
+    init_mirror_db()
+    with sqlite3.connect(MIRROR_DB_PATH) as conn:
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO mirror_threads
+                (codex_thread_id, project_key, thread_title, discord_channel_id, discord_thread_id, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                codex_thread.id,
+                project_key,
+                thread_name,
+                int(project_channel_id),
+                int(discord_thread_id),
+                time.time(),
+            ),
+        )
+
+
+def find_existing_project_channel(
+    guild: discord.Guild,
+    category: discord.CategoryChannel,
+    *,
+    project_name: str,
+    base_name: str,
+) -> discord.TextChannel | None:
+    expected_topic = f"Codex project mirror: {project_name}"
+    for channel in getattr(guild, "text_channels", []):
+        if not isinstance(channel, discord.TextChannel):
+            continue
+        topic = str(getattr(channel, "topic", "") or "")
+        name = str(getattr(channel, "name", "") or "")
+        if topic == expected_topic:
+            return channel
+        if name == base_name and topic.startswith("Codex project mirror:"):
+            return channel
+    return None
+
+
 async def get_or_create_project_channel(
     guild: discord.Guild,
     category: discord.CategoryChannel,
@@ -2871,15 +2999,31 @@ async def get_or_create_project_channel(
     if row:
         channel = guild.get_channel(int(row[0]))
         if isinstance(channel, discord.TextChannel):
+            upsert_mirror_project(project_key, project_name, int(channel.id))
             return channel
         try:
             fetched = await guild.fetch_channel(int(row[0]))
             if isinstance(fetched, discord.TextChannel):
+                upsert_mirror_project(project_key, project_name, int(fetched.id))
                 return fetched
         except Exception:
             pass
 
     base_name = normalize_discord_name(project_name, prefix="codex-", max_len=80)
+    existing_channel = find_existing_project_channel(
+        guild,
+        category,
+        project_name=project_name,
+        base_name=base_name,
+    )
+    if existing_channel is not None:
+        upsert_mirror_project(project_key, project_name, int(existing_channel.id))
+        log_line(
+            f"mirror_project_reused project={project_key[:80]} "
+            f"channel={existing_channel.id}"
+        )
+        return existing_channel
+
     channel_name = base_name
     digest = hashlib.sha1(project_key.encode("utf-8", errors="ignore")).hexdigest()[:6]
     existing_names = {channel.name for channel in guild.text_channels}
@@ -2892,16 +3036,37 @@ async def get_or_create_project_channel(
         topic=f"Codex project mirror: {project_name}",
         reason="Codex project mirror sync",
     )
-    with sqlite3.connect(MIRROR_DB_PATH) as conn:
-        conn.execute(
-            """
-            INSERT OR REPLACE INTO mirror_projects
-                (project_key, project_name, discord_channel_id, updated_at)
-            VALUES (?, ?, ?, ?)
-            """,
-            (project_key, project_name, int(channel.id), time.time()),
-        )
+    upsert_mirror_project(project_key, project_name, int(channel.id))
     return channel
+
+
+async def find_existing_thread_channel(
+    project_channel: discord.TextChannel,
+    thread_name: str,
+) -> discord.Thread | None:
+    for thread in list(getattr(project_channel, "threads", [])):
+        if isinstance(thread, discord.Thread) and str(getattr(thread, "name", "") or "") == thread_name:
+            return thread
+
+    archived_threads = getattr(project_channel, "archived_threads", None)
+    if not callable(archived_threads):
+        return None
+    try:
+        async with asyncio.timeout(5):
+            async for thread in archived_threads(limit=100):
+                if (
+                    isinstance(thread, discord.Thread)
+                    and str(getattr(thread, "name", "") or "") == thread_name
+                ):
+                    return thread
+    except TimeoutError:
+        log_line(f"mirror_thread_reuse_scan_timeout channel={getattr(project_channel, 'id', '-')}")
+    except Exception as exc:
+        log_line(
+            f"mirror_thread_reuse_scan_failed channel={getattr(project_channel, 'id', '-')} "
+            f"error={str(exc)[:120]}"
+        )
+    return None
 
 
 async def get_or_create_thread_channel(
@@ -2926,34 +3091,49 @@ async def get_or_create_thread_channel(
             try:
                 fetched = await project_channel.guild.fetch_channel(thread_id)
                 if isinstance(fetched, discord.Thread):
+                    title = bridge.get_thread_ui_name(codex_thread.id, codex_thread) or codex_thread.title
+                    thread_name = truncate_discord_title(title, f"codex-{codex_thread.id[:8]}", max_len=90)
+                    upsert_mirror_thread(
+                        codex_thread,
+                        project_key,
+                        thread_name,
+                        int(project_channel.id),
+                        int(fetched.id),
+                    )
                     return fetched
             except Exception:
                 pass
 
     title = bridge.get_thread_ui_name(codex_thread.id, codex_thread) or codex_thread.title
     thread_name = truncate_discord_title(title, f"codex-{codex_thread.id[:8]}", max_len=90)
+    existing_thread = await find_existing_thread_channel(project_channel, thread_name)
+    if existing_thread is not None:
+        upsert_mirror_thread(
+            codex_thread,
+            project_key,
+            thread_name,
+            int(project_channel.id),
+            int(existing_thread.id),
+        )
+        log_line(
+            f"mirror_thread_reused codex_thread={codex_thread.id} "
+            f"discord_thread={existing_thread.id}"
+        )
+        return existing_thread
+
     discord_thread = await project_channel.create_thread(
         name=thread_name,
         type=discord.ChannelType.public_thread,
         auto_archive_duration=10080,
         reason="Codex thread mirror sync",
     )
-    with sqlite3.connect(MIRROR_DB_PATH) as conn:
-        conn.execute(
-            """
-            INSERT OR REPLACE INTO mirror_threads
-                (codex_thread_id, project_key, thread_title, discord_channel_id, discord_thread_id, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?)
-            """,
-            (
-                codex_thread.id,
-                project_key,
-                thread_name,
-                int(project_channel.id),
-                int(discord_thread.id),
-                time.time(),
-            ),
-        )
+    upsert_mirror_thread(
+        codex_thread,
+        project_key,
+        thread_name,
+        int(project_channel.id),
+        int(discord_thread.id),
+    )
     return discord_thread
 
 
@@ -3783,6 +3963,18 @@ async def run_prompt_and_send(
         f"sent_live={relay.sent_live} final={relay.saw_final} aborted={relay.saw_aborted} "
         f"timeout={relay.saw_timeout} output_len={format_log_text_len(output)}"
     )
+    if relay.suppressed_after_steering:
+        if is_discord_relay_stale(target_thread_id, relay.relay_generation):
+            log_line(
+                f"ask_stream_suppressed_after_newer_relay target={target_thread_id or '-'} "
+                f"sent_live={relay.sent_live} output_len={format_log_text_len(output)}"
+            )
+        else:
+            log_line(
+                f"ask_stream_suppressed_after_steering target={target_thread_id or '-'} "
+                f"sent_live={relay.sent_live} output_len={format_log_text_len(output)}"
+            )
+        return
     if is_ipc_delivery_confirmation_timeout(output):
         log_line(
             f"ask_stream_ipc_delivery_pending exit={exit_code} target={target_thread_id or '-'} "
@@ -3790,21 +3982,16 @@ async def run_prompt_and_send(
         )
         await send_chunks(channel, format_pending_ipc_ask_output(output))
         return
-    busy_failure_kind = ""
-    if is_global_codex_busy_error(exit_code, output):
-        busy_failure_kind = "global"
-    elif is_selected_thread_busy_error(exit_code, output):
-        busy_failure_kind = "target"
-    if busy_failure_kind:
+    if is_selected_thread_busy_error(exit_code, output):
         log_line(
-            f"ask_stream_busy_transport_failure kind={busy_failure_kind} target={target_thread_id or '-'} "
+            f"ask_stream_busy_transport_failure kind=target target={target_thread_id or '-'} "
             f"source_message={'yes' if has_busy_choice_source(source_message) else 'no'}"
         )
         if await send_codex_app_menu_if_available(
             channel,
             target_thread_id,
             output,
-            reason=f"ask_{busy_failure_kind}_busy_failure",
+            reason="ask_target_busy_failure",
         ):
             return
         retry_attempts = get_ask_busy_retry_attempts()
@@ -3838,13 +4025,24 @@ async def run_prompt_and_send(
                 f"final={relay.saw_final} aborted={relay.saw_aborted} timeout={relay.saw_timeout} "
                 f"output_len={format_log_text_len(output)}"
             )
+            if relay.suppressed_after_steering:
+                if is_discord_relay_stale(target_thread_id, relay.relay_generation):
+                    log_line(
+                        f"ask_stream_retry_suppressed_after_newer_relay "
+                        f"attempt={retry_index} target={target_thread_id or '-'} "
+                        f"sent_live={relay.sent_live} output_len={format_log_text_len(output)}"
+                    )
+                else:
+                    log_line(
+                        f"ask_stream_retry_suppressed_after_steering "
+                        f"attempt={retry_index} target={target_thread_id or '-'} "
+                        f"sent_live={relay.sent_live} output_len={format_log_text_len(output)}"
+                    )
+                return
             if is_ipc_delivery_confirmation_timeout(output):
                 await send_chunks(channel, format_pending_ipc_ask_output(output))
                 return
-            if not (
-                is_global_codex_busy_error(exit_code, output)
-                or is_selected_thread_busy_error(exit_code, output)
-            ):
+            if not is_selected_thread_busy_error(exit_code, output):
                 break
             if await send_codex_app_menu_if_available(
                 channel,
@@ -3853,7 +4051,7 @@ async def run_prompt_and_send(
                 reason=f"ask_busy_retry_{retry_index}",
             ):
                 return
-        if is_global_codex_busy_error(exit_code, output) or is_selected_thread_busy_error(exit_code, output):
+        if is_selected_thread_busy_error(exit_code, output):
             log_line(
                 f"ask_stream_busy_retry_exhausted target={target_thread_id or '-'} "
                 f"attempts={retry_attempts} output_len={format_log_text_len(output)}"
@@ -3875,7 +4073,7 @@ async def run_prompt_and_send(
     if relay.sent_live:
         if exit_code == 0 and not relay.saw_aborted:
             if relay.saw_final:
-                await channel.send("Codex turn finished.")
+                return
             else:
                 log_line(
                     f"ask_stream_no_final_fallback target={target_thread_id or '-'} "
@@ -3885,71 +4083,17 @@ async def run_prompt_and_send(
         elif not relay.saw_aborted and not relay.saw_timeout:
             await send_chunks(channel, f"Ask failed (exit {exit_code})\n\n{output or '(no output)'}")
         return
+    if exit_code == 0 and not relay.saw_final and not relay.saw_aborted and not relay.saw_timeout:
+        log_line(
+            f"ask_stream_no_final_fallback target={target_thread_id or '-'} "
+            f"output_len={format_log_text_len(output)}"
+        )
     title = "Ask finished" if exit_code == 0 else f"Ask failed (exit {exit_code})"
     await send_chunks(channel, f"{title}\n\n{output or '(no output)'}")
 
 
 def is_selected_thread_busy_error(exit_code: int, output: str) -> bool:
     return discord_busy.is_selected_thread_busy_error(exit_code, output)
-
-
-def is_global_codex_busy_error(exit_code: int, output: str) -> bool:
-    return discord_busy.is_global_codex_busy_error(exit_code, output)
-
-
-def get_global_busy_threads_for_target(target_thread_id: str | None) -> list[object]:
-    try:
-        preflight = windows_harness.preflight_ask(target_thread_id)
-    except Exception as exc:
-        log_line(f"global_busy_check_failed target={target_thread_id or '-'} error={exc}")
-        return []
-    if preflight.route != "global_busy":
-        return []
-    return list(preflight.global_busy_threads)
-
-
-def get_busy_thread_id(thread: object) -> str:
-    return str(getattr(thread, "id", "") or "")
-
-
-def get_busy_thread_label(thread: object) -> str:
-    ref = str(getattr(thread, "ref", "") or "").strip()
-    if ref:
-        return ref
-    try:
-        return bridge.get_thread_label(thread)
-    except Exception:
-        thread_id = get_busy_thread_id(thread)
-        return thread_id[:8] if thread_id else "unknown"
-
-
-def build_global_busy_message(busy_threads: list[object]) -> str:
-    parts = [
-        "Codex app is already processing a turn.",
-        "",
-        "This is a Codex app transport state, not a Discord global lock. Use the mapped Discord thread again after the current Codex output, or wait for an approval/input menu to appear here.",
-    ]
-    if busy_threads:
-        labels = ", ".join(get_busy_thread_label(thread) for thread in busy_threads[:3])
-        remaining = len(busy_threads) - 3
-        if remaining > 0:
-            labels = f"{labels}, +{remaining} more"
-        parts.extend(["", f"Busy thread(s): {labels}"])
-    return "\n".join(parts)
-
-
-async def send_global_busy_message(
-    channel: discord.abc.Messageable,
-    busy_threads: list[object],
-    *,
-    target_thread_id: str | None,
-    reason: str,
-) -> None:
-    log_line(
-        f"global_busy_preflight reason={reason} target={target_thread_id or '-'} "
-        f"busy={','.join(get_busy_thread_id(thread) for thread in busy_threads[:5])}"
-    )
-    await send_chunks(channel, build_global_busy_message(busy_threads))
 
 
 def has_busy_choice_source(source_message: object) -> bool:
@@ -4033,40 +4177,17 @@ async def run_prompt_flow(
     source_message: discord.Message | None = None,
     target_thread_id: str | None = None,
 ) -> None:
-    runner = await get_thread_runner(target_thread_id)
-    queue = runner["queue"]
-    if bool(runner.get("active")) or (isinstance(queue, asyncio.Queue) and queue.qsize() > 0):
-        position = await enqueue_thread_ask(
-            channel,
-            prompt,
-            target_thread_id,
-            queued=True,
-            source_message=source_message,
-        )
-        warning = build_context_warning(target_thread_id)
-        await send_chunks(
-            channel,
-            "\n\n".join(
-                part
-                for part in [
-                    f"Queued in this Codex thread at position {position}.",
-                    warning,
-                ]
-                if part
-            )
-        )
-        return
     warning = build_context_warning(target_thread_id)
     if warning:
         await send_chunks(channel, warning)
     await channel.send(build_ask_start_message(prompt, queued=queued))
-    await enqueue_thread_ask(
+    await run_prompt_and_send(
         channel,
         prompt,
-        target_thread_id,
         queued=queued,
         ack_sent=True,
         source_message=source_message,
+        target_thread_id=target_thread_id,
     )
 
 
@@ -4203,37 +4324,6 @@ async def handle_plain_ask(
             target_ref,
             interactive_state,
             normalized_reply,
-        )
-        return
-
-    busy_state, _busy_thread_id, busy_ref = await asyncio.to_thread(
-        get_busy_state_for_thread,
-        target_thread_id,
-    )
-    if busy_state != "idle":
-        position = await enqueue_thread_ask(
-            message.channel,
-            prompt,
-            target_thread_id,
-            queued=True,
-            source_message=message,
-        )
-        warning = build_context_warning(target_thread_id)
-        await send_chunks(
-            message.channel,
-            "\n\n".join(
-                part
-                for part in [
-                    f"Queued in this Codex thread at position {position}.",
-                    f"Current target state: {busy_state}.",
-                    warning,
-                ]
-                if part
-            ),
-        )
-        log_line(
-            f"target_busy_auto_queued target={target_thread_id or '-'} "
-            f"state={busy_state} ref={busy_ref or '-'} position={position}"
         )
         return
 
