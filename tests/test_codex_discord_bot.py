@@ -166,6 +166,23 @@ class FakeMessage:
         self.stickers: list[object] = []
 
 
+class FakeAttachment:
+    def __init__(
+        self,
+        filename: str,
+        data: bytes,
+        *,
+        content_type: str = "application/octet-stream",
+    ) -> None:
+        self.filename = filename
+        self._data = data
+        self.content_type = content_type
+        self.size = len(data)
+
+    async def save(self, destination: object) -> None:
+        Path(destination).write_bytes(self._data)
+
+
 class FakeBot:
     def __init__(self, *, allowed_user: bool = True, allowed_channel: bool = False) -> None:
         self.allowed_user = allowed_user
@@ -2795,6 +2812,66 @@ class DiscordBotHelperTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(message.channel.messages, [])
         self.assertIn("empty_content_notice_skipped reason=non_text_payload chat=333", log_text)
 
+    async def test_on_message_attachment_only_routes_saved_text_file_to_plain_ask(self) -> None:
+        original_get_mirrored = bot.get_mirrored_codex_thread_id
+        original_handle_plain_ask = bot.handle_plain_ask
+        original_attachment_dir = bot.ATTACHMENT_DOWNLOAD_DIR
+        calls: list[tuple[object, str, str | None]] = []
+        try:
+            bot.get_mirrored_codex_thread_id = lambda channel_id: "thread-1"
+
+            async def fake_handle_plain_ask(message, prompt, *, target_thread_id=None):
+                calls.append((message, prompt, target_thread_id))
+
+            bot.handle_plain_ask = fake_handle_plain_ask
+            client = SimpleNamespace(
+                enable_prefix_commands=True,
+                plain_ask_mention_user_ids=set(),
+                is_allowed_message_channel=lambda channel: True,
+                is_allowed_user=lambda user_id: True,
+            )
+            message = FakeMessage(content="", channel_id=333, message_id=1234)
+            message.attachments = [
+                FakeAttachment("note.txt", b"hello from a text file", content_type="text/plain")
+            ]
+
+            with tempfile.TemporaryDirectory() as temp_dir:
+                bot.ATTACHMENT_DOWNLOAD_DIR = Path(temp_dir) / "attachments"
+                log_path = Path(temp_dir) / "discord-smoke.log"
+                with EnvPatch("CODEX_DISCORD_LOG_PATH", str(log_path)):
+                    await bot.CodexDiscordBot.process_discord_message(client, message, source="test")
+                log_text = log_path.read_text(encoding="utf-8")
+
+            self.assertEqual(len(calls), 1)
+            _message, prompt, target_thread_id = calls[0]
+            self.assertEqual(target_thread_id, "thread-1")
+            self.assertIn("Please inspect the attached Discord file(s).", prompt)
+            self.assertIn("note.txt", prompt)
+            self.assertIn("hello from a text file", prompt)
+            self.assertIn("attachment_saved message=1234 filename=note.txt", log_text)
+        finally:
+            bot.get_mirrored_codex_thread_id = original_get_mirrored
+            bot.handle_plain_ask = original_handle_plain_ask
+            bot.ATTACHMENT_DOWNLOAD_DIR = original_attachment_dir
+
+    async def test_build_prompt_with_discord_attachments_saves_image_path_without_preview(self) -> None:
+        original_attachment_dir = bot.ATTACHMENT_DOWNLOAD_DIR
+        try:
+            message = FakeMessage(content="look at this", channel_id=333, message_id=1235)
+            message.attachments = [
+                FakeAttachment("screen.png", b"\x89PNG\r\n\x1a\n", content_type="image/png")
+            ]
+            with tempfile.TemporaryDirectory() as temp_dir:
+                bot.ATTACHMENT_DOWNLOAD_DIR = Path(temp_dir) / "attachments"
+                prompt = await bot.build_prompt_with_discord_attachments(message, "look at this")
+
+            self.assertIn("look at this", prompt)
+            self.assertIn("screen.png", prompt)
+            self.assertIn("content_type: image/png", prompt)
+            self.assertNotIn("Attachment text previews:", prompt)
+        finally:
+            bot.ATTACHMENT_DOWNLOAD_DIR = original_attachment_dir
+
     def test_strip_required_plain_ask_mentions_preserves_other_mentions(self) -> None:
         prompt, matched = bot.strip_required_plain_ask_mentions(
             "<@1500506752234422322> ask <@999> now",
@@ -4226,7 +4303,7 @@ class DiscordBotHelperTests(unittest.IsolatedAsyncioTestCase):
             bot.resolve_target_ref = original_resolve_target_ref
             bot.run_ask_stream = original_run_ask_stream
 
-    async def test_ask_stream_commentary_is_suppressed_after_steering_handoff(self) -> None:
+    async def test_ask_stream_commentary_is_sent_after_steering_handoff(self) -> None:
         original_resolve_target_ref = bot.resolve_target_ref
         original_run_ask_stream = bot.run_ask_stream
         old_handoffs = dict(bot.STEERING_HANDOFFS)
@@ -4258,8 +4335,9 @@ class DiscordBotHelperTests(unittest.IsolatedAsyncioTestCase):
                 log_text = log_path.read_text(encoding="utf-8")
 
             sent = [content for content, _view in message.channel.messages]
-            self.assertEqual(sent, [])
-            self.assertIn("ask_stream_suppressed_after_steering target=thread-1 sent_live=False", log_text)
+            self.assertEqual(sent, ["In progress\n\nchecking live relay"])
+            self.assertIn("ask_stream_done exit=0 target=thread-1 sent_live=True final=False", log_text)
+            self.assertIn("ask_stream_suppressed_after_steering target=thread-1 sent_live=True", log_text)
         finally:
             bot.STEERING_HANDOFFS.clear()
             bot.STEERING_HANDOFFS.update(old_handoffs)
@@ -6626,7 +6704,7 @@ class DiscordBotHelperTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(relay.quiet_notice_sent)
         self.assertTrue(relay.sent_live)
 
-    async def test_discord_ask_relay_suppresses_commentary_before_final(self) -> None:
+    async def test_discord_ask_relay_streams_commentary_before_final_by_default(self) -> None:
         original_send_chunks = bot.send_chunks
         sent: list[str] = []
         try:
@@ -6641,6 +6719,37 @@ class DiscordBotHelperTests(unittest.IsolatedAsyncioTestCase):
                 "thread-1",
                 "project:1",
                 quiet_notice_delay_sec=-1,
+            )
+
+            relay.feed_line("[commentary]")
+            relay.feed_line("checking order")
+            relay.feed_line("[final_answer]")
+            relay.feed_line("done")
+            relay.feed_line("[ready]")
+            await asyncio.to_thread(relay.finish)
+
+            self.assertEqual(sent, ["In progress\n\nchecking order", "done"])
+            self.assertTrue(relay.sent_live)
+            self.assertTrue(relay.saw_final)
+        finally:
+            bot.send_chunks = original_send_chunks
+
+    async def test_discord_ask_relay_can_suppress_commentary_before_final(self) -> None:
+        original_send_chunks = bot.send_chunks
+        sent: list[str] = []
+        try:
+            async def fake_send_chunks(channel, text):
+                sent.append(text)
+
+            bot.send_chunks = fake_send_chunks
+            target = FakeTarget()
+            relay = bot.DiscordAskRelay(
+                asyncio.get_running_loop(),
+                target,
+                "thread-1",
+                "project:1",
+                quiet_notice_delay_sec=-1,
+                send_commentary_blocks=False,
             )
 
             relay.feed_line("[commentary]")
@@ -6711,7 +6820,7 @@ class DiscordBotHelperTests(unittest.IsolatedAsyncioTestCase):
         finally:
             bridge.watch_for_final_answer = original_watch_for_final_answer
 
-    async def test_steering_watch_suppresses_commentary_before_final(self) -> None:
+    async def test_steering_watch_streams_commentary_before_final_by_default(self) -> None:
         original_watch_for_final_answer = bridge.watch_for_final_answer
         try:
             def fake_watch_for_final_answer(
@@ -6760,7 +6869,7 @@ class DiscordBotHelperTests(unittest.IsolatedAsyncioTestCase):
             )
 
             self.assertEqual(exit_code, 0)
-            self.assertEqual(target.messages, [("done", None)])
+            self.assertEqual(target.messages, [("In progress\n\nchecking files", None), ("done", None)])
             self.assertTrue(relay.sent_live)
             self.assertTrue(relay.saw_final)
         finally:

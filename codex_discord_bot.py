@@ -88,6 +88,7 @@ RUNTIME_MUTEX_NAME = (
     + hashlib.sha256(str(SCRIPT_DIR).lower().encode("utf-8")).hexdigest()[:16]
 )
 MIRROR_DB_PATH = SCRIPT_DIR / "discord_mirror.sqlite"
+ATTACHMENT_DOWNLOAD_DIR = SCRIPT_DIR / "discord_attachments"
 THREAD_RUNNERS_LOCK = discord_runner.THREAD_RUNNERS_LOCK
 THREAD_RUNNERS = discord_runner.THREAD_RUNNERS
 STEERING_HANDOFFS: dict[str, float] = {}
@@ -122,7 +123,33 @@ STEERING_PENDING_WATCH_TIMEOUT_SECONDS = 600.0
 STALE_BUSY_STEER_BLOCK_SECONDS = 600.0
 ASK_BUSY_RETRY_ATTEMPTS = 3.0
 ASK_BUSY_RETRY_DELAY_SECONDS = 8.0
+DISCORD_ATTACHMENT_MAX_BYTES_DEFAULT = 25 * 1024 * 1024
+DISCORD_ATTACHMENT_TEXT_INLINE_MAX_BYTES_DEFAULT = 32 * 1024
+DISCORD_ATTACHMENT_TEXT_PREVIEW_CHARS = 12000
 DISCORD_USER_MENTION_RE = re.compile(r"<@!?(\d+)>")
+TEXT_ATTACHMENT_EXTENSIONS = {
+    ".bat",
+    ".cmd",
+    ".css",
+    ".csv",
+    ".html",
+    ".ini",
+    ".js",
+    ".json",
+    ".log",
+    ".md",
+    ".ps1",
+    ".py",
+    ".rs",
+    ".sh",
+    ".toml",
+    ".ts",
+    ".tsx",
+    ".txt",
+    ".xml",
+    ".yaml",
+    ".yml",
+}
 DEFAULT_PLAIN_ASK_CONTEXT_KEYWORDS = (
     "codex,코덱스,bridge,브릿지,discord,디스코드,디코,bot,봇,응답,"
     "message,메시지,메세지,채팅,thread,스레드,queue,큐,steer,스티어,"
@@ -196,6 +223,32 @@ def acquire_runtime_instance_lock(mutex_name: str = RUNTIME_MUTEX_NAME):
 
 def discord_qa_commands_enabled() -> bool:
     return env_flag("DISCORD_ENABLE_QA_COMMANDS", default=False)
+
+
+def discord_stream_commentary_enabled() -> bool:
+    return env_flag("DISCORD_STREAM_COMMENTARY", default=True)
+
+
+def discord_attachments_enabled() -> bool:
+    return env_flag("DISCORD_ENABLE_ATTACHMENTS", default=True)
+
+
+def get_discord_attachment_max_bytes() -> int:
+    return parse_bounded_int_arg(
+        os.environ.get("DISCORD_ATTACHMENT_MAX_BYTES", ""),
+        default=DISCORD_ATTACHMENT_MAX_BYTES_DEFAULT,
+        minimum=1,
+        maximum=100 * 1024 * 1024,
+    )
+
+
+def get_discord_attachment_text_inline_max_bytes() -> int:
+    return parse_bounded_int_arg(
+        os.environ.get("DISCORD_ATTACHMENT_TEXT_INLINE_MAX_BYTES", ""),
+        default=DISCORD_ATTACHMENT_TEXT_INLINE_MAX_BYTES_DEFAULT,
+        minimum=0,
+        maximum=1024 * 1024,
+    )
 
 
 def strip_required_plain_ask_mentions(
@@ -1000,7 +1053,10 @@ class DiscordAskRelay(discord_stream.DiscordAskRelay):
         quiet_notice_delay_sec: float = QUIET_PROGRESS_NOTICE_DELAY_SECONDS,
         suppress_after_steering_since: float | None = None,
         send_timeout_blocks: bool = True,
+        send_commentary_blocks: bool | None = None,
     ) -> None:
+        if send_commentary_blocks is None:
+            send_commentary_blocks = discord_stream_commentary_enabled()
         super().__init__(
             loop,
             channel,
@@ -1009,6 +1065,7 @@ class DiscordAskRelay(discord_stream.DiscordAskRelay):
             quiet_notice_delay_sec=quiet_notice_delay_sec,
             suppress_after_steering_since=suppress_after_steering_since,
             send_timeout_blocks=send_timeout_blocks,
+            send_commentary_blocks=send_commentary_blocks,
             send_chunks_func=send_chunks,
             parse_interactive_notice_func=parse_interactive_notice,
             send_interactive_prompt_func=send_interactive_prompt,
@@ -1723,6 +1780,10 @@ class CodexDiscordBot(discord.Client):
                 log_line(f"ignored_message reason=user_not_allowed user={message.author.id}")
                 return
             content = (message.content or "").strip()
+            target_thread_id = get_mirrored_codex_thread_id(message.channel.id)
+            has_attachments = bool(getattr(message, "attachments", None))
+            if not content and has_attachments:
+                content = "Please inspect the attached Discord file(s)."
             if not content:
                 log_line(
                     f"ignored_message reason=empty_content chat={message.channel.id} "
@@ -1730,7 +1791,6 @@ class CodexDiscordBot(discord.Client):
                 )
                 await maybe_send_empty_content_notice(message)
                 return
-            target_thread_id = get_mirrored_codex_thread_id(message.channel.id)
             if not content.startswith("!"):
                 plain_ask_mention_user_ids = get_bridge_mention_user_ids(self)
                 if plain_ask_mention_user_ids:
@@ -1765,12 +1825,15 @@ class CodexDiscordBot(discord.Client):
                         )
                         return
                     if matched_mention and not content:
-                        log_line(
-                            f"ignored_message reason=mention_only_content chat={message.channel.id} "
-                            f"user={message.author.id}"
-                        )
-                        await send_chunks(message.channel, "Add a prompt after the mention.")
-                        return
+                        if has_attachments:
+                            content = "Please inspect the attached Discord file(s)."
+                        else:
+                            log_line(
+                                f"ignored_message reason=mention_only_content chat={message.channel.id} "
+                                f"user={message.author.id}"
+                            )
+                            await send_chunks(message.channel, "Add a prompt after the mention.")
+                            return
                 else:
                     matched_mention = False
                 if (
@@ -1783,6 +1846,7 @@ class CodexDiscordBot(discord.Client):
                         f"chat={message.channel.id} user={message.author.id}"
                     )
                     return
+                content = await build_prompt_with_discord_attachments(message, content)
             target_source = "mirror" if target_thread_id else "selected"
             log_line(
                 f"message chat={message.channel.id} user={message.author.id} "
@@ -1853,6 +1917,147 @@ def message_has_non_text_payload(message: discord.Message) -> bool:
         or getattr(message, "embeds", None)
         or getattr(message, "stickers", None)
     )
+
+
+def sanitize_attachment_filename(filename: object, index: int) -> str:
+    raw_name = Path(str(filename or f"attachment-{index}")).name
+    safe_name = re.sub(r"[^A-Za-z0-9._ -]+", "_", raw_name).strip(" .")
+    if not safe_name:
+        safe_name = f"attachment-{index}"
+    return safe_name[:120]
+
+
+def get_attachment_size(attachment: object) -> int | None:
+    raw_size = getattr(attachment, "size", None)
+    if isinstance(raw_size, bool) or raw_size is None:
+        return None
+    try:
+        return max(0, int(raw_size))
+    except (TypeError, ValueError):
+        return None
+
+
+def is_text_attachment(filename: str, content_type: object) -> bool:
+    lowered_type = str(content_type or "").lower()
+    if lowered_type.startswith("text/"):
+        return True
+    suffix = Path(filename).suffix.lower()
+    return suffix in TEXT_ATTACHMENT_EXTENSIONS
+
+
+def get_message_attachment_dir(message: object) -> Path:
+    channel_id = getattr(getattr(message, "channel", None), "id", "unknown")
+    message_id = get_discord_message_id(message) or int(time.time() * 1000)
+    return ATTACHMENT_DOWNLOAD_DIR / str(channel_id or "unknown") / str(message_id)
+
+
+async def save_discord_attachment(attachment: object, destination: Path) -> None:
+    save_method = getattr(attachment, "save", None)
+    if callable(save_method):
+        await save_method(destination)
+        return
+    read_method = getattr(attachment, "read", None)
+    if callable(read_method):
+        data = await read_method()
+        destination.write_bytes(bytes(data or b""))
+        return
+    raise RuntimeError("Discord attachment object does not support save/read")
+
+
+def read_attachment_text_preview(path: Path, *, limit_chars: int = DISCORD_ATTACHMENT_TEXT_PREVIEW_CHARS) -> str:
+    text = path.read_bytes().decode("utf-8", errors="replace")
+    if len(text) <= limit_chars:
+        return text
+    return text[:limit_chars].rstrip() + "\n\n[truncated]"
+
+
+async def build_prompt_with_discord_attachments(message: discord.Message, prompt: str) -> str:
+    attachments = list(getattr(message, "attachments", None) or [])
+    if not attachments or not discord_attachments_enabled():
+        return prompt
+
+    max_bytes = get_discord_attachment_max_bytes()
+    text_inline_max_bytes = get_discord_attachment_text_inline_max_bytes()
+    base_prompt = (prompt or "").strip() or "Please inspect the attached Discord file(s)."
+    attachment_dir = get_message_attachment_dir(message)
+    attachment_dir.mkdir(parents=True, exist_ok=True)
+
+    details: list[str] = []
+    previews: list[tuple[str, str]] = []
+    for index, attachment in enumerate(attachments, start=1):
+        filename = sanitize_attachment_filename(getattr(attachment, "filename", None), index)
+        size = get_attachment_size(attachment)
+        content_type = str(getattr(attachment, "content_type", "") or "").strip()
+        if size is not None and size > max_bytes:
+            details.append(
+                f"{index}. {filename} skipped: file is {size} bytes; limit is {max_bytes} bytes."
+            )
+            log_line(
+                f"attachment_skipped reason=size message={get_discord_message_id(message) or '-'} "
+                f"filename={filename[:80]} size={size} limit={max_bytes}"
+            )
+            continue
+
+        destination = attachment_dir / f"{index:02d}-{filename}"
+        try:
+            await save_discord_attachment(attachment, destination)
+        except Exception as exc:
+            details.append(f"{index}. {filename} failed to save: {type(exc).__name__}.")
+            log_line(
+                f"attachment_save_failed message={get_discord_message_id(message) or '-'} "
+                f"filename={filename[:80]} error_type={type(exc).__name__}"
+            )
+            continue
+
+        saved_size = destination.stat().st_size
+        details.append(
+            "\n".join(
+                [
+                    f"{index}. {filename}",
+                    f"   path: {destination}",
+                    f"   content_type: {content_type or '-'}",
+                    f"   size_bytes: {saved_size}",
+                ]
+            )
+        )
+        log_line(
+            f"attachment_saved message={get_discord_message_id(message) or '-'} "
+            f"filename={filename[:80]} size={saved_size} path={destination}"
+        )
+        if (
+            text_inline_max_bytes > 0
+            and saved_size <= text_inline_max_bytes
+            and is_text_attachment(filename, content_type)
+        ):
+            try:
+                previews.append((filename, read_attachment_text_preview(destination)))
+            except OSError as exc:
+                log_line(
+                    f"attachment_preview_failed message={get_discord_message_id(message) or '-'} "
+                    f"filename={filename[:80]} error_type={type(exc).__name__}"
+                )
+
+    if not details:
+        return base_prompt
+
+    lines = [
+        base_prompt,
+        "",
+        "Discord attachments saved locally:",
+        *details,
+    ]
+    if previews:
+        lines.extend(["", "Attachment text previews:"])
+        for filename, preview in previews:
+            lines.extend(
+                [
+                    f"--- {filename} ---",
+                    "```text",
+                    preview,
+                    "```",
+                ]
+            )
+    return "\n".join(lines).strip()
 
 
 def should_send_empty_content_notice(channel_id: int | None, *, now: float | None = None) -> bool:
