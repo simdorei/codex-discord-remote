@@ -1,0 +1,10 @@
+.env
+*.log
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+__pycache__/
+.pytest_cache/
+.codex_discord_bot.lock/
+.codex_discord_bot.runtime.lock
+.codex_discord_bot.restart
