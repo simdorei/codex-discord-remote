@@ -9,3 +9,4 @@ __pycache__/
 .codex_discord_bot.runtime.lock
 .codex_discord_bot.restart
 discord_attachments/
+generated_images/

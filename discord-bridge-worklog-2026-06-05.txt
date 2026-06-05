@@ -1,0 +1,107 @@
+Codex Discord Bridge Worklog - 2026-06-05
+
+요약
+오늘 작업의 중심은 Telegram 시절의 제약을 Discord 브릿지에 끌고 오지 않고,
+Codex 앱 스레드와 Discord 스레드를 1:1로 안정적으로 이어 붙이는 것이었다.
+처음에는 "왜 큐로 들어가느냐", "왜 steering을 물어보느냐", "왜 같은 내용이 두 번 생기느냐"가
+한꺼번에 터졌고, 실제 원인은 기능 하나가 아니라 런타임, scheduled task, 세션 미러링,
+Codex 앱의 동시 입력 처리 방식이 서로 겹친 것이었다.
+
+완료한 일
+1. Telegram 잔재 정리
+- Discord bot 런타임이 codex-telegram 쪽 watchdog을 다시 보지 않도록 scheduled task를 새 repo로 옮겼다.
+- Telegram repo에 남아 있던 Discord bot 잔여 런타임이 다시 살아나는 경로를 차단했다.
+- 현재 Discord bot은 codex-discord-harness repo 기준으로 독립 실행된다.
+
+2. 스레드별 매칭과 미러링
+- Discord project channel / thread와 Codex app thread를 mirror DB로 매칭한다.
+- 같은 Discord thread에서 말하면 해당 Codex thread로 들어가게 했다.
+- 기존에 이미 mirror된 thread가 있는데 새 thread를 또 만드는 문제를 막는 쪽으로 정리했다.
+
+3. global busy 제거 방향
+- 예전 Telegram식 global busy 판단은 Discord 브릿지에 맞지 않았다.
+- 이제 핵심은 "idle인지 아닌지"가 아니라, Codex 앱이 실제로 선택지나 권한 요청을 냈을 때
+  그걸 놓치지 않고 Discord에 보여주는 것이다.
+- 같은 스레드 steering은 바로 들어가고, 서로 다른 Codex 앱 target으로 동시에 쓰는 경우만
+  앱 abort를 피하기 위해 순차화하는 쪽으로 정리했다.
+
+4. 진행 상황 및 최종 답변 미러링
+- Codex session JSONL을 tail해서 앱에 찍히는 commentary/final/user 메시지를 Discord로 미러링한다.
+- Discord에서 보낸 입력은 echo되지 않도록 origin prompt dedupe를 넣었다.
+- "In progress만 오고 최종 답이 안 오는" 문제를 추적해서 고쳤다.
+  원인은 새로 미러링되는 thread의 cursor가 답변 생성 후 파일 끝으로 초기화되는 race였다.
+  ask 실행 전에 session mirror cursor를 먼저 prime하도록 수정했다.
+
+5. 첨부파일 수신
+- Discord attachment를 로컬에 저장한다.
+- 저장 위치는 discord_attachments/<channel_id>/<message_id>/NN-filename 형태다.
+- 작은 text 계열 파일은 preview를 프롬프트에 inline한다.
+- 이미지 파일은 로컬 path, content_type, size_bytes를 Codex 프롬프트에 넣는다.
+- 실제 Discord 이미지 첨부가 저장되고, Codex에서 그 path를 열어 이미지 글씨를 읽는 것까지 확인했다.
+
+검증한 것
+- 전체 유닛 테스트: 192 tests OK
+- py_compile OK
+- git diff --check OK
+- Discord startup channel, project channel, thread probe OK
+- taxlab thread 미러링 OK
+- harness thread 미러링 OK
+- Discord 이미지 첨부 저장 및 로컬 열람 OK
+- 텍스트 첨부 저장 및 preview 생성 smoke QA OK
+
+주요 커밋
+- 4214a5c Serialize cross-thread Codex app turns
+- 6f9b687 Stream Discord progress and attachments
+- 283bf37 Mirror Codex session output to Discord
+- 6e0a5f1 Prime session mirror before delegated asks
+
+개발하면서 힘들었던 점
+가장 힘들었던 건 버그가 한 층에 있지 않았다는 점이다.
+"Discord가 큐로 보낸다"는 현상은 단순히 Discord bot 문제가 아니라,
+Codex 앱의 selected thread, steering 정책, 기존 Telegram repo watchdog, scheduled task,
+그리고 session mirror cursor가 모두 얽혀 있었다.
+
+특히 global busy는 머리로는 익숙한 안전장치처럼 보였지만,
+지금 목표에는 오히려 흐름을 망치는 오래된 습관이었다.
+스레드별 bridge가 목적이면 전체 앱이 바쁜지를 먼저 묻는 게 아니라,
+해당 스레드에 메시지를 넣고, 필요한 순간의 선택지나 승인 요청만 놓치지 않는 게 맞았다.
+
+두 번째로 까다로웠던 부분은 "앱에 보이는 것"과 "Discord에 미러되는 것"이 다를 수 있다는 점이었다.
+Codex 앱은 실제로 답변을 만들었는데 Discord에는 In progress만 남는 상황이 있었고,
+그 답은 session file 안에 있었다. cursor가 답변 뒤로 먼저 잡혀서 미러러가 새 이벤트 없음으로
+판단한 것이었다. 이 문제는 로그를 한 줄씩 맞춰 보지 않았으면 보기 어려웠다.
+
+세 번째는 파일이다.
+Discord attachment를 Codex 앱의 native image attachment로 넣는 것은 아직 아니다.
+현재는 파일을 로컬에 저장하고 그 path를 프롬프트에 넣는 방식이다.
+그래도 실사용 관점에서는 텍스트 파일은 preview로 바로 읽히고, 이미지는 로컬 path를 통해 열람 가능하다.
+오늘 실제 Instagram 스크린샷을 보내서 이미지 글씨를 읽는 데 성공했으니,
+"디코에서 Codex로 파일이 전달된다"는 핵심 경로는 확인됐다.
+
+남은 일
+1. Codex -> Discord 파일 첨부 전송
+- 지금은 Discord -> Codex 수신 쪽이 중심이다.
+- Codex가 만든 파일이나 이미지 path를 감지해서 discord.File로 다시 업로드하는 기능이 다음 단계다.
+
+2. native image attachment 전달
+- 현재 Codex app payload 기준으로 images/local_images는 비어 있고,
+  input_text 안에 path가 들어가는 구조다.
+- 가능하다면 Codex 앱이 native local image로 인식하게 넣는 경로를 찾아볼 필요가 있다.
+
+3. Discord web UI live upload 자동 QA
+- 내부 attachment 경로는 검증됐지만, Chrome 자동화에서 Discord file chooser가 timeout나는 문제가 있었다.
+- 사용자가 직접 파일을 올린 실제 경로로는 성공했으므로 기능 검증은 되었지만,
+  자동화된 live browser QA는 별도 보강이 필요하다.
+
+소회
+오늘 작업은 꽤 험했지만 방향은 맞아졌다.
+처음에는 "왜 아직도 busy가 있냐"는 말이 거칠게 들릴 수 있었지만,
+실제로 코드를 파고 보니 그 말이 정확했다. 지금 필요한 건 중앙 통제식 큐가 아니라
+스레드별로 자연스럽게 이어지는 bridge였다.
+
+이제 Discord는 단순한 알림창이 아니라 Codex app thread의 얇은 외부 입구처럼 동작하기 시작했다.
+아직 파일 왕복과 native attachment는 남아 있지만,
+스레드 매칭, 앱 출력 미러링, 진행 로그, 최종 답변, 이미지 수신까지 이어진 상태라
+기반은 꽤 단단해졌다.
+
+다음 작업은 "파일을 받을 수 있다"에서 "파일을 주고받을 수 있다"로 넘어가는 것이다.

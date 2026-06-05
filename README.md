@@ -108,6 +108,20 @@ wscript.exe .\codex-discord-bot-headless.vbs
 
 The headless launcher writes `discord_launcher.log`. The bot writes `codex_discord_bot.log` unless `CODEX_DISCORD_LOG_PATH` is set.
 
+## Send Attachments Manually
+
+For one-off Codex-to-Discord artifact delivery, use the UTF-8 helper instead of piping Korean text through PowerShell:
+
+```powershell
+py -3 .\send_discord_attachment.py --channel-id 123456789012345678 --content "작업 결과입니다." .\result.txt
+```
+
+For longer Korean captions, put the content in a UTF-8 text file:
+
+```powershell
+py -3 .\send_discord_attachment.py --channel-id 123456789012345678 --content-file .\caption.txt .\image.png
+```
+
 ## Daily Workflow
 
 1. Start Codex Desktop and sign in.
