@@ -92,6 +92,9 @@ THREAD_RUNNERS_LOCK = discord_runner.THREAD_RUNNERS_LOCK
 THREAD_RUNNERS = discord_runner.THREAD_RUNNERS
 STEERING_HANDOFFS: dict[str, float] = {}
 ACTIVE_DISCORD_RELAY_GENERATIONS: dict[str, int] = {}
+CODEX_APP_TURN_CONDITION: asyncio.Condition | None = None
+CODEX_APP_ACTIVE_TARGET_KEY: str | None = None
+CODEX_APP_ACTIVE_TARGET_COUNT = 0
 UI_FALLBACK_LOCK = threading.Lock()
 STREAM_REDIRECT_LOCK = threading.RLock()
 INTERACTIVE_INPUT_TAG = "[choice_required]"
@@ -3856,6 +3859,57 @@ def is_discord_relay_stale(target_thread_id: str | None, generation: int) -> boo
     )
 
 
+def get_codex_app_turn_condition() -> asyncio.Condition:
+    global CODEX_APP_TURN_CONDITION
+    if CODEX_APP_TURN_CONDITION is None:
+        CODEX_APP_TURN_CONDITION = asyncio.Condition()
+    return CODEX_APP_TURN_CONDITION
+
+
+@asynccontextmanager
+async def codex_app_turn_slot(target_thread_id: str | None):
+    global CODEX_APP_ACTIVE_TARGET_COUNT
+    global CODEX_APP_ACTIVE_TARGET_KEY
+
+    key = normalize_runner_key(target_thread_id)
+    condition = get_codex_app_turn_condition()
+    waited = False
+    async with condition:
+        while CODEX_APP_ACTIVE_TARGET_KEY not in {None, key}:
+            if not waited:
+                log_line(
+                    f"codex_app_turn_wait target={target_thread_id or '-'} "
+                    f"active={CODEX_APP_ACTIVE_TARGET_KEY or '-'}"
+                )
+                waited = True
+            await condition.wait()
+        if CODEX_APP_ACTIVE_TARGET_KEY is None:
+            CODEX_APP_ACTIVE_TARGET_KEY = key
+            CODEX_APP_ACTIVE_TARGET_COUNT = 1
+        else:
+            CODEX_APP_ACTIVE_TARGET_COUNT += 1
+        if waited:
+            log_line(
+                f"codex_app_turn_wait_done target={target_thread_id or '-'} "
+                f"count={CODEX_APP_ACTIVE_TARGET_COUNT}"
+            )
+
+    try:
+        yield waited
+    finally:
+        async with condition:
+            if CODEX_APP_ACTIVE_TARGET_KEY == key:
+                CODEX_APP_ACTIVE_TARGET_COUNT = max(0, CODEX_APP_ACTIVE_TARGET_COUNT - 1)
+                if CODEX_APP_ACTIVE_TARGET_COUNT == 0:
+                    CODEX_APP_ACTIVE_TARGET_KEY = None
+                    condition.notify_all()
+            else:
+                log_line(
+                    f"codex_app_turn_slot_mismatch target={target_thread_id or '-'} "
+                    f"active={CODEX_APP_ACTIVE_TARGET_KEY or '-'}"
+                )
+
+
 async def get_thread_runner(target_thread_id: str | None) -> dict[str, object]:
     return await discord_runner.get_thread_runner(
         target_thread_id,
@@ -3950,14 +4004,15 @@ async def run_prompt_and_send(
         target_ref,
         suppress_after_steering_since=started_at,
     )
-    async with channel_typing(channel, context="ask_stream"):
-        exit_code, output = await asyncio.to_thread(
-            run_ask_stream,
-            prompt,
-            relay,
-            force_while_busy=True,
-            target_thread_id=target_thread_id,
-        )
+    async with codex_app_turn_slot(target_thread_id):
+        async with channel_typing(channel, context="ask_stream"):
+            exit_code, output = await asyncio.to_thread(
+                run_ask_stream,
+                prompt,
+                relay,
+                force_while_busy=True,
+                target_thread_id=target_thread_id,
+            )
     log_line(
         f"ask_stream_done exit={exit_code} target={target_thread_id or '-'} "
         f"sent_live={relay.sent_live} final={relay.saw_final} aborted={relay.saw_aborted} "
@@ -4010,14 +4065,15 @@ async def run_prompt_and_send(
                 target_ref,
                 suppress_after_steering_since=started_at,
             )
-            async with channel_typing(channel, context="ask_stream_retry"):
-                exit_code, output = await asyncio.to_thread(
-                    run_ask_stream,
-                    prompt,
-                    retry_relay,
-                    force_while_busy=True,
-                    target_thread_id=target_thread_id,
-                )
+            async with codex_app_turn_slot(target_thread_id):
+                async with channel_typing(channel, context="ask_stream_retry"):
+                    exit_code, output = await asyncio.to_thread(
+                        run_ask_stream,
+                        prompt,
+                        retry_relay,
+                        force_while_busy=True,
+                        target_thread_id=target_thread_id,
+                    )
             relay = retry_relay
             log_line(
                 f"ask_stream_retry_done attempt={retry_index} exit={exit_code} "

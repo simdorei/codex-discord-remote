@@ -4382,6 +4382,135 @@ class DiscordBotHelperTests(unittest.IsolatedAsyncioTestCase):
             bot.resolve_target_ref = original_resolve_target_ref
             bot.run_ask_stream = original_run_ask_stream
 
+    async def test_run_prompt_and_send_waits_for_different_active_app_target(self) -> None:
+        original_resolve_target_ref = bot.resolve_target_ref
+        original_run_ask_stream = bot.run_ask_stream
+        old_condition = bot.CODEX_APP_TURN_CONDITION
+        old_active_key = bot.CODEX_APP_ACTIVE_TARGET_KEY
+        old_active_count = bot.CODEX_APP_ACTIVE_TARGET_COUNT
+        first_started = threading.Event()
+        release_first = threading.Event()
+        second_started = threading.Event()
+        calls: list[str | None] = []
+        try:
+            bot.CODEX_APP_TURN_CONDITION = None
+            bot.CODEX_APP_ACTIVE_TARGET_KEY = None
+            bot.CODEX_APP_ACTIVE_TARGET_COUNT = 0
+            bot.resolve_target_ref = lambda target_thread_id: (target_thread_id, target_thread_id or "selected")
+
+            def fake_run_ask_stream(prompt, relay, *, force_while_busy=False, wait=True, target_thread_id=None):
+                calls.append(target_thread_id)
+                if target_thread_id == "thread-a":
+                    first_started.set()
+                    release_first.wait(2)
+                if target_thread_id == "thread-b":
+                    second_started.set()
+                relay.feed_line("[final_answer]")
+                relay.feed_line(f"done {target_thread_id}")
+                relay.feed_line("[ready]")
+                relay.finish()
+                return 0, f"[final_answer]\ndone {target_thread_id}\n\n[ready]"
+
+            bot.run_ask_stream = fake_run_ask_stream
+
+            with tempfile.TemporaryDirectory() as temp_dir:
+                log_path = Path(temp_dir) / "discord-smoke.log"
+                with EnvPatch("CODEX_DISCORD_LOG_PATH", str(log_path)):
+                    task_a = asyncio.create_task(
+                        bot.run_prompt_and_send(
+                            FakeTarget(),
+                            "first",
+                            ack_sent=True,
+                            target_thread_id="thread-a",
+                        )
+                    )
+                    await asyncio.to_thread(first_started.wait, 1)
+                    task_b = asyncio.create_task(
+                        bot.run_prompt_and_send(
+                            FakeTarget(),
+                            "second",
+                            ack_sent=True,
+                            target_thread_id="thread-b",
+                        )
+                    )
+                    await asyncio.sleep(0.1)
+                    self.assertFalse(second_started.is_set())
+                    release_first.set()
+                    await asyncio.wait_for(asyncio.gather(task_a, task_b), timeout=3)
+                log_text = log_path.read_text(encoding="utf-8")
+
+            self.assertEqual(calls, ["thread-a", "thread-b"])
+            self.assertIn("codex_app_turn_wait target=thread-b active=thread-a", log_text)
+            self.assertIn("codex_app_turn_wait_done target=thread-b", log_text)
+        finally:
+            release_first.set()
+            bot.CODEX_APP_TURN_CONDITION = old_condition
+            bot.CODEX_APP_ACTIVE_TARGET_KEY = old_active_key
+            bot.CODEX_APP_ACTIVE_TARGET_COUNT = old_active_count
+            bot.resolve_target_ref = original_resolve_target_ref
+            bot.run_ask_stream = original_run_ask_stream
+
+    async def test_run_prompt_and_send_allows_same_active_app_target_for_steering(self) -> None:
+        original_resolve_target_ref = bot.resolve_target_ref
+        original_run_ask_stream = bot.run_ask_stream
+        old_condition = bot.CODEX_APP_TURN_CONDITION
+        old_active_key = bot.CODEX_APP_ACTIVE_TARGET_KEY
+        old_active_count = bot.CODEX_APP_ACTIVE_TARGET_COUNT
+        first_started = threading.Event()
+        second_started = threading.Event()
+        release_first = threading.Event()
+        calls: list[str | None] = []
+        try:
+            bot.CODEX_APP_TURN_CONDITION = None
+            bot.CODEX_APP_ACTIVE_TARGET_KEY = None
+            bot.CODEX_APP_ACTIVE_TARGET_COUNT = 0
+            bot.resolve_target_ref = lambda target_thread_id: (target_thread_id, target_thread_id or "selected")
+
+            def fake_run_ask_stream(prompt, relay, *, force_while_busy=False, wait=True, target_thread_id=None):
+                calls.append(target_thread_id)
+                if prompt == "first":
+                    first_started.set()
+                    release_first.wait(2)
+                if prompt == "second":
+                    second_started.set()
+                relay.feed_line("[final_answer]")
+                relay.feed_line(f"done {prompt}")
+                relay.feed_line("[ready]")
+                relay.finish()
+                return 0, f"[final_answer]\ndone {prompt}\n\n[ready]"
+
+            bot.run_ask_stream = fake_run_ask_stream
+            task_a = asyncio.create_task(
+                bot.run_prompt_and_send(
+                    FakeTarget(),
+                    "first",
+                    ack_sent=True,
+                    target_thread_id="thread-a",
+                )
+            )
+            await asyncio.to_thread(first_started.wait, 1)
+            task_b = asyncio.create_task(
+                bot.run_prompt_and_send(
+                    FakeTarget(),
+                    "second",
+                    ack_sent=True,
+                    target_thread_id="thread-a",
+                )
+            )
+            await asyncio.to_thread(second_started.wait, 1)
+            self.assertTrue(second_started.is_set())
+            release_first.set()
+            await asyncio.wait_for(asyncio.gather(task_a, task_b), timeout=3)
+
+            self.assertEqual(calls, ["thread-a", "thread-a"])
+        finally:
+            release_first.set()
+            bot.CODEX_APP_TURN_CONDITION = old_condition
+            bot.CODEX_APP_ACTIVE_TARGET_KEY = old_active_key
+            bot.CODEX_APP_ACTIVE_TARGET_COUNT = old_active_count
+            bot.resolve_target_ref = original_resolve_target_ref
+            bot.run_ask_stream = original_run_ask_stream
+
     async def test_busy_choice_send_falls_back_when_view_send_fails(self) -> None:
         original_build_context_warning = bot.build_context_warning
         try:
