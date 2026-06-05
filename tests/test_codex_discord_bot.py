@@ -4231,6 +4231,45 @@ class DiscordBotHelperTests(unittest.IsolatedAsyncioTestCase):
             bot.resolve_target_ref = original_resolve_target_ref
             bot.run_ask_stream = original_run_ask_stream
 
+    async def test_ask_stream_delegates_final_to_session_mirror_for_mapped_thread(self) -> None:
+        original_resolve_target_ref = bot.resolve_target_ref
+        original_run_ask_stream = bot.run_ask_stream
+        original_get_mirrored = bot.get_mirrored_codex_thread_id
+        try:
+            bot.resolve_target_ref = lambda target_thread_id: (target_thread_id, "taxlab:1")
+            bot.get_mirrored_codex_thread_id = lambda channel_id: "thread-1" if channel_id == 222 else None
+
+            def fake_run_ask_stream(prompt, relay, *, force_while_busy=False, wait=True, target_thread_id=None):
+                relay.feed_line("[commentary]")
+                relay.feed_line("working")
+                relay.feed_line("[final_answer]")
+                relay.feed_line("done")
+                relay.feed_line("[ready]")
+                relay.finish()
+                return 0, "[commentary]\nworking\n\n[final_answer]\ndone\n\n[ready]"
+
+            bot.run_ask_stream = fake_run_ask_stream
+
+            with tempfile.TemporaryDirectory() as temp_dir:
+                log_path = Path(temp_dir) / "discord-smoke.log"
+                channel = FakeTarget(channel_id=222)
+                with EnvPatch("CODEX_DISCORD_LOG_PATH", str(log_path)):
+                    with EnvPatch("DISCORD_SESSION_MIRROR", "1"):
+                        await bot.run_prompt_and_send(
+                            channel,
+                            "please run",
+                            ack_sent=True,
+                            target_thread_id="thread-1",
+                        )
+                log_text = log_path.read_text(encoding="utf-8")
+
+            self.assertEqual(channel.messages, [])
+            self.assertIn("ask_stream_delegated_to_session_mirror target=thread-1", log_text)
+        finally:
+            bot.resolve_target_ref = original_resolve_target_ref
+            bot.run_ask_stream = original_run_ask_stream
+            bot.get_mirrored_codex_thread_id = original_get_mirrored
+
     async def test_ask_stream_live_without_final_sends_fallback(self) -> None:
         original_resolve_target_ref = bot.resolve_target_ref
         original_run_ask_stream = bot.run_ask_stream
@@ -6919,6 +6958,140 @@ class DiscordBotHelperTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("[final_answer]", stdout.getvalue())
         finally:
             bridge.read_new_session_events = original_read_new_session_events
+
+    def test_collect_session_mirror_items_skips_discord_echo_and_duplicate_commentary(self) -> None:
+        old_prompts = dict(bot.RECENT_DISCORD_ORIGIN_PROMPTS)
+        try:
+            bot.RECENT_DISCORD_ORIGIN_PROMPTS.clear()
+            bot.mark_recent_discord_origin_prompt("thread-1", "from discord")
+            events = [
+                {
+                    "timestamp": "1",
+                    "type": "event_msg",
+                    "payload": {"type": "user_message", "message": "from discord"},
+                },
+                {
+                    "timestamp": "2",
+                    "type": "response_item",
+                    "payload": {
+                        "type": "message",
+                        "role": "user",
+                        "content": [{"type": "input_text", "text": "from app"}],
+                    },
+                },
+                {
+                    "timestamp": "3",
+                    "type": "event_msg",
+                    "payload": {"type": "agent_message", "phase": "commentary", "message": "working"},
+                },
+                {
+                    "timestamp": "4",
+                    "type": "response_item",
+                    "payload": {
+                        "type": "message",
+                        "role": "assistant",
+                        "phase": "commentary",
+                        "content": [{"type": "output_text", "text": "working"}],
+                    },
+                },
+                {
+                    "timestamp": "5",
+                    "type": "response_item",
+                    "payload": {
+                        "type": "message",
+                        "role": "assistant",
+                        "phase": "final_answer",
+                        "content": [{"type": "output_text", "text": "done"}],
+                    },
+                },
+            ]
+
+            items = bot.collect_session_mirror_items(
+                "thread-1",
+                events,
+                seen_agent_messages={},
+                seen_user_messages={},
+            )
+
+            self.assertEqual([item["kind"] for item in items], ["user", "commentary", "final"])
+            self.assertEqual([item["text"] for item in items], ["from app", "working", "done"])
+        finally:
+            bot.RECENT_DISCORD_ORIGIN_PROMPTS.clear()
+            bot.RECENT_DISCORD_ORIGIN_PROMPTS.update(old_prompts)
+
+    async def test_mirror_session_target_sends_new_session_items_and_updates_cursor(self) -> None:
+        original_choose_thread = bridge.choose_thread
+        original_read_new_session_events = bridge.read_new_session_events
+        original_get_cursor = bot.get_or_init_session_mirror_cursor
+        original_update_cursor = bot.update_session_mirror_cursor
+        original_claim_event = bot.claim_session_mirror_event
+        original_resolve_target_ref = bot.resolve_target_ref
+        try:
+            updates: list[tuple[str, str, int]] = []
+            claims: list[str] = []
+            target_channel = FakeTarget(channel_id=333)
+            with tempfile.TemporaryDirectory() as temp_dir:
+                session_path = Path(temp_dir) / "session.jsonl"
+                session_path.write_text("", encoding="utf-8")
+                bridge.choose_thread = lambda thread_id, cwd=None: SimpleNamespace(rollout_path=str(session_path))
+
+                def fake_read_new_session_events(path, cursor):
+                    return [
+                        {
+                            "timestamp": "1",
+                            "type": "response_item",
+                            "payload": {
+                                "type": "message",
+                                "role": "assistant",
+                                "phase": "final_answer",
+                                "content": [{"type": "output_text", "text": "mirrored done"}],
+                            },
+                        }
+                    ], 42
+
+                bridge.read_new_session_events = fake_read_new_session_events
+                bot.get_or_init_session_mirror_cursor = lambda codex_thread_id, rollout_path, initial_cursor: 0
+                bot.update_session_mirror_cursor = lambda codex_thread_id, rollout_path, cursor: updates.append(
+                    (codex_thread_id, rollout_path, cursor)
+                )
+
+                def fake_claim_event(event_digest, codex_thread_id):
+                    claims.append(event_digest)
+                    return True
+
+                bot.claim_session_mirror_event = fake_claim_event
+                bot.resolve_target_ref = lambda target_thread_id: (target_thread_id, "project:1")
+                client = bot.CodexDiscordBot(
+                    allowed_channel_ids=set(),
+                    allowed_user_ids=set(),
+                    startup_channel_id=None,
+                    guild_id=None,
+                    enable_prefix_commands=True,
+                )
+
+                async def fake_resolve_channel(discord_thread_id):
+                    return target_channel
+
+                client.resolve_session_mirror_channel = fake_resolve_channel
+                await client.mirror_session_target(
+                    {
+                        "codex_thread_id": "thread-1",
+                        "discord_thread_id": 333,
+                        "discord_channel_id": 222,
+                    }
+                )
+                await client.close()
+
+            self.assertEqual(target_channel.messages, [("mirrored done", None)])
+            self.assertEqual(len(claims), 1)
+            self.assertEqual(updates, [("thread-1", str(session_path), 42)])
+        finally:
+            bridge.choose_thread = original_choose_thread
+            bridge.read_new_session_events = original_read_new_session_events
+            bot.get_or_init_session_mirror_cursor = original_get_cursor
+            bot.update_session_mirror_cursor = original_update_cursor
+            bot.claim_session_mirror_event = original_claim_event
+            bot.resolve_target_ref = original_resolve_target_ref
 
 
 if __name__ == "__main__":

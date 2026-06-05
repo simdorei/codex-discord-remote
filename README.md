@@ -77,6 +77,7 @@ DISCORD_ENABLE_MESSAGE_CONTENT=1
 DISCORD_PLAIN_ASK_MENTION_USER_IDS=your_bridge_bot_user_id
 DISCORD_PLAIN_ASK_CONTEXT_FALLBACK=0
 DISCORD_STREAM_COMMENTARY=1
+DISCORD_SESSION_MIRROR=1
 DISCORD_ENABLE_ATTACHMENTS=1
 ```
 
@@ -88,6 +89,7 @@ Notes:
 - In mapped mirror threads, plain messages route to that mapped Codex thread.
 - Messages authored by other bots are ignored unless they explicitly mention the Codex bridge user.
 - `DISCORD_STREAM_COMMENTARY=1` mirrors Codex in-progress commentary to Discord. Set it to `0` if you only want final answers.
+- `DISCORD_SESSION_MIRROR=1` tails mapped Codex session files and mirrors new app-side user text, commentary, final answers, aborts, and approval/input prompts into the mapped Discord thread.
 - `DISCORD_ENABLE_ATTACHMENTS=1` saves Discord attachments under `discord_attachments\` and includes the local paths in the Codex prompt. Small text-like attachments are also inlined as previews.
 
 ## Run
@@ -163,6 +165,7 @@ Live Discord QA should verify:
 - `!` commands and slash commands are unaffected by mention gating
 - ordinary asks are submitted without idle/busy preflight or auto-queueing
 - Codex in-progress commentary appears in Discord before the final answer
+- app-side Codex text is mirrored into the mapped Discord thread without replaying old history on startup
 - Discord image/text attachments are saved locally and referenced in the Codex prompt
 - app-exposed approval/input menus are mirrored when they appear after delivery
 - different mapped target threads route to the correct Codex threads

@@ -93,6 +93,7 @@ THREAD_RUNNERS_LOCK = discord_runner.THREAD_RUNNERS_LOCK
 THREAD_RUNNERS = discord_runner.THREAD_RUNNERS
 STEERING_HANDOFFS: dict[str, float] = {}
 ACTIVE_DISCORD_RELAY_GENERATIONS: dict[str, int] = {}
+RECENT_DISCORD_ORIGIN_PROMPTS: dict[str, float] = {}
 CODEX_APP_TURN_CONDITION: asyncio.Condition | None = None
 CODEX_APP_ACTIVE_TARGET_KEY: str | None = None
 CODEX_APP_ACTIVE_TARGET_COUNT = 0
@@ -123,6 +124,11 @@ STEERING_PENDING_WATCH_TIMEOUT_SECONDS = 600.0
 STALE_BUSY_STEER_BLOCK_SECONDS = 600.0
 ASK_BUSY_RETRY_ATTEMPTS = 3.0
 ASK_BUSY_RETRY_DELAY_SECONDS = 8.0
+SESSION_MIRROR_POLL_DEFAULT_SECONDS = 1.0
+SESSION_MIRROR_TARGET_LIMIT = 100
+SESSION_MIRROR_EVENT_RETENTION_SECONDS = 7 * 86400.0
+SESSION_MIRROR_RECENT_TEXT_TTL_SECONDS = 600.0
+DISCORD_ORIGIN_PROMPT_TTL_SECONDS = 900.0
 DISCORD_ATTACHMENT_MAX_BYTES_DEFAULT = 25 * 1024 * 1024
 DISCORD_ATTACHMENT_TEXT_INLINE_MAX_BYTES_DEFAULT = 32 * 1024
 DISCORD_ATTACHMENT_TEXT_PREVIEW_CHARS = 12000
@@ -227,6 +233,19 @@ def discord_qa_commands_enabled() -> bool:
 
 def discord_stream_commentary_enabled() -> bool:
     return env_flag("DISCORD_STREAM_COMMENTARY", default=True)
+
+
+def discord_session_mirror_enabled() -> bool:
+    return env_flag("DISCORD_SESSION_MIRROR", default=True)
+
+
+def get_discord_session_mirror_poll_seconds() -> float:
+    return parse_bounded_float_env(
+        "DISCORD_SESSION_MIRROR_POLL_SECONDS",
+        default=SESSION_MIRROR_POLL_DEFAULT_SECONDS,
+        minimum=0.25,
+        maximum=60.0,
+    )
 
 
 def discord_attachments_enabled() -> bool:
@@ -529,6 +548,48 @@ def normalize_interactive_text_reply(state: str, answer: str) -> str | None:
 
 def init_mirror_db() -> None:
     discord_store.init_mirror_db(MIRROR_DB_PATH)
+
+
+def get_session_mirror_targets(limit: int = SESSION_MIRROR_TARGET_LIMIT) -> list[dict[str, object]]:
+    return discord_store.get_session_mirror_targets(MIRROR_DB_PATH, limit=limit)
+
+
+def get_or_init_session_mirror_cursor(
+    codex_thread_id: str,
+    rollout_path: str,
+    initial_cursor: int,
+) -> int:
+    return discord_store.get_or_init_session_mirror_cursor(
+        MIRROR_DB_PATH,
+        codex_thread_id,
+        rollout_path,
+        initial_cursor,
+    )
+
+
+def update_session_mirror_cursor(codex_thread_id: str, rollout_path: str, cursor: int) -> None:
+    discord_store.update_session_mirror_cursor(
+        MIRROR_DB_PATH,
+        codex_thread_id,
+        rollout_path,
+        cursor,
+    )
+
+
+def claim_session_mirror_event(event_digest: str, codex_thread_id: str) -> bool:
+    return discord_store.claim_session_mirror_event(
+        MIRROR_DB_PATH,
+        event_digest,
+        codex_thread_id,
+    )
+
+
+def cleanup_session_mirror_events(now: float | None = None) -> int:
+    return discord_store.cleanup_session_mirror_events(
+        MIRROR_DB_PATH,
+        retention_seconds=SESSION_MIRROR_EVENT_RETENTION_SECONDS,
+        now=now,
+    )
 
 
 def cleanup_expired_busy_choices(now: float | None = None) -> int:
@@ -1054,6 +1115,7 @@ class DiscordAskRelay(discord_stream.DiscordAskRelay):
         suppress_after_steering_since: float | None = None,
         send_timeout_blocks: bool = True,
         send_commentary_blocks: bool | None = None,
+        send_final_blocks: bool = True,
     ) -> None:
         if send_commentary_blocks is None:
             send_commentary_blocks = discord_stream_commentary_enabled()
@@ -1066,6 +1128,7 @@ class DiscordAskRelay(discord_stream.DiscordAskRelay):
             suppress_after_steering_since=suppress_after_steering_since,
             send_timeout_blocks=send_timeout_blocks,
             send_commentary_blocks=send_commentary_blocks,
+            send_final_blocks=send_final_blocks,
             send_chunks_func=send_chunks,
             parse_interactive_notice_func=parse_interactive_notice,
             send_interactive_prompt_func=send_interactive_prompt,
@@ -1373,9 +1436,14 @@ class CodexDiscordBot(discord.Client):
             minimum=0.0,
             maximum=600.0,
         )
+        self.session_mirror_poll_seconds = get_discord_session_mirror_poll_seconds()
         self._history_poll_task: asyncio.Task[None] | None = None
         self._history_poll_primed_channels: set[int] = set()
         self._history_poll_last_at = "-"
+        self._session_mirror_task: asyncio.Task[None] | None = None
+        self._session_mirror_last_at = "-"
+        self._session_mirror_seen_agent_messages: dict[str, dict[str, float]] = {}
+        self._session_mirror_seen_user_messages: dict[str, dict[str, float]] = {}
         self._history_poll_bootstrap_after = datetime.now(timezone.utc) - timedelta(
             seconds=self.history_poll_bootstrap_lookback_seconds
         )
@@ -1592,6 +1660,147 @@ class CodexDiscordBot(discord.Client):
         await self.process_discord_message(message, source="history_poll")
         mark_discord_message_processed(self, message)
 
+    async def start_session_mirroring(self) -> None:
+        if not discord_session_mirror_enabled():
+            log_line("session_mirror_disabled")
+            return
+        if self._session_mirror_task and not self._session_mirror_task.done():
+            log_line("session_mirror_already_running")
+            return
+        self._session_mirror_task = asyncio.create_task(self.session_mirror_loop())
+        log_line(f"session_mirror_started seconds={self.session_mirror_poll_seconds:g}")
+
+    async def session_mirror_loop(self) -> None:
+        while not self.is_closed():
+            try:
+                self._session_mirror_last_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+                targets = await asyncio.to_thread(get_session_mirror_targets, SESSION_MIRROR_TARGET_LIMIT)
+                for target in targets:
+                    await self.mirror_session_target(target)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                log_line("session_mirror_cycle_failed\n" + traceback.format_exc())
+            await asyncio.sleep(self.session_mirror_poll_seconds)
+
+    async def resolve_session_mirror_channel(self, discord_thread_id: int) -> object | None:
+        channel, source = self.get_cached_channel_or_thread(int(discord_thread_id))
+        if channel is None:
+            try:
+                channel = await self.fetch_channel(int(discord_thread_id))
+                source = "fetch"
+            except Exception as exc:
+                log_line(
+                    f"session_mirror_channel_failed channel={discord_thread_id} "
+                    f"error_type={type(exc).__name__}"
+                )
+                return None
+        if not isinstance(channel, discord.abc.Messageable):
+            log_line(
+                f"session_mirror_channel_skipped channel={discord_thread_id} "
+                f"source={source} reason=not_messageable"
+            )
+            return None
+        return channel
+
+    def get_session_mirror_seen_agent_messages(self, codex_thread_id: str) -> dict[str, float]:
+        return self._session_mirror_seen_agent_messages.setdefault(codex_thread_id, {})
+
+    def get_session_mirror_seen_user_messages(self, codex_thread_id: str) -> dict[str, float]:
+        return self._session_mirror_seen_user_messages.setdefault(codex_thread_id, {})
+
+    async def send_session_mirror_item(
+        self,
+        channel: discord.abc.Messageable,
+        item: dict[str, str],
+        *,
+        target_thread_id: str,
+        target_ref: str,
+    ) -> None:
+        kind = item.get("kind") or ""
+        text = item.get("text") or ""
+        if kind == "interactive":
+            state, prompt, options = parse_interactive_notice(text)
+            if state:
+                await send_interactive_prompt(
+                    channel,
+                    target_thread_id,
+                    target_ref,
+                    state,
+                    prompt,
+                    options,
+                )
+                return
+        await send_chunks(channel, format_session_mirror_text(item))
+
+    async def mirror_session_target(self, target: dict[str, object]) -> None:
+        codex_thread_id = str(target.get("codex_thread_id") or "")
+        if not codex_thread_id:
+            return
+        try:
+            discord_thread_id = int(target.get("discord_thread_id") or 0)
+        except (TypeError, ValueError):
+            return
+        if not discord_thread_id:
+            return
+
+        try:
+            codex_thread = await asyncio.to_thread(bridge.choose_thread, codex_thread_id, None)
+        except Exception as exc:
+            log_line(
+                f"session_mirror_thread_unavailable target={codex_thread_id} "
+                f"error_type={type(exc).__name__}"
+            )
+            return
+        session_path = Path(codex_thread.rollout_path)
+        if not session_path.exists():
+            return
+
+        rollout_path = str(session_path)
+        initial_cursor = session_path.stat().st_size
+        cursor = await asyncio.to_thread(
+            get_or_init_session_mirror_cursor,
+            codex_thread_id,
+            rollout_path,
+            initial_cursor,
+        )
+        events, next_cursor = await asyncio.to_thread(bridge.read_new_session_events, session_path, cursor)
+        if not events:
+            return
+
+        items = collect_session_mirror_items(
+            codex_thread_id,
+            events,
+            seen_agent_messages=self.get_session_mirror_seen_agent_messages(codex_thread_id),
+            seen_user_messages=self.get_session_mirror_seen_user_messages(codex_thread_id),
+        )
+        if not items:
+            await asyncio.to_thread(update_session_mirror_cursor, codex_thread_id, rollout_path, next_cursor)
+            return
+
+        channel = await self.resolve_session_mirror_channel(discord_thread_id)
+        if channel is None:
+            return
+        _resolved_thread_id, target_ref = resolve_target_ref(codex_thread_id)
+        sent_count = 0
+        for item in items:
+            digest = item.get("digest") or ""
+            if digest and not await asyncio.to_thread(claim_session_mirror_event, digest, codex_thread_id):
+                continue
+            await self.send_session_mirror_item(
+                channel,  # type: ignore[arg-type]
+                item,
+                target_thread_id=codex_thread_id,
+                target_ref=target_ref or codex_thread_id,
+            )
+            sent_count += 1
+        await asyncio.to_thread(update_session_mirror_cursor, codex_thread_id, rollout_path, next_cursor)
+        if sent_count:
+            log_line(
+                f"session_mirror_sent target={codex_thread_id} channel={discord_thread_id} "
+                f"events={len(events)} items={sent_count} cursor={next_cursor}"
+            )
+
     async def on_ready(self) -> None:
         log_line(f"ready user_id={format_discord_user_id_for_log(self.user)} guilds={len(self.guilds)}")
         try:
@@ -1612,6 +1821,12 @@ class CodexDiscordBot(discord.Client):
                 log_line(f"processed_message_cleanup_deleted count={deleted_processed_messages}")
         except Exception:
             log_line("processed_message_cleanup_failed\n" + traceback.format_exc())
+        try:
+            deleted_session_mirror_events = await asyncio.to_thread(cleanup_session_mirror_events)
+            if deleted_session_mirror_events:
+                log_line(f"session_mirror_event_cleanup_deleted count={deleted_session_mirror_events}")
+        except Exception:
+            log_line("session_mirror_event_cleanup_failed\n" + traceback.format_exc())
         if hasattr(self, "cleanup_stale_busy_choice_components"):
             try:
                 await self.cleanup_stale_busy_choice_components()
@@ -1620,6 +1835,8 @@ class CodexDiscordBot(discord.Client):
         await self.log_startup_diagnostics()
         if hasattr(self, "start_history_polling"):
             await self.start_history_polling()
+        if hasattr(self, "start_session_mirroring"):
+            await self.start_session_mirroring()
         if env_flag("DISCORD_STARTUP_NOTIFY", default=False) and self.startup_channel_id:
             channel = self.get_channel(self.startup_channel_id)
             if channel is None:
@@ -2058,6 +2275,278 @@ async def build_prompt_with_discord_attachments(message: discord.Message, prompt
                 ]
             )
     return "\n".join(lines).strip()
+
+
+def make_text_digest(*parts: object) -> str:
+    digest = hashlib.sha256()
+    for part in parts:
+        digest.update(str(part or "").encode("utf-8", errors="replace"))
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
+def make_discord_origin_prompt_digest(target_thread_id: str | None, prompt: str) -> str:
+    return make_text_digest("discord-origin", normalize_runner_key(target_thread_id), str(prompt or "").strip())
+
+
+def cleanup_recent_discord_origin_prompts(now: float | None = None) -> None:
+    current = time.monotonic() if now is None else now
+    expired = [
+        digest
+        for digest, seen_at in RECENT_DISCORD_ORIGIN_PROMPTS.items()
+        if current - seen_at > DISCORD_ORIGIN_PROMPT_TTL_SECONDS
+    ]
+    for digest in expired:
+        RECENT_DISCORD_ORIGIN_PROMPTS.pop(digest, None)
+
+
+def mark_recent_discord_origin_prompt(target_thread_id: str | None, prompt: str) -> None:
+    cleanup_recent_discord_origin_prompts()
+    RECENT_DISCORD_ORIGIN_PROMPTS[make_discord_origin_prompt_digest(target_thread_id, prompt)] = time.monotonic()
+
+
+def should_skip_discord_origin_prompt(target_thread_id: str | None, text: str) -> bool:
+    cleanup_recent_discord_origin_prompts()
+    digest = make_discord_origin_prompt_digest(target_thread_id, text)
+    if digest not in RECENT_DISCORD_ORIGIN_PROMPTS:
+        return False
+    RECENT_DISCORD_ORIGIN_PROMPTS.pop(digest, None)
+    return True
+
+
+def remember_recent_session_text(seen: dict[str, float], text: str) -> None:
+    current = time.monotonic()
+    expired = [
+        digest
+        for digest, seen_at in seen.items()
+        if current - seen_at > SESSION_MIRROR_RECENT_TEXT_TTL_SECONDS
+    ]
+    for digest in expired:
+        seen.pop(digest, None)
+    seen[make_text_digest(text.strip())] = current
+
+
+def has_recent_session_text(seen: dict[str, float], text: str) -> bool:
+    current = time.monotonic()
+    digest = make_text_digest(text.strip())
+    seen_at = seen.get(digest)
+    if seen_at is None:
+        return False
+    if current - seen_at > SESSION_MIRROR_RECENT_TEXT_TTL_SECONDS:
+        seen.pop(digest, None)
+        return False
+    return True
+
+
+def make_session_mirror_event_digest(
+    codex_thread_id: str,
+    event: dict,
+    kind: str,
+    role: str,
+    phase: str,
+    text: str,
+) -> str:
+    payload = event.get("payload") or {}
+    payload_type = payload.get("type") if isinstance(payload, dict) else ""
+    return make_text_digest(
+        "session-mirror",
+        codex_thread_id,
+        event.get("timestamp") or "",
+        event.get("type") or "",
+        payload_type or "",
+        kind,
+        role,
+        phase,
+        text,
+    )
+
+
+def make_session_mirror_item(
+    codex_thread_id: str,
+    event: dict,
+    *,
+    kind: str,
+    role: str,
+    phase: str,
+    text: str,
+) -> dict[str, str]:
+    clean_text = str(text or "").strip()
+    return {
+        "digest": make_session_mirror_event_digest(codex_thread_id, event, kind, role, phase, clean_text),
+        "kind": kind,
+        "role": role,
+        "phase": phase,
+        "text": clean_text,
+    }
+
+
+def collect_session_mirror_items(
+    codex_thread_id: str,
+    events: list[dict],
+    *,
+    seen_agent_messages: dict[str, float],
+    seen_user_messages: dict[str, float],
+) -> list[dict[str, str]]:
+    items: list[dict[str, str]] = []
+    for event in events:
+        payload = event.get("payload") or {}
+        if not isinstance(payload, dict):
+            continue
+
+        event_type = str(event.get("type") or "")
+        payload_type = str(payload.get("type") or "")
+        if event_type == "event_msg":
+            if payload_type == "agent_message":
+                phase = str(payload.get("phase") or "commentary")
+                if phase == "final_answer":
+                    continue
+                text = str(payload.get("message") or "").strip()
+                if not text:
+                    continue
+                remember_recent_session_text(seen_agent_messages, text)
+                items.append(
+                    make_session_mirror_item(
+                        codex_thread_id,
+                        event,
+                        kind="commentary",
+                        role="assistant",
+                        phase=phase,
+                        text=text,
+                    )
+                )
+                continue
+            if payload_type == "user_message":
+                text = str(payload.get("message") or "").strip()
+                if not text:
+                    continue
+                if should_skip_discord_origin_prompt(codex_thread_id, text):
+                    remember_recent_session_text(seen_user_messages, text)
+                    continue
+                if has_recent_session_text(seen_user_messages, text):
+                    continue
+                remember_recent_session_text(seen_user_messages, text)
+                items.append(
+                    make_session_mirror_item(
+                        codex_thread_id,
+                        event,
+                        kind="user",
+                        role="user",
+                        phase="input",
+                        text=text,
+                    )
+                )
+                continue
+            if payload_type in {"turn_aborted", "task_aborted", "task_cancelled"}:
+                items.append(
+                    make_session_mirror_item(
+                        codex_thread_id,
+                        event,
+                        kind="aborted",
+                        role="assistant",
+                        phase=payload_type,
+                        text="Aborted.",
+                    )
+                )
+                continue
+            continue
+
+        if event_type != "response_item":
+            continue
+
+        if payload_type == "function_call":
+            notice = bridge.build_interactive_notice_from_function_call(payload)
+            if notice:
+                items.append(
+                    make_session_mirror_item(
+                        codex_thread_id,
+                        event,
+                        kind="interactive",
+                        role="assistant",
+                        phase="interactive",
+                        text=notice,
+                    )
+                )
+            continue
+
+        if payload_type == "function_call_output":
+            output_text = str(payload.get("output") or "").strip()
+            if output_text and "rejected by user" in output_text.lower():
+                items.append(
+                    make_session_mirror_item(
+                        codex_thread_id,
+                        event,
+                        kind="commentary",
+                        role="assistant",
+                        phase="approval_rejected",
+                        text="[approval_rejected]\nCommand approval was rejected by user.",
+                    )
+                )
+            continue
+
+        if payload_type != "message":
+            continue
+        text = bridge.extract_message_text(payload)
+        if not text:
+            continue
+        role = str(payload.get("role") or "?")
+        phase = str(payload.get("phase") or "")
+        if role == "assistant" and phase == "commentary":
+            if has_recent_session_text(seen_agent_messages, text):
+                continue
+            remember_recent_session_text(seen_agent_messages, text)
+            items.append(
+                make_session_mirror_item(
+                    codex_thread_id,
+                    event,
+                    kind="commentary",
+                    role=role,
+                    phase=phase,
+                    text=text,
+                )
+            )
+            continue
+        if role == "assistant" and phase == "final_answer":
+            items.append(
+                make_session_mirror_item(
+                    codex_thread_id,
+                    event,
+                    kind="final",
+                    role=role,
+                    phase=phase,
+                    text=text,
+                )
+            )
+            continue
+        if role == "user":
+            if should_skip_discord_origin_prompt(codex_thread_id, text):
+                remember_recent_session_text(seen_user_messages, text)
+                continue
+            if has_recent_session_text(seen_user_messages, text):
+                continue
+            remember_recent_session_text(seen_user_messages, text)
+            items.append(
+                make_session_mirror_item(
+                    codex_thread_id,
+                    event,
+                    kind="user",
+                    role=role,
+                    phase=phase or "input",
+                    text=text,
+                )
+            )
+    return items
+
+
+def format_session_mirror_text(item: dict[str, str]) -> str:
+    kind = item.get("kind") or ""
+    text = item.get("text") or ""
+    if kind == "commentary":
+        return f"In progress\n\n{text}"
+    if kind == "user":
+        return f"Codex app user\n\n{text}"
+    if kind == "aborted":
+        return "Aborted."
+    return text
 
 
 def should_send_empty_content_notice(channel_id: int | None, *, now: float | None = None) -> bool:
@@ -4189,6 +4678,16 @@ async def thread_runner_loop(target_thread_id: str | None) -> None:
     )
 
 
+def should_delegate_output_to_session_mirror(channel: object, target_thread_id: str | None) -> bool:
+    if not discord_session_mirror_enabled() or not target_thread_id:
+        return False
+    channel_id = getattr(channel, "id", None)
+    try:
+        return get_mirrored_codex_thread_id(channel_id) == target_thread_id
+    except Exception:
+        return False
+
+
 async def run_prompt_and_send(
     channel: discord.abc.Messageable,
     prompt: str,
@@ -4202,12 +4701,15 @@ async def run_prompt_and_send(
         await channel.send(build_ask_start_message(prompt, queued=queued))
     started_at = time.monotonic()
     target_thread_id, target_ref = resolve_target_ref(target_thread_id)
+    delegate_to_session_mirror = should_delegate_output_to_session_mirror(channel, target_thread_id)
     relay = DiscordAskRelay(
         asyncio.get_running_loop(),
         channel,
         target_thread_id,
         target_ref,
         suppress_after_steering_since=started_at,
+        send_commentary_blocks=False if delegate_to_session_mirror else None,
+        send_final_blocks=not delegate_to_session_mirror,
     )
     async with codex_app_turn_slot(target_thread_id):
         async with channel_typing(channel, context="ask_stream"):
@@ -4269,6 +4771,8 @@ async def run_prompt_and_send(
                 target_thread_id,
                 target_ref,
                 suppress_after_steering_since=started_at,
+                send_commentary_blocks=False if delegate_to_session_mirror else None,
+                send_final_blocks=not delegate_to_session_mirror,
             )
             async with codex_app_turn_slot(target_thread_id):
                 async with channel_typing(channel, context="ask_stream_retry"):
@@ -4319,6 +4823,12 @@ async def run_prompt_and_send(
             )
             await send_chunks(channel, build_codex_app_busy_retry_message(target_ref, retry_attempts))
             return
+    if delegate_to_session_mirror and exit_code == 0 and not relay.saw_aborted and not relay.saw_timeout:
+        log_line(
+            f"ask_stream_delegated_to_session_mirror target={target_thread_id or '-'} "
+            f"sent_live={relay.sent_live} final={relay.saw_final} output_len={format_log_text_len(output)}"
+        )
+        return
     if (
         exit_code == 0
         and not relay.saw_final
@@ -4588,6 +5098,7 @@ async def handle_plain_ask(
         )
         return
 
+    mark_recent_discord_origin_prompt(target_thread_id, prompt)
     await run_prompt_flow(
         message.channel,
         prompt,

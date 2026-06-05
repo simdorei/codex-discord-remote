@@ -67,6 +67,25 @@ def init_mirror_db(db_path: Path) -> None:
             )
             """
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS codex_session_mirror_offsets (
+                codex_thread_id TEXT PRIMARY KEY,
+                rollout_path TEXT NOT NULL,
+                cursor INTEGER NOT NULL,
+                updated_at REAL NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS codex_session_mirror_events (
+                event_digest TEXT PRIMARY KEY,
+                codex_thread_id TEXT NOT NULL,
+                created_at REAL NOT NULL
+            )
+            """
+        )
 
 
 def cleanup_expired_busy_choices(db_path: Path, now: float | None = None) -> int:
@@ -409,3 +428,121 @@ def get_persistent_component_claim_counts(db_path: Path, now: float | None = Non
             (current,),
         ).fetchone()
     return int(active[0] if active else 0), int(stale[0] if stale else 0)
+
+
+def get_session_mirror_targets(db_path: Path, *, limit: int = 100) -> list[dict[str, object]]:
+    init_mirror_db(db_path)
+    with sqlite3.connect(db_path) as conn:
+        rows = conn.execute(
+            """
+            SELECT codex_thread_id, thread_title, discord_channel_id, discord_thread_id
+            FROM mirror_threads
+            ORDER BY updated_at DESC
+            LIMIT ?
+            """,
+            (int(limit),),
+        ).fetchall()
+    return [
+        {
+            "codex_thread_id": str(row[0] or ""),
+            "thread_title": str(row[1] or ""),
+            "discord_channel_id": int(row[2]),
+            "discord_thread_id": int(row[3]),
+        }
+        for row in rows
+        if row[0] and row[3]
+    ]
+
+
+def get_or_init_session_mirror_cursor(
+    db_path: Path,
+    codex_thread_id: str,
+    rollout_path: str,
+    initial_cursor: int,
+    *,
+    now: float | None = None,
+) -> int:
+    current = time.time() if now is None else now
+    init_mirror_db(db_path)
+    with sqlite3.connect(db_path) as conn:
+        row = conn.execute(
+            """
+            SELECT rollout_path, cursor
+            FROM codex_session_mirror_offsets
+            WHERE codex_thread_id = ?
+            """,
+            (str(codex_thread_id),),
+        ).fetchone()
+        if row and str(row[0] or "") == str(rollout_path):
+            return int(row[1] or 0)
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO codex_session_mirror_offsets (
+                codex_thread_id, rollout_path, cursor, updated_at
+            )
+            VALUES (?, ?, ?, ?)
+            """,
+            (str(codex_thread_id), str(rollout_path), int(initial_cursor), current),
+        )
+    return int(initial_cursor)
+
+
+def update_session_mirror_cursor(
+    db_path: Path,
+    codex_thread_id: str,
+    rollout_path: str,
+    cursor: int,
+    *,
+    now: float | None = None,
+) -> None:
+    current = time.time() if now is None else now
+    init_mirror_db(db_path)
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO codex_session_mirror_offsets (
+                codex_thread_id, rollout_path, cursor, updated_at
+            )
+            VALUES (?, ?, ?, ?)
+            """,
+            (str(codex_thread_id), str(rollout_path), int(cursor), current),
+        )
+
+
+def claim_session_mirror_event(
+    db_path: Path,
+    event_digest: str,
+    codex_thread_id: str,
+    *,
+    now: float | None = None,
+) -> bool:
+    current = time.time() if now is None else now
+    init_mirror_db(db_path)
+    with sqlite3.connect(db_path) as conn:
+        result = conn.execute(
+            """
+            INSERT OR IGNORE INTO codex_session_mirror_events (
+                event_digest, codex_thread_id, created_at
+            )
+            VALUES (?, ?, ?)
+            """,
+            (str(event_digest), str(codex_thread_id), current),
+        )
+        return result.rowcount == 1
+
+
+def cleanup_session_mirror_events(
+    db_path: Path,
+    *,
+    retention_seconds: float,
+    now: float | None = None,
+) -> int:
+    current = time.time() if now is None else now
+    cutoff = current - retention_seconds
+    init_mirror_db(db_path)
+    with sqlite3.connect(db_path) as conn:
+        result = conn.execute(
+            "DELETE FROM codex_session_mirror_events WHERE created_at < ?",
+            (cutoff,),
+        )
+        return result.rowcount
