@@ -94,9 +94,6 @@ THREAD_RUNNERS = discord_runner.THREAD_RUNNERS
 STEERING_HANDOFFS: dict[str, float] = {}
 ACTIVE_DISCORD_RELAY_GENERATIONS: dict[str, int] = {}
 RECENT_DISCORD_ORIGIN_PROMPTS: dict[str, float] = {}
-CODEX_APP_TURN_CONDITION: asyncio.Condition | None = None
-CODEX_APP_ACTIVE_TARGET_KEY: str | None = None
-CODEX_APP_ACTIVE_TARGET_COUNT = 0
 UI_FALLBACK_LOCK = threading.Lock()
 STREAM_REDIRECT_LOCK = threading.RLock()
 INTERACTIVE_INPUT_TAG = "[choice_required]"
@@ -4679,57 +4676,6 @@ def is_discord_relay_stale(target_thread_id: str | None, generation: int) -> boo
     )
 
 
-def get_codex_app_turn_condition() -> asyncio.Condition:
-    global CODEX_APP_TURN_CONDITION
-    if CODEX_APP_TURN_CONDITION is None:
-        CODEX_APP_TURN_CONDITION = asyncio.Condition()
-    return CODEX_APP_TURN_CONDITION
-
-
-@asynccontextmanager
-async def codex_app_turn_slot(target_thread_id: str | None):
-    global CODEX_APP_ACTIVE_TARGET_COUNT
-    global CODEX_APP_ACTIVE_TARGET_KEY
-
-    key = normalize_runner_key(target_thread_id)
-    condition = get_codex_app_turn_condition()
-    waited = False
-    async with condition:
-        while CODEX_APP_ACTIVE_TARGET_KEY not in {None, key}:
-            if not waited:
-                log_line(
-                    f"codex_app_turn_wait target={target_thread_id or '-'} "
-                    f"active={CODEX_APP_ACTIVE_TARGET_KEY or '-'}"
-                )
-                waited = True
-            await condition.wait()
-        if CODEX_APP_ACTIVE_TARGET_KEY is None:
-            CODEX_APP_ACTIVE_TARGET_KEY = key
-            CODEX_APP_ACTIVE_TARGET_COUNT = 1
-        else:
-            CODEX_APP_ACTIVE_TARGET_COUNT += 1
-        if waited:
-            log_line(
-                f"codex_app_turn_wait_done target={target_thread_id or '-'} "
-                f"count={CODEX_APP_ACTIVE_TARGET_COUNT}"
-            )
-
-    try:
-        yield waited
-    finally:
-        async with condition:
-            if CODEX_APP_ACTIVE_TARGET_KEY == key:
-                CODEX_APP_ACTIVE_TARGET_COUNT = max(0, CODEX_APP_ACTIVE_TARGET_COUNT - 1)
-                if CODEX_APP_ACTIVE_TARGET_COUNT == 0:
-                    CODEX_APP_ACTIVE_TARGET_KEY = None
-                    condition.notify_all()
-            else:
-                log_line(
-                    f"codex_app_turn_slot_mismatch target={target_thread_id or '-'} "
-                    f"active={CODEX_APP_ACTIVE_TARGET_KEY or '-'}"
-                )
-
-
 async def get_thread_runner(target_thread_id: str | None) -> dict[str, object]:
     return await discord_runner.get_thread_runner(
         target_thread_id,
@@ -4814,54 +4760,6 @@ def should_delegate_output_to_session_mirror(channel: object, target_thread_id: 
         return False
 
 
-async def run_delayed_prompt_via_watch(
-    channel: discord.abc.Messageable,
-    prompt: str,
-    *,
-    target_thread_id: str | None,
-    delegate_to_session_mirror: bool,
-) -> None:
-    async with channel_typing(channel, context="ask_after_cross_session_wait"):
-        steering_result = await asyncio.to_thread(
-            run_steering_prompt,
-            prompt,
-            target_thread_id,
-        )
-    exit_code, output = steering_result
-    log_line(
-        f"ask_after_cross_session_wait_done exit={exit_code} target={target_thread_id or '-'} "
-        f"pending={getattr(steering_result, 'delivery_pending', False)} "
-        f"output_len={format_log_text_len(output)}"
-    )
-    if is_selected_thread_busy_error(exit_code, output):
-        if await send_codex_app_menu_if_available(
-            channel,
-            target_thread_id,
-            output,
-            reason="ask_after_cross_session_wait_busy",
-        ):
-            return
-        _resolved_thread_id, target_ref = resolve_target_ref(target_thread_id)
-        await send_chunks(channel, build_codex_app_steering_not_accepted_message(target_ref))
-        return
-    if exit_code != 0:
-        await send_chunks(channel, f"Ask failed (exit {exit_code})\n\n{output or '(no output)'}")
-        return
-
-    mark_steering_handoff(target_thread_id)
-    streamed = await stream_steering_prompt_result_to_channel(
-        channel,
-        steering_result,
-        target_thread_id,
-        label="Ask",
-        send_commentary_blocks=False if delegate_to_session_mirror else None,
-        send_final_blocks=not delegate_to_session_mirror,
-    )
-    if streamed:
-        return
-    await send_chunks(channel, f"Ask sent\n\n{output or '(no output)'}")
-
-
 async def run_prompt_and_send(
     channel: discord.abc.Messageable,
     prompt: str,
@@ -4877,33 +4775,24 @@ async def run_prompt_and_send(
     delegate_to_session_mirror = should_delegate_output_to_session_mirror(channel, target_thread_id)
     if delegate_to_session_mirror:
         await asyncio.to_thread(prime_session_mirror_cursor_for_target, target_thread_id)
-    async with codex_app_turn_slot(target_thread_id) as waited_for_app_turn:
-        if waited_for_app_turn:
-            await run_delayed_prompt_via_watch(
-                channel,
-                prompt,
-                target_thread_id=target_thread_id,
-                delegate_to_session_mirror=delegate_to_session_mirror,
-            )
-            return
-        started_at = time.monotonic()
-        relay = DiscordAskRelay(
-            asyncio.get_running_loop(),
-            channel,
-            target_thread_id,
-            target_ref,
-            suppress_after_steering_since=started_at,
-            send_commentary_blocks=False if delegate_to_session_mirror else None,
-            send_final_blocks=not delegate_to_session_mirror,
+    started_at = time.monotonic()
+    relay = DiscordAskRelay(
+        asyncio.get_running_loop(),
+        channel,
+        target_thread_id,
+        target_ref,
+        suppress_after_steering_since=started_at,
+        send_commentary_blocks=False if delegate_to_session_mirror else None,
+        send_final_blocks=not delegate_to_session_mirror,
+    )
+    async with channel_typing(channel, context="ask_stream"):
+        exit_code, output = await asyncio.to_thread(
+            run_ask_stream,
+            prompt,
+            relay,
+            force_while_busy=True,
+            target_thread_id=target_thread_id,
         )
-        async with channel_typing(channel, context="ask_stream"):
-            exit_code, output = await asyncio.to_thread(
-                run_ask_stream,
-                prompt,
-                relay,
-                force_while_busy=True,
-                target_thread_id=target_thread_id,
-            )
     log_line(
         f"ask_stream_done exit={exit_code} target={target_thread_id or '-'} "
         f"sent_live={relay.sent_live} final={relay.saw_final} aborted={relay.saw_aborted} "
@@ -4958,15 +4847,14 @@ async def run_prompt_and_send(
                 send_commentary_blocks=False if delegate_to_session_mirror else None,
                 send_final_blocks=not delegate_to_session_mirror,
             )
-            async with codex_app_turn_slot(target_thread_id):
-                async with channel_typing(channel, context="ask_stream_retry"):
-                    exit_code, output = await asyncio.to_thread(
-                        run_ask_stream,
-                        prompt,
-                        retry_relay,
-                        force_while_busy=True,
-                        target_thread_id=target_thread_id,
-                    )
+            async with channel_typing(channel, context="ask_stream_retry"):
+                exit_code, output = await asyncio.to_thread(
+                    run_ask_stream,
+                    prompt,
+                    retry_relay,
+                    force_while_busy=True,
+                    target_thread_id=target_thread_id,
+                )
             relay = retry_relay
             log_line(
                 f"ask_stream_retry_done attempt={retry_index} exit={exit_code} "
