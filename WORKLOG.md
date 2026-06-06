@@ -1,5 +1,39 @@
 # Worklog
 
+## 2026-06-06 Refactor Slices And Live QA
+
+Goal: refactor the Discord harness in small slices, with local tests and Discord web live QA after each slice.
+
+### Completed Slices
+
+- Slice 1: moved ask stream delivery classification and log formatting into `codex_discord_delivery.py`.
+- Slice 2: introduced `ThreadAskJob` in `codex_discord_runner.py` so per-target runner queues use an explicit job contract.
+- Slice 3: moved prompt-flow dispatch into the runner contract while keeping bot-level compatibility wrappers.
+- Slice 4: moved session mirror item collection, echo suppression, and mirror text formatting into `codex_discord_session_mirror.py`.
+- Slice 5: introduced `RuntimeState` in `codex_discord_runtime.py` for per-target steering handoff and relay generation state.
+- Slice 6: added dependency injection seams to `handle_plain_ask` and converted representative tests away from global monkey patching.
+
+### Validation Completed
+
+Run from `C:\repos\simdorei\codex-discord-harness`:
+
+```powershell
+py -3 -m unittest tests.test_codex_discord_bot
+py -3 -m py_compile codex_desktop_bridge.py codex_windows_harness.py codex_discord_bot.py codex_discord_delivery.py codex_discord_prompt_guard.py codex_discord_runner.py codex_discord_runtime.py codex_discord_session_mirror.py tests\test_codex_discord_bot.py
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\codex-discord-watchdog.ps1 -DryRun
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 -SkipDependencies -SkipEnvFile -DryRun
+git diff --check
+```
+
+Observed latest results:
+
+- `218 tests OK`
+- `py_compile OK`
+- watchdog dry-run: `running`
+- install dry-run: would configure Codex Desktop `followUpQueueMode = "steer"`
+- Discord web QA replies received: `SLICE1_LOG_OK`, `SLICE2_JOB_OK`, `SLICE3_FLOW_OK`, `SLICE5_RUNTIME_OK`, `SLICE6_DI_OK`
+- Session mirror web QA confirmed current Codex app progress messages appearing in the mapped Discord mirror channel after Slice 4.
+
 ## 2026-06-05 Discord Harness Stabilization
 
 Goal: keep this repository as a Discord-only Windows-local Codex frontend harness.

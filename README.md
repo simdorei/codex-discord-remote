@@ -163,11 +163,23 @@ Steering is handled by Codex Desktop, not by a Discord-side global busy gate.
 - Different mapped target threads are submitted independently, so one Discord thread does not block another at the bridge layer.
 - The default install configures `followUpQueueMode = "steer"` for Codex Desktop.
 
+## Internal Boundaries
+
+The bot entrypoint stays in `codex_discord_bot.py`, but risky bridge behavior is split into small contract modules:
+
+- `codex_discord_delivery.py`: ask stream result classification and stable log formatting.
+- `codex_discord_runner.py`: per-target runner queues, `ThreadAskJob`, and prompt-flow dispatch.
+- `codex_discord_session_mirror.py`: Codex session events to Discord mirror items, echo suppression, and mirror text formatting.
+- `codex_discord_prompt_guard.py`: recent Codex app prompt detection used to avoid duplicate Discord delivery.
+- `codex_discord_runtime.py`: steering handoff and relay generation state scoped by target thread.
+
+When changing behavior, prefer adding or extending a focused contract test around these modules before touching the Discord event handlers.
+
 ## Validation
 
 ```powershell
 py -3 -m unittest tests.test_codex_discord_bot
-py -3 -m py_compile codex_desktop_bridge.py codex_windows_harness.py codex_discord_bot.py tests\test_codex_discord_bot.py
+py -3 -m py_compile codex_desktop_bridge.py codex_windows_harness.py codex_discord_bot.py codex_discord_delivery.py codex_discord_prompt_guard.py codex_discord_runner.py codex_discord_runtime.py codex_discord_session_mirror.py tests\test_codex_discord_bot.py
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\codex-discord-watchdog.ps1 -DryRun
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\codex-discord-tray.ps1 -Once
 git diff --check

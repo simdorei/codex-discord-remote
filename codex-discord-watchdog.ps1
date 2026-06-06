@@ -108,7 +108,7 @@ function Test-BotProcessAlive {
     $runtimePid = Get-RuntimePid
     if ($runtimePid -ne $null) {
         $runtimeProcess = Get-CimInstance Win32_Process -Filter "ProcessId=$runtimePid" -ErrorAction SilentlyContinue
-        if (Test-IsBotProcess $runtimeProcess) {
+        if (Test-IsBotProcess $runtimeProcess -AllowRuntimeLockFallback) {
             return $true
         } elseif ($runtimeProcess -ne $null) {
             Write-LauncherLog "runtime_lock_pid_mismatch pid=$runtimePid name=$($runtimeProcess.Name)"

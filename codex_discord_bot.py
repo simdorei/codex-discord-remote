@@ -27,13 +27,16 @@ import codex_discord_bridge_process as bridge_process
 import codex_discord_busy as discord_busy
 import codex_discord_commands as discord_commands
 import codex_discord_context as discord_context
+import codex_discord_delivery as discord_delivery
 import codex_discord_diagnostics as discord_diagnostics
 import codex_discord_help as discord_help
 import codex_discord_interactive as discord_interactive
 import codex_discord_mirror_status as discord_mirror_status
+import codex_discord_prompt_guard as prompt_guard
 import codex_discord_projects as discord_projects
 import codex_discord_runner as discord_runner
 import codex_discord_runtime as discord_runtime
+import codex_discord_session_mirror as session_mirror
 import codex_discord_steering as discord_steering
 import codex_discord_store as discord_store
 import codex_discord_stream as discord_stream
@@ -93,6 +96,7 @@ THREAD_RUNNERS_LOCK = discord_runner.THREAD_RUNNERS_LOCK
 THREAD_RUNNERS = discord_runner.THREAD_RUNNERS
 STEERING_HANDOFFS: dict[str, float] = {}
 ACTIVE_DISCORD_RELAY_GENERATIONS: dict[str, int] = {}
+RUNTIME_STATE = discord_runtime.RuntimeState(STEERING_HANDOFFS, ACTIVE_DISCORD_RELAY_GENERATIONS)
 RECENT_DISCORD_ORIGIN_PROMPTS: dict[str, float] = {}
 UI_FALLBACK_LOCK = threading.Lock()
 STREAM_REDIRECT_LOCK = threading.RLock()
@@ -2323,66 +2327,60 @@ async def build_prompt_with_discord_attachments(message: discord.Message, prompt
 
 
 def make_text_digest(*parts: object) -> str:
-    digest = hashlib.sha256()
-    for part in parts:
-        digest.update(str(part or "").encode("utf-8", errors="replace"))
-        digest.update(b"\0")
-    return digest.hexdigest()
+    return session_mirror.make_text_digest(*parts)
 
 
 def make_discord_origin_prompt_digest(target_thread_id: str | None, prompt: str) -> str:
-    return make_text_digest("discord-origin", normalize_runner_key(target_thread_id), str(prompt or "").strip())
+    return session_mirror.make_discord_origin_prompt_digest(normalize_runner_key(target_thread_id), prompt)
+
+
+def make_session_mirror_collector() -> session_mirror.SessionMirrorCollector:
+    return session_mirror.SessionMirrorCollector(
+        origin_prompts=RECENT_DISCORD_ORIGIN_PROMPTS,
+        origin_prompt_ttl_seconds=DISCORD_ORIGIN_PROMPT_TTL_SECONDS,
+        recent_text_ttl_seconds=SESSION_MIRROR_RECENT_TEXT_TTL_SECONDS,
+        normalize_target_key_func=normalize_runner_key,
+        extract_message_text_func=bridge.extract_message_text,
+        make_interactive_notice_func=bridge.build_interactive_notice_from_function_call,
+    )
 
 
 def cleanup_recent_discord_origin_prompts(now: float | None = None) -> None:
-    current = time.monotonic() if now is None else now
-    expired = [
-        digest
-        for digest, seen_at in RECENT_DISCORD_ORIGIN_PROMPTS.items()
-        if current - seen_at > DISCORD_ORIGIN_PROMPT_TTL_SECONDS
-    ]
-    for digest in expired:
-        RECENT_DISCORD_ORIGIN_PROMPTS.pop(digest, None)
+    make_session_mirror_collector().cleanup_recent_discord_origin_prompts(now=now)
 
 
 def mark_recent_discord_origin_prompt(target_thread_id: str | None, prompt: str) -> None:
-    cleanup_recent_discord_origin_prompts()
-    RECENT_DISCORD_ORIGIN_PROMPTS[make_discord_origin_prompt_digest(target_thread_id, prompt)] = time.monotonic()
+    make_session_mirror_collector().mark_recent_discord_origin_prompt(target_thread_id, prompt)
 
 
 def should_skip_discord_origin_prompt(target_thread_id: str | None, text: str) -> bool:
-    cleanup_recent_discord_origin_prompts()
-    digest = make_discord_origin_prompt_digest(target_thread_id, text)
-    if digest not in RECENT_DISCORD_ORIGIN_PROMPTS:
-        return False
-    RECENT_DISCORD_ORIGIN_PROMPTS.pop(digest, None)
-    return True
+    return make_session_mirror_collector().should_skip_discord_origin_prompt(target_thread_id, text)
+
+
+def make_recent_app_prompt_guard() -> prompt_guard.RecentAppPromptGuard:
+    return prompt_guard.RecentAppPromptGuard(
+        config=prompt_guard.RecentAppPromptGuardConfig(
+            max_age_seconds=RECENT_CODEX_APP_PROMPT_DEDUPE_SECONDS,
+            scan_bytes=RECENT_CODEX_APP_PROMPT_SCAN_BYTES,
+            recheck_seconds=get_recent_codex_app_prompt_dedupe_recheck_seconds(),
+        ),
+        choose_thread_func=bridge.choose_thread,
+        normalize_prompt_text_func=bridge.normalize_prompt_text,
+        extract_message_text_func=bridge.extract_message_text,
+        log_func=log_line,
+        format_log_text_len_func=format_log_text_len,
+    )
 
 
 def parse_session_event_timestamp(event: dict) -> datetime | None:
-    raw_timestamp = str(event.get("timestamp") or "").strip()
-    if not raw_timestamp:
-        return None
-    try:
-        parsed = datetime.fromisoformat(raw_timestamp.replace("Z", "+00:00"))
-    except ValueError:
-        return None
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
-    return parsed.astimezone(timezone.utc)
+    return prompt_guard.parse_session_event_timestamp(event)
 
 
 def extract_user_text_from_session_event(event: dict) -> str:
-    payload = event.get("payload") or {}
-    if not isinstance(payload, dict):
-        return ""
-    if event.get("type") == "event_msg" and payload.get("type") == "user_message":
-        return str(payload.get("message") or "").strip()
-    if event.get("type") != "response_item":
-        return ""
-    if payload.get("type") != "message" or payload.get("role") != "user":
-        return ""
-    return bridge.extract_message_text(payload).strip()
+    return prompt_guard.extract_user_text_from_session_event(
+        event,
+        extract_message_text_func=bridge.extract_message_text,
+    )
 
 
 def iter_recent_session_tail_events(
@@ -2390,25 +2388,7 @@ def iter_recent_session_tail_events(
     *,
     scan_bytes: int = RECENT_CODEX_APP_PROMPT_SCAN_BYTES,
 ) -> list[dict]:
-    if not session_path.exists():
-        return []
-    size = session_path.stat().st_size
-    start = max(0, size - max(1, scan_bytes))
-    with session_path.open("rb") as handle:
-        handle.seek(start)
-        data = handle.read()
-    lines = data.decode("utf-8", errors="replace").splitlines()
-    if start > 0 and lines:
-        lines = lines[1:]
-    events: list[dict] = []
-    for line in lines:
-        try:
-            event = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(event, dict):
-            events.append(event)
-    return events
+    return prompt_guard.iter_recent_session_tail_events(session_path, scan_bytes=scan_bytes)
 
 
 def has_recent_codex_app_user_prompt(
@@ -2417,34 +2397,20 @@ def has_recent_codex_app_user_prompt(
     *,
     max_age_seconds: float = RECENT_CODEX_APP_PROMPT_DEDUPE_SECONDS,
 ) -> bool:
-    normalized_prompt = bridge.normalize_prompt_text(prompt)
-    if not normalized_prompt:
-        return False
-    try:
-        thread = bridge.choose_thread(target_thread_id, None)
-    except Exception:
-        log_line(
-            f"recent_codex_prompt_dedupe_unavailable target={target_thread_id or '-'} "
-            "reason=choose_thread_failed\n" + traceback.format_exc()
-        )
-        return False
-    session_path = Path(thread.rollout_path)
-    now = datetime.now(timezone.utc)
-    for event in reversed(iter_recent_session_tail_events(session_path)):
-        user_text = extract_user_text_from_session_event(event)
-        if not user_text:
-            continue
-        timestamp = parse_session_event_timestamp(event)
-        if timestamp is None:
-            continue
-        age_seconds = (now - timestamp).total_seconds()
-        if age_seconds < 0:
-            age_seconds = 0
-        if age_seconds > max_age_seconds:
-            return False
-        if bridge.normalize_prompt_text(user_text) == normalized_prompt:
-            return True
-    return False
+    config = prompt_guard.RecentAppPromptGuardConfig(
+        max_age_seconds=max_age_seconds,
+        scan_bytes=RECENT_CODEX_APP_PROMPT_SCAN_BYTES,
+        recheck_seconds=get_recent_codex_app_prompt_dedupe_recheck_seconds(),
+    )
+    guard = prompt_guard.RecentAppPromptGuard(
+        config=config,
+        choose_thread_func=bridge.choose_thread,
+        normalize_prompt_text_func=bridge.normalize_prompt_text,
+        extract_message_text_func=bridge.extract_message_text,
+        log_func=log_line,
+        format_log_text_len_func=format_log_text_len,
+    )
+    return guard.has_recent_user_prompt(target_thread_id, prompt)
 
 
 async def wait_for_recent_codex_app_user_prompt(
@@ -2453,46 +2419,20 @@ async def wait_for_recent_codex_app_user_prompt(
     *,
     sleep_func=None,
 ) -> bool:
-    if not target_thread_id:
-        return False
-    if await asyncio.to_thread(has_recent_codex_app_user_prompt, target_thread_id, prompt):
-        return True
-    delay_seconds = get_recent_codex_app_prompt_dedupe_recheck_seconds()
-    if delay_seconds <= 0:
-        return False
-    sleep = sleep_func or asyncio.sleep
-    await sleep(delay_seconds)
-    if await asyncio.to_thread(has_recent_codex_app_user_prompt, target_thread_id, prompt):
-        log_line(
-            f"recent_codex_prompt_dedupe_recheck_hit target={target_thread_id} "
-            f"delay={delay_seconds:g} prompt_len={format_log_text_len(prompt)}"
-        )
-        return True
-    return False
+    return await make_recent_app_prompt_guard().wait_for_user_prompt(
+        target_thread_id,
+        prompt,
+        to_thread_func=asyncio.to_thread,
+        sleep_func=sleep_func or asyncio.sleep,
+    )
 
 
 def remember_recent_session_text(seen: dict[str, float], text: str) -> None:
-    current = time.monotonic()
-    expired = [
-        digest
-        for digest, seen_at in seen.items()
-        if current - seen_at > SESSION_MIRROR_RECENT_TEXT_TTL_SECONDS
-    ]
-    for digest in expired:
-        seen.pop(digest, None)
-    seen[make_text_digest(text.strip())] = current
+    make_session_mirror_collector().remember_recent_session_text(seen, text)
 
 
 def has_recent_session_text(seen: dict[str, float], text: str) -> bool:
-    current = time.monotonic()
-    digest = make_text_digest(text.strip())
-    seen_at = seen.get(digest)
-    if seen_at is None:
-        return False
-    if current - seen_at > SESSION_MIRROR_RECENT_TEXT_TTL_SECONDS:
-        seen.pop(digest, None)
-        return False
-    return True
+    return make_session_mirror_collector().has_recent_session_text(seen, text)
 
 
 def make_session_mirror_event_digest(
@@ -2503,19 +2443,7 @@ def make_session_mirror_event_digest(
     phase: str,
     text: str,
 ) -> str:
-    payload = event.get("payload") or {}
-    payload_type = payload.get("type") if isinstance(payload, dict) else ""
-    return make_text_digest(
-        "session-mirror",
-        codex_thread_id,
-        event.get("timestamp") or "",
-        event.get("type") or "",
-        payload_type or "",
-        kind,
-        role,
-        phase,
-        text,
-    )
+    return session_mirror.make_session_mirror_event_digest(codex_thread_id, event, kind, role, phase, text)
 
 
 def make_session_mirror_item(
@@ -2527,14 +2455,14 @@ def make_session_mirror_item(
     phase: str,
     text: str,
 ) -> dict[str, str]:
-    clean_text = str(text or "").strip()
-    return {
-        "digest": make_session_mirror_event_digest(codex_thread_id, event, kind, role, phase, clean_text),
-        "kind": kind,
-        "role": role,
-        "phase": phase,
-        "text": clean_text,
-    }
+    return session_mirror.make_session_mirror_item(
+        codex_thread_id,
+        event,
+        kind=kind,
+        role=role,
+        phase=phase,
+        text=text,
+    )
 
 
 def collect_session_mirror_items(
@@ -2544,166 +2472,16 @@ def collect_session_mirror_items(
     seen_agent_messages: dict[str, float],
     seen_user_messages: dict[str, float],
 ) -> list[dict[str, str]]:
-    items: list[dict[str, str]] = []
-    for event in events:
-        payload = event.get("payload") or {}
-        if not isinstance(payload, dict):
-            continue
-
-        event_type = str(event.get("type") or "")
-        payload_type = str(payload.get("type") or "")
-        if event_type == "event_msg":
-            if payload_type == "agent_message":
-                phase = str(payload.get("phase") or "commentary")
-                if phase == "final_answer":
-                    continue
-                text = str(payload.get("message") or "").strip()
-                if not text:
-                    continue
-                remember_recent_session_text(seen_agent_messages, text)
-                items.append(
-                    make_session_mirror_item(
-                        codex_thread_id,
-                        event,
-                        kind="commentary",
-                        role="assistant",
-                        phase=phase,
-                        text=text,
-                    )
-                )
-                continue
-            if payload_type == "user_message":
-                text = str(payload.get("message") or "").strip()
-                if not text:
-                    continue
-                if should_skip_discord_origin_prompt(codex_thread_id, text):
-                    remember_recent_session_text(seen_user_messages, text)
-                    continue
-                if has_recent_session_text(seen_user_messages, text):
-                    continue
-                remember_recent_session_text(seen_user_messages, text)
-                items.append(
-                    make_session_mirror_item(
-                        codex_thread_id,
-                        event,
-                        kind="user",
-                        role="user",
-                        phase="input",
-                        text=text,
-                    )
-                )
-                continue
-            if payload_type in {"turn_aborted", "task_aborted", "task_cancelled"}:
-                items.append(
-                    make_session_mirror_item(
-                        codex_thread_id,
-                        event,
-                        kind="aborted",
-                        role="assistant",
-                        phase=payload_type,
-                        text="Aborted.",
-                    )
-                )
-                continue
-            continue
-
-        if event_type != "response_item":
-            continue
-
-        if payload_type == "function_call":
-            notice = bridge.build_interactive_notice_from_function_call(payload)
-            if notice:
-                items.append(
-                    make_session_mirror_item(
-                        codex_thread_id,
-                        event,
-                        kind="interactive",
-                        role="assistant",
-                        phase="interactive",
-                        text=notice,
-                    )
-                )
-            continue
-
-        if payload_type == "function_call_output":
-            output_text = str(payload.get("output") or "").strip()
-            if output_text and "rejected by user" in output_text.lower():
-                items.append(
-                    make_session_mirror_item(
-                        codex_thread_id,
-                        event,
-                        kind="commentary",
-                        role="assistant",
-                        phase="approval_rejected",
-                        text="[approval_rejected]\nCommand approval was rejected by user.",
-                    )
-                )
-            continue
-
-        if payload_type != "message":
-            continue
-        text = bridge.extract_message_text(payload)
-        if not text:
-            continue
-        role = str(payload.get("role") or "?")
-        phase = str(payload.get("phase") or "")
-        if role == "assistant" and phase == "commentary":
-            if has_recent_session_text(seen_agent_messages, text):
-                continue
-            remember_recent_session_text(seen_agent_messages, text)
-            items.append(
-                make_session_mirror_item(
-                    codex_thread_id,
-                    event,
-                    kind="commentary",
-                    role=role,
-                    phase=phase,
-                    text=text,
-                )
-            )
-            continue
-        if role == "assistant" and phase == "final_answer":
-            items.append(
-                make_session_mirror_item(
-                    codex_thread_id,
-                    event,
-                    kind="final",
-                    role=role,
-                    phase=phase,
-                    text=text,
-                )
-            )
-            continue
-        if role == "user":
-            if should_skip_discord_origin_prompt(codex_thread_id, text):
-                remember_recent_session_text(seen_user_messages, text)
-                continue
-            if has_recent_session_text(seen_user_messages, text):
-                continue
-            remember_recent_session_text(seen_user_messages, text)
-            items.append(
-                make_session_mirror_item(
-                    codex_thread_id,
-                    event,
-                    kind="user",
-                    role=role,
-                    phase=phase or "input",
-                    text=text,
-                )
-            )
-    return items
+    return make_session_mirror_collector().collect_session_mirror_items(
+        codex_thread_id,
+        events,
+        seen_agent_messages=seen_agent_messages,
+        seen_user_messages=seen_user_messages,
+    )
 
 
 def format_session_mirror_text(item: dict[str, str]) -> str:
-    kind = item.get("kind") or ""
-    text = item.get("text") or ""
-    if kind == "commentary":
-        return f"In progress\n\n{text}"
-    if kind == "user":
-        return f"Codex app user\n\n{text}"
-    if kind == "aborted":
-        return "Aborted."
-    return text
+    return session_mirror.format_session_mirror_text(item)
 
 
 def should_send_empty_content_notice(channel_id: int | None, *, now: float | None = None) -> bool:
@@ -4684,30 +4462,19 @@ def normalize_runner_key(target_thread_id: str | None) -> str:
 
 
 def mark_steering_handoff(target_thread_id: str | None) -> float:
-    return discord_runtime.mark_steering_handoff(STEERING_HANDOFFS, target_thread_id)
+    return RUNTIME_STATE.mark_steering_handoff(target_thread_id)
 
 
 def had_steering_handoff_since(target_thread_id: str | None, started_at: float) -> bool:
-    return discord_runtime.had_steering_handoff_since(
-        STEERING_HANDOFFS,
-        target_thread_id,
-        started_at,
-    )
+    return RUNTIME_STATE.had_steering_handoff_since(target_thread_id, started_at)
 
 
 def register_discord_relay(target_thread_id: str | None) -> int:
-    return discord_runtime.register_discord_relay(
-        ACTIVE_DISCORD_RELAY_GENERATIONS,
-        target_thread_id,
-    )
+    return RUNTIME_STATE.register_discord_relay(target_thread_id)
 
 
 def is_discord_relay_stale(target_thread_id: str | None, generation: int) -> bool:
-    return discord_runtime.is_discord_relay_stale(
-        ACTIVE_DISCORD_RELAY_GENERATIONS,
-        target_thread_id,
-        generation,
-    )
+    return RUNTIME_STATE.is_discord_relay_stale(target_thread_id, generation)
 
 
 async def get_thread_runner(target_thread_id: str | None) -> dict[str, object]:
@@ -4802,10 +4569,19 @@ async def run_prompt_and_send(
     ack_sent: bool = False,
     source_message: discord.Message | None = None,
     target_thread_id: str | None = None,
+    resolve_target_ref_func=None,
+    run_ask_stream_func=None,
+    is_selected_thread_busy_error_func=None,
 ) -> None:
+    if resolve_target_ref_func is None:
+        resolve_target_ref_func = resolve_target_ref
+    if run_ask_stream_func is None:
+        run_ask_stream_func = run_ask_stream
+    if is_selected_thread_busy_error_func is None:
+        is_selected_thread_busy_error_func = is_selected_thread_busy_error
     if not ack_sent:
         await channel.send(build_ask_start_message(prompt, queued=queued))
-    target_thread_id, target_ref = resolve_target_ref(target_thread_id)
+    target_thread_id, target_ref = resolve_target_ref_func(target_thread_id)
     delegate_to_session_mirror = should_delegate_output_to_session_mirror(channel, target_thread_id)
     if delegate_to_session_mirror:
         await asyncio.to_thread(prime_session_mirror_cursor_for_target, target_thread_id)
@@ -4821,16 +4597,24 @@ async def run_prompt_and_send(
     )
     async with channel_typing(channel, context="ask_stream"):
         exit_code, output = await asyncio.to_thread(
-            run_ask_stream,
+            run_ask_stream_func,
             prompt,
             relay,
             force_while_busy=True,
             target_thread_id=target_thread_id,
         )
+    result = discord_delivery.ask_stream_result_from_relay(exit_code, output, relay)
+    status = discord_delivery.classify_ask_stream_result(
+        result,
+        is_busy_error_func=is_selected_thread_busy_error_func,
+    )
     log_line(
-        f"ask_stream_done exit={exit_code} target={target_thread_id or '-'} "
-        f"sent_live={relay.sent_live} final={relay.saw_final} aborted={relay.saw_aborted} "
-        f"timeout={relay.saw_timeout} output_len={format_log_text_len(output)}"
+        discord_delivery.format_ask_stream_done_log(
+            result,
+            status,
+            target_thread_id=target_thread_id,
+            output_len=format_log_text_len(output),
+        )
     )
     if relay.suppressed_after_steering:
         if is_discord_relay_stale(target_thread_id, relay.relay_generation):
@@ -4851,7 +4635,7 @@ async def run_prompt_and_send(
         )
         await send_chunks(channel, format_pending_ipc_ask_output(output))
         return
-    if is_selected_thread_busy_error(exit_code, output):
+    if is_selected_thread_busy_error_func(exit_code, output):
         log_line(
             f"ask_stream_busy_transport_failure kind=target target={target_thread_id or '-'} "
             f"source_message={'yes' if has_busy_choice_source(source_message) else 'no'}"
@@ -4883,18 +4667,26 @@ async def run_prompt_and_send(
             )
             async with channel_typing(channel, context="ask_stream_retry"):
                 exit_code, output = await asyncio.to_thread(
-                    run_ask_stream,
+                    run_ask_stream_func,
                     prompt,
                     retry_relay,
                     force_while_busy=True,
                     target_thread_id=target_thread_id,
-                )
+            )
             relay = retry_relay
+            retry_result = discord_delivery.ask_stream_result_from_relay(exit_code, output, relay)
+            retry_status = discord_delivery.classify_ask_stream_result(
+                retry_result,
+                is_busy_error_func=is_selected_thread_busy_error_func,
+            )
             log_line(
-                f"ask_stream_retry_done attempt={retry_index} exit={exit_code} "
-                f"target={target_thread_id or '-'} sent_live={relay.sent_live} "
-                f"final={relay.saw_final} aborted={relay.saw_aborted} timeout={relay.saw_timeout} "
-                f"output_len={format_log_text_len(output)}"
+                discord_delivery.format_ask_stream_retry_done_log(
+                    retry_result,
+                    retry_status,
+                    attempt=retry_index,
+                    target_thread_id=target_thread_id,
+                    output_len=format_log_text_len(output),
+                )
             )
             if relay.suppressed_after_steering:
                 if is_discord_relay_stale(target_thread_id, relay.relay_generation):
@@ -4913,7 +4705,7 @@ async def run_prompt_and_send(
             if is_ipc_delivery_confirmation_timeout(output):
                 await send_chunks(channel, format_pending_ipc_ask_output(output))
                 return
-            if not is_selected_thread_busy_error(exit_code, output):
+            if not is_selected_thread_busy_error_func(exit_code, output):
                 break
             if await send_codex_app_menu_if_available(
                 channel,
@@ -4922,7 +4714,7 @@ async def run_prompt_and_send(
                 reason=f"ask_busy_retry_{retry_index}",
             ):
                 return
-        if is_selected_thread_busy_error(exit_code, output):
+        if is_selected_thread_busy_error_func(exit_code, output):
             log_line(
                 f"ask_stream_busy_retry_exhausted target={target_thread_id or '-'} "
                 f"attempts={retry_attempts} output_len={format_log_text_len(output)}"
@@ -5054,17 +4846,16 @@ async def run_prompt_flow(
     source_message: discord.Message | None = None,
     target_thread_id: str | None = None,
 ) -> None:
-    warning = build_context_warning(target_thread_id)
-    if warning:
-        await send_chunks(channel, warning)
-    await channel.send(build_ask_start_message(prompt, queued=queued))
-    await run_prompt_and_send(
+    await discord_runner.run_prompt_flow(
         channel,
         prompt,
         queued=queued,
-        ack_sent=True,
         source_message=source_message,
         target_thread_id=target_thread_id,
+        build_context_warning_func=build_context_warning,
+        send_chunks_func=send_chunks,
+        build_ask_start_message_func=build_ask_start_message,
+        run_prompt_and_send_func=run_prompt_and_send,
     )
 
 
@@ -5180,13 +4971,34 @@ async def handle_plain_ask(
     prompt: str,
     *,
     target_thread_id: str | None = None,
+    get_interactive_state_func=None,
+    send_interactive_prompt_func=None,
+    submit_interactive_reply_func=None,
+    wait_for_recent_prompt_func=None,
+    mark_recent_discord_origin_prompt_func=None,
+    run_prompt_flow_func=None,
+    send_chunks_func=None,
+    log_func=None,
+    format_log_text_len_func=None,
 ) -> None:
-    interactive_state, resolved_thread_id, target_ref = get_interactive_state_for_thread(target_thread_id)
+    get_interactive_state_func = get_interactive_state_func or get_interactive_state_for_thread
+    send_interactive_prompt_func = send_interactive_prompt_func or send_interactive_prompt
+    submit_interactive_reply_func = submit_interactive_reply_func or submit_interactive_reply
+    wait_for_recent_prompt_func = wait_for_recent_prompt_func or wait_for_recent_codex_app_user_prompt
+    mark_recent_discord_origin_prompt_func = (
+        mark_recent_discord_origin_prompt_func or mark_recent_discord_origin_prompt
+    )
+    run_prompt_flow_func = run_prompt_flow_func or run_prompt_flow
+    send_chunks_func = send_chunks_func or send_chunks
+    log_func = log_func or log_line
+    format_log_text_len_func = format_log_text_len_func or format_log_text_len
+
+    interactive_state, resolved_thread_id, target_ref = get_interactive_state_func(target_thread_id)
     if interactive_state and resolved_thread_id:
         normalized_reply = normalize_interactive_text_reply(interactive_state, prompt)
         if normalized_reply is None:
             prompt_text = "Pending approval" if interactive_state == INTERACTIVE_STATE_APPROVAL else "Pending input"
-            await send_interactive_prompt(
+            await send_interactive_prompt_func(
                 message.channel,
                 resolved_thread_id,
                 target_ref,
@@ -5195,7 +5007,7 @@ async def handle_plain_ask(
                 [],
             )
             return
-        await submit_interactive_reply(
+        await submit_interactive_reply_func(
             message.channel,
             resolved_thread_id,
             target_ref,
@@ -5204,19 +5016,19 @@ async def handle_plain_ask(
         )
         return
 
-    if await wait_for_recent_codex_app_user_prompt(target_thread_id, prompt):
-        log_line(
+    if await wait_for_recent_prompt_func(target_thread_id, prompt):
+        log_func(
             f"plain_ask_duplicate_recent_app_prompt_skipped target={target_thread_id or '-'} "
-            f"prompt_len={format_log_text_len(prompt)}"
+            f"prompt_len={format_log_text_len_func(prompt)}"
         )
-        await send_chunks(
+        await send_chunks_func(
             message.channel,
             "Already in Codex app. Skipping duplicate Discord delivery for this mapped thread.",
         )
         return
 
-    mark_recent_discord_origin_prompt(target_thread_id, prompt)
-    await run_prompt_flow(
+    mark_recent_discord_origin_prompt_func(target_thread_id, prompt)
+    await run_prompt_flow_func(
         message.channel,
         prompt,
         source_message=message,
