@@ -127,6 +127,7 @@ SESSION_MIRROR_EVENT_RETENTION_SECONDS = 7 * 86400.0
 SESSION_MIRROR_RECENT_TEXT_TTL_SECONDS = 600.0
 DISCORD_ORIGIN_PROMPT_TTL_SECONDS = 900.0
 RECENT_CODEX_APP_PROMPT_DEDUPE_SECONDS = 120.0
+RECENT_CODEX_APP_PROMPT_DEDUPE_RECHECK_SECONDS = 0.6
 RECENT_CODEX_APP_PROMPT_SCAN_BYTES = 4 * 1024 * 1024
 DISCORD_ATTACHMENT_MAX_BYTES_DEFAULT = 25 * 1024 * 1024
 DISCORD_ATTACHMENT_TEXT_INLINE_MAX_BYTES_DEFAULT = 32 * 1024
@@ -450,6 +451,15 @@ def get_ask_busy_retry_delay_seconds() -> float:
         default=ASK_BUSY_RETRY_DELAY_SECONDS,
         minimum=1.0,
         maximum=60.0,
+    )
+
+
+def get_recent_codex_app_prompt_dedupe_recheck_seconds() -> float:
+    return parse_bounded_float_env(
+        "DISCORD_RECENT_APP_PROMPT_DEDUPE_RECHECK_SECONDS",
+        default=RECENT_CODEX_APP_PROMPT_DEDUPE_RECHECK_SECONDS,
+        minimum=0.0,
+        maximum=5.0,
     )
 
 
@@ -2434,6 +2444,30 @@ def has_recent_codex_app_user_prompt(
             return False
         if bridge.normalize_prompt_text(user_text) == normalized_prompt:
             return True
+    return False
+
+
+async def wait_for_recent_codex_app_user_prompt(
+    target_thread_id: str | None,
+    prompt: str,
+    *,
+    sleep_func=None,
+) -> bool:
+    if not target_thread_id:
+        return False
+    if await asyncio.to_thread(has_recent_codex_app_user_prompt, target_thread_id, prompt):
+        return True
+    delay_seconds = get_recent_codex_app_prompt_dedupe_recheck_seconds()
+    if delay_seconds <= 0:
+        return False
+    sleep = sleep_func or asyncio.sleep
+    await sleep(delay_seconds)
+    if await asyncio.to_thread(has_recent_codex_app_user_prompt, target_thread_id, prompt):
+        log_line(
+            f"recent_codex_prompt_dedupe_recheck_hit target={target_thread_id} "
+            f"delay={delay_seconds:g} prompt_len={format_log_text_len(prompt)}"
+        )
+        return True
     return False
 
 
@@ -5170,7 +5204,7 @@ async def handle_plain_ask(
         )
         return
 
-    if await asyncio.to_thread(has_recent_codex_app_user_prompt, target_thread_id, prompt):
+    if await wait_for_recent_codex_app_user_prompt(target_thread_id, prompt):
         log_line(
             f"plain_ask_duplicate_recent_app_prompt_skipped target={target_thread_id or '-'} "
             f"prompt_len={format_log_text_len(prompt)}"

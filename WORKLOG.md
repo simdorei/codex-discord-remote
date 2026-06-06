@@ -42,7 +42,7 @@ git diff --check
 
 Observed latest results:
 
-- `179 tests OK`
+- `193 tests OK`
 - `py_compile OK`
 - watchdog dry-run: `running`
 - tray once: `running pid=11084`

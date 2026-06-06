@@ -3878,6 +3878,78 @@ class DiscordBotHelperTests(unittest.IsolatedAsyncioTestCase):
             bot.has_recent_codex_app_user_prompt = original_has_recent_prompt
             bot.run_prompt_flow = original_run_prompt_flow
 
+    async def test_plain_ask_rechecks_recent_codex_app_duplicate_before_sending(self) -> None:
+        original_get_interactive_state = bot.get_interactive_state_for_thread
+        original_has_recent_prompt = bot.has_recent_codex_app_user_prompt
+        original_get_recheck_delay = bot.get_recent_codex_app_prompt_dedupe_recheck_seconds
+        original_run_prompt_flow = bot.run_prompt_flow
+        old_prompts = dict(bot.RECENT_DISCORD_ORIGIN_PROMPTS)
+        calls: list[tuple[str | None, str]] = []
+        try:
+            bot.RECENT_DISCORD_ORIGIN_PROMPTS.clear()
+            bot.get_interactive_state_for_thread = lambda target_thread_id: ("", None, "")
+            bot.get_recent_codex_app_prompt_dedupe_recheck_seconds = lambda: 0.01
+
+            def fake_has_recent_prompt(target_thread_id, prompt):
+                calls.append((target_thread_id, prompt))
+                return len(calls) >= 2
+
+            bot.has_recent_codex_app_user_prompt = fake_has_recent_prompt
+
+            async def fail_run_prompt_flow(*args, **kwargs):
+                raise AssertionError("late duplicate app prompt must not be sent to Codex again")
+
+            bot.run_prompt_flow = fail_run_prompt_flow
+            message = FakeMessage()
+
+            with tempfile.TemporaryDirectory() as temp_dir:
+                log_path = Path(temp_dir) / "discord-smoke.log"
+                with EnvPatch("CODEX_DISCORD_LOG_PATH", str(log_path)):
+                    await bot.handle_plain_ask(message, "same prompt", target_thread_id="thread-1")
+                log_text = log_path.read_text(encoding="utf-8")
+
+            self.assertEqual(calls, [("thread-1", "same prompt"), ("thread-1", "same prompt")])
+            self.assertEqual(
+                message.channel.messages,
+                [("Already in Codex app. Skipping duplicate Discord delivery for this mapped thread.", None)],
+            )
+            self.assertEqual(bot.RECENT_DISCORD_ORIGIN_PROMPTS, {})
+            self.assertIn("recent_codex_prompt_dedupe_recheck_hit target=thread-1", log_text)
+            self.assertIn("plain_ask_duplicate_recent_app_prompt_skipped target=thread-1", log_text)
+        finally:
+            bot.RECENT_DISCORD_ORIGIN_PROMPTS.clear()
+            bot.RECENT_DISCORD_ORIGIN_PROMPTS.update(old_prompts)
+            bot.get_interactive_state_for_thread = original_get_interactive_state
+            bot.has_recent_codex_app_user_prompt = original_has_recent_prompt
+            bot.get_recent_codex_app_prompt_dedupe_recheck_seconds = original_get_recheck_delay
+            bot.run_prompt_flow = original_run_prompt_flow
+
+    async def test_plain_ask_without_mapped_target_does_not_dedupe_against_selected_app_prompt(self) -> None:
+        original_get_interactive_state = bot.get_interactive_state_for_thread
+        original_has_recent_prompt = bot.has_recent_codex_app_user_prompt
+        original_run_prompt_flow = bot.run_prompt_flow
+        calls: list[tuple[str, str | None, object]] = []
+        try:
+            bot.get_interactive_state_for_thread = lambda target_thread_id: ("", None, "")
+            bot.has_recent_codex_app_user_prompt = lambda target_thread_id, prompt: (_ for _ in ()).throw(
+                AssertionError("selected/default asks should not scan the app-selected thread for duplicate prompts")
+            )
+
+            async def fake_run_prompt_flow(channel, prompt, *, source_message=None, target_thread_id=None):
+                calls.append((prompt, target_thread_id, source_message))
+
+            bot.run_prompt_flow = fake_run_prompt_flow
+            message = FakeMessage()
+
+            await bot.handle_plain_ask(message, "same prompt", target_thread_id=None)
+
+            self.assertEqual(message.channel.messages, [])
+            self.assertEqual(calls, [("same prompt", None, message)])
+        finally:
+            bot.get_interactive_state_for_thread = original_get_interactive_state
+            bot.has_recent_codex_app_user_prompt = original_has_recent_prompt
+            bot.run_prompt_flow = original_run_prompt_flow
+
     async def test_pending_approval_plain_text_refreshes_buttons_without_submitting(self) -> None:
         original_get_interactive_state = bot.get_interactive_state_for_thread
         original_submit_interactive_reply = bot.submit_interactive_reply

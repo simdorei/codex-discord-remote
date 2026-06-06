@@ -9,7 +9,7 @@ This is not an official OpenAI client, hosted relay, or npm package. It is a loc
 - Maps Discord channels and threads to local Codex threads.
 - Sends plain Discord messages directly into the mapped Codex thread.
 - Mirrors Codex approval/input/follow-up choices back into Discord when the app exposes them.
-- Avoids Discord-side global busy prompts while serializing cross-target Codex app turns so one thread does not abort another.
+- Avoids Discord-side global busy prompts and lets different mapped Codex targets start independently.
 - Supports slash commands, `!` commands, startup diagnostics, history polling, and a tray/watchdog launcher.
 - Can be used alongside other Discord bots or Discord-based CLIs. For example, you can ask a separate Discord CLI/bot to do work in a project thread, then mention the Codex bridge in the same Discord thread to inspect, steer, or continue the local Codex-side work.
 
@@ -78,6 +78,7 @@ DISCORD_PLAIN_ASK_MENTION_USER_IDS=your_bridge_bot_user_id
 DISCORD_PLAIN_ASK_CONTEXT_FALLBACK=0
 DISCORD_STREAM_COMMENTARY=1
 DISCORD_SESSION_MIRROR=1
+DISCORD_RECENT_APP_PROMPT_DEDUPE_RECHECK_SECONDS=0.6
 DISCORD_ENABLE_ATTACHMENTS=1
 ```
 
@@ -90,6 +91,7 @@ Notes:
 - Messages authored by other bots are ignored unless they explicitly mention the Codex bridge user.
 - `DISCORD_STREAM_COMMENTARY=1` mirrors Codex in-progress commentary to Discord. Set it to `0` if you only want final answers.
 - `DISCORD_SESSION_MIRROR=1` tails mapped Codex session files and mirrors new app-side user text, commentary, final answers, aborts, and approval/input prompts into the mapped Discord thread.
+- `DISCORD_RECENT_APP_PROMPT_DEDUPE_RECHECK_SECONDS` adds a short mapped-thread recheck before Discord submits a prompt, catching near-simultaneous app-side steering duplicates.
 - `DISCORD_ENABLE_ATTACHMENTS=1` saves Discord attachments under `discord_attachments\` and includes the local paths in the Codex prompt. Small text-like attachments are also inlined as previews.
 
 ## Run
@@ -158,7 +160,7 @@ Steering is handled by Codex Desktop, not by a Discord-side global busy gate.
 - Discord does not preflight idle/busy state and does not auto-queue ordinary asks.
 - If Codex Desktop exposes approval/input/follow-up choices, Discord mirrors those choices.
 - Same-thread follow-ups can still reach Codex Desktop for steering.
-- Different target threads wait for the active Codex app turn before starting, because the current desktop transport is single-active-turn in practice.
+- Different mapped target threads are submitted independently, so one Discord thread does not block another at the bridge layer.
 - The default install configures `followUpQueueMode = "steer"` for Codex Desktop.
 
 ## Validation
@@ -183,7 +185,7 @@ Live Discord QA should verify:
 - Discord image/text attachments are saved locally and referenced in the Codex prompt
 - app-exposed approval/input menus are mirrored when they appear after delivery
 - different mapped target threads route to the correct Codex threads
-- cross-target Discord asks wait for the active Codex app turn so they do not abort each other
+- cross-target Discord asks can start independently without bridge-level global busy serialization
 - other bot messages are ignored unless they mention the Codex bridge
 - duplicate bot starts keep one Discord websocket owner
 - headless launch shows either the tray icon or clear runtime/log evidence
