@@ -58,7 +58,17 @@ def is_ipc_delivery_confirmation_timeout(output: str) -> bool:
         "prompt delivery could not be confirmed in any recent codex thread after ipc delivery"
         in text
         and "transport reported success" in text
+    ) or (
+        "ui_activation: ipc-thread-follower-start-turn" in text
+        and "thread-follower-start-turn-timeout" in text
     )
+
+
+def format_ipc_delivery_issue_detail(output: str) -> str:
+    text = (output or "").lower()
+    if "thread-follower-start-turn-timeout" in text:
+        return "ipc_detail: IPC start-turn failed: thread-follower-start-turn-timeout"
+    return ""
 
 
 def format_pending_ipc_delivery_output(output: str) -> str:
@@ -75,6 +85,7 @@ def format_pending_ipc_delivery_output(output: str) -> str:
         for part in [
             "[delivery_pending] Codex IPC accepted the steering request, but local session recording is delayed.",
             "Discord will keep watching this thread for the next Codex reply.",
+            format_ipc_delivery_issue_detail(output),
             "\n".join(metadata_lines),
         ]
         if part

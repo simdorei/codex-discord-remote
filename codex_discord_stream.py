@@ -239,17 +239,19 @@ def build_stream_ask_argv(
     force_while_busy: bool = False,
     wait: bool = True,
     target_thread_id: str | None = None,
+    use_sidecar: bool = False,
 ) -> list[str]:
     argv = [
         "ask",
-        "--ipc",
-        "--ipc-recover-ui",
+        "--sidecar" if use_sidecar else "--ipc",
         "--foreground",
         "--stream",
         "--include-commentary",
         "--timeout",
         "0",
     ]
+    if not use_sidecar:
+        argv.insert(2, "--ipc-recover-ui")
     if target_thread_id:
         argv.extend(["--thread-id", target_thread_id])
     if force_while_busy:
@@ -276,6 +278,7 @@ def run_ask_stream(
     force_while_busy: bool = False,
     wait: bool = True,
     target_thread_id: str | None = None,
+    use_sidecar: bool = False,
     run_bridge_command_stream_func,
     should_retry_ask_with_ui_func,
     build_ui_ask_argv_func,
@@ -286,9 +289,10 @@ def run_ask_stream(
         force_while_busy=force_while_busy,
         wait=wait,
         target_thread_id=target_thread_id,
+        use_sidecar=use_sidecar,
     )
     exit_code, output = run_bridge_command_stream_func(argv, relay.feed_line)
-    if should_retry_ask_with_ui_func(exit_code, output):
+    if not use_sidecar and should_retry_ask_with_ui_func(exit_code, output):
         relay.feed_line("[commentary]")
         relay.feed_line("IPC attach failed for this Codex thread. Retrying through the Codex UI.")
         relay.feed_line("[ready]")

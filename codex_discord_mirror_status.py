@@ -7,24 +7,43 @@ from pathlib import Path
 
 
 def build_mirror_list(
-    limit: int = 30,
+    limit: int,
     *,
+    visible_thread_ids: list[str] | None = None,
     db_path: Path,
     init_mirror_db_func,
     bridge_module: object,
 ) -> str:
     init_mirror_db_func()
     with sqlite3.connect(db_path) as conn:
-        rows = conn.execute(
-            """
-            SELECT mt.thread_title, mt.codex_thread_id, mp.project_name, mt.discord_channel_id, mt.discord_thread_id
-            FROM mirror_threads mt
-            LEFT JOIN mirror_projects mp ON mp.project_key = mt.project_key
-            ORDER BY mt.updated_at DESC
-            LIMIT ?
-            """,
-            (limit,),
-        ).fetchall()
+        if visible_thread_ids is None:
+            rows = conn.execute(
+                """
+                SELECT mt.thread_title, mt.codex_thread_id, mp.project_name, mt.discord_channel_id, mt.discord_thread_id
+                FROM mirror_threads mt
+                LEFT JOIN mirror_projects mp ON mp.project_key = mt.project_key
+                ORDER BY mt.updated_at DESC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+        else:
+            ordered_ids = list(dict.fromkeys(str(thread_id) for thread_id in visible_thread_ids if str(thread_id)))
+            if ordered_ids:
+                rows = conn.execute(
+                    """
+                    SELECT mt.thread_title, mt.codex_thread_id, mp.project_name, mt.discord_channel_id, mt.discord_thread_id
+                    FROM mirror_threads mt
+                    LEFT JOIN mirror_projects mp ON mp.project_key = mt.project_key
+                    WHERE mt.codex_thread_id IN ({})
+                    ORDER BY mt.updated_at DESC
+                    """.format(",".join("?" for _ in ordered_ids)),
+                    tuple(ordered_ids),
+                ).fetchall()
+                visible_order = {thread_id: index for index, thread_id in enumerate(ordered_ids)}
+                rows.sort(key=lambda row: visible_order.get(str(row[1]), len(visible_order)))
+            else:
+                rows = []
     if not rows:
         return "No mirrored threads yet. Run `!mirror sync`."
     lines = ["Mirrored Codex threads"]
@@ -48,6 +67,8 @@ def build_mirror_list(
 
 def build_mirror_check(
     *,
+    threads=None,
+    limit: int | None = None,
     db_path: Path,
     init_mirror_db_func,
     bridge_module: object,
@@ -56,7 +77,11 @@ def build_mirror_check(
     get_project_name_func,
 ) -> str:
     init_mirror_db_func()
-    threads = filter_mirrorable_threads_func(bridge_module.load_recent_threads(limit=0))
+    if threads is None:
+        if limit is None:
+            raise RuntimeError("Mirror check requires explicit threads or an explicit limit.")
+        threads = bridge_module.load_recent_threads(limit=limit)
+    threads = filter_mirrorable_threads_func(threads)
     expected: dict[str, tuple[str, str, str]] = {}
     for thread in threads:
         expected[thread.id] = (

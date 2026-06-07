@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import sqlite3
+
 
 def format_discord_id_list(values: set[int], *, limit: int = 8) -> str:
     if not values:
@@ -31,7 +33,10 @@ def build_discord_doctor_message(
     project = get_mirror_project_for_channel_func(channel_id)
     active_busy_choices, stale_busy_choices = get_busy_choice_counts_func()
     active_component_claims, stale_component_claims = get_persistent_component_claim_counts_func()
-    mirror_lines = build_mirror_check_func().splitlines()
+    try:
+        mirror_lines = build_mirror_check_func().splitlines()
+    except (RuntimeError, OSError, sqlite3.Error) as exc:
+        mirror_lines = ["Mirror check failed", f"ERROR: {exc}"]
     log_markers = get_discord_log_markers_func()
     history_poll_task = getattr(bot, "_history_poll_task", None)
     history_poll_alive = bool(history_poll_task and not history_poll_task.done())

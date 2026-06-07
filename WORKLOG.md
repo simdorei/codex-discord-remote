@@ -1,39 +1,5 @@
 # Worklog
 
-## 2026-06-06 Refactor Slices And Live QA
-
-Goal: refactor the Discord harness in small slices, with local tests and Discord web live QA after each slice.
-
-### Completed Slices
-
-- Slice 1: moved ask stream delivery classification and log formatting into `codex_discord_delivery.py`.
-- Slice 2: introduced `ThreadAskJob` in `codex_discord_runner.py` so per-target runner queues use an explicit job contract.
-- Slice 3: moved prompt-flow dispatch into the runner contract while keeping bot-level compatibility wrappers.
-- Slice 4: moved session mirror item collection, echo suppression, and mirror text formatting into `codex_discord_session_mirror.py`.
-- Slice 5: introduced `RuntimeState` in `codex_discord_runtime.py` for per-target steering handoff and relay generation state.
-- Slice 6: added dependency injection seams to `handle_plain_ask` and converted representative tests away from global monkey patching.
-
-### Validation Completed
-
-Run from `C:\repos\simdorei\codex-discord-harness`:
-
-```powershell
-py -3 -m unittest tests.test_codex_discord_bot
-py -3 -m py_compile codex_desktop_bridge.py codex_windows_harness.py codex_discord_bot.py codex_discord_delivery.py codex_discord_prompt_guard.py codex_discord_runner.py codex_discord_runtime.py codex_discord_session_mirror.py tests\test_codex_discord_bot.py
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\codex-discord-watchdog.ps1 -DryRun
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 -SkipDependencies -SkipEnvFile -DryRun
-git diff --check
-```
-
-Observed latest results:
-
-- `218 tests OK`
-- `py_compile OK`
-- watchdog dry-run: `running`
-- install dry-run: would configure Codex Desktop `followUpQueueMode = "steer"`
-- Discord web QA replies received: `SLICE1_LOG_OK`, `SLICE2_JOB_OK`, `SLICE3_FLOW_OK`, `SLICE5_RUNTIME_OK`, `SLICE6_DI_OK`
-- Session mirror web QA confirmed current Codex app progress messages appearing in the mapped Discord mirror channel after Slice 4.
-
 ## 2026-06-05 Discord Harness Stabilization
 
 Goal: keep this repository as a Discord-only Windows-local Codex frontend harness.
@@ -76,7 +42,7 @@ git diff --check
 
 Observed latest results:
 
-- `193 tests OK`
+- `179 tests OK`
 - `py_compile OK`
 - watchdog dry-run: `running`
 - tray once: `running pid=11084`
@@ -90,3 +56,12 @@ Observed latest results:
 - Confirm no duplicate bot replies after a newer relay supersedes an older relay.
 - Confirm no second bot process owns the Discord websocket.
 - Confirm tray icon or `codex-discord-tray.ps1 -Once` reports running.
+
+### QA Stamp: parallel-mapped-targets-2026.06.07-1
+
+Status: confirmed for different mapped Codex target threads.
+
+- Unit QA: `py -3 -m unittest tests.test_codex_discord_bot.DiscordBotHelperTests.test_run_prompt_flow_starts_distinct_target_threads_independently tests.test_codex_discord_bot.DiscordBotHelperTests.test_thread_runner_accepts_send_capable_channel tests.test_codex_discord_bot.DiscordBotHelperTests.test_run_prompt_flow_sends_directly_without_runner_queue` passed.
+- Live log QA: at `2026-06-07 16:55:15`, target `019e9d4b-301f-77a0-a646-3fe155e4c26d` accepted a mapped Discord ask; at `2026-06-07 16:55:20`, target `019e8e79-5138-7ef3-8c24-7a917e3da18a` accepted a second mapped Discord ask before the first target completed.
+- Completion order proved overlap: target `019e8e79-5138-7ef3-8c24-7a917e3da18a` completed at `16:55:40`; target `019e9d4b-301f-77a0-a646-3fe155e4c26d` completed later at `16:55:56`.
+- Scope note: same-target consecutive asks are still serialized by `ask_delivery_wait`; this stamp only confirms cross-target parallel routing.

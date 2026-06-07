@@ -63,6 +63,8 @@ def parse_required_bounded_int(raw: object, *, default: int, minimum: int, maxim
 
 
 def build_list_argv(raw_limit: object = "", *, default: int = 10, maximum: int = 30) -> list[str]:
+    if raw_limit is None or str(raw_limit).strip() == "":
+        return ["list", "--ui-visible"]
     limit = parse_bounded_int(raw_limit, default=default, minimum=1, maximum=maximum)
     return ["list", "--limit", str(limit)]
 
@@ -108,6 +110,7 @@ def build_prefix_bridge_action(
     channel_id: int | None,
     *,
     resolve_target_args_func: Callable[[int | None, str | None], list[str]],
+    resolve_archive_target_args_func: Callable[[int | None, str | None], list[str]] | None = None,
 ) -> PrefixBridgeAction | None:
     if command == "list":
         return PrefixBridgeAction(build_list_argv(arg), "List")
@@ -135,11 +138,12 @@ def build_prefix_bridge_action(
     if command == "restart_codex":
         return PrefixBridgeAction(["restart_codex"], "Codex restart")
     if command == "archive":
+        archive_target_args_func = resolve_archive_target_args_func or resolve_target_args_func
         return PrefixBridgeAction(
             build_archive_argv(
                 channel_id,
                 arg or None,
-                resolve_target_args_func=resolve_target_args_func,
+                resolve_target_args_func=archive_target_args_func,
             ),
             "Archive",
         )
@@ -164,8 +168,12 @@ def parse_bridge_sync_limit(command: str, arg: str) -> PrefixLimitAction:
             return PrefixLimitAction(None, "Usage: !bridge sync [limit]")
         limit_arg = subarg.strip()
     else:
-        limit_arg = arg
-    limit = parse_bounded_int(limit_arg, default=30, minimum=1, maximum=100)
+        limit_arg = arg.strip()
+    if not limit_arg:
+        return PrefixLimitAction(None)
+    limit = parse_required_bounded_int(limit_arg, default=1, minimum=1, maximum=100)
+    if limit is None:
+        return PrefixLimitAction(None, "Usage: !bridge sync [limit]")
     return PrefixLimitAction(limit)
 
 
@@ -174,15 +182,24 @@ def parse_mirror_action(arg: str) -> MirrorAction:
     subcommand = (subcommand or "sync").lower().strip()
     subarg = subarg.strip()
     if subcommand == "sync":
-        limit = parse_required_bounded_int(subarg, default=30, minimum=1, maximum=100)
+        if not subarg:
+            return MirrorAction("sync")
+        limit = parse_required_bounded_int(subarg, default=1, minimum=1, maximum=100)
         if limit is None:
             return MirrorAction(None, usage="Usage: !mirror sync [limit]")
         return MirrorAction("sync", limit=limit)
     if subcommand == "list":
-        limit = parse_required_bounded_int(subarg, default=30, minimum=1, maximum=100)
+        if not subarg:
+            return MirrorAction("list")
+        limit = parse_required_bounded_int(subarg, default=1, minimum=1, maximum=100)
         if limit is None:
             return MirrorAction(None, usage="Usage: !mirror list [limit]")
         return MirrorAction("list", limit=limit)
     if subcommand in {"check", "doctor"}:
-        return MirrorAction("check")
-    return MirrorAction(None, usage="Usage: !mirror sync [limit] | !mirror list [limit] | !mirror check")
+        if not subarg:
+            return MirrorAction("check")
+        limit = parse_required_bounded_int(subarg, default=1, minimum=1, maximum=100)
+        if limit is None:
+            return MirrorAction(None, usage="Usage: !mirror check [limit]")
+        return MirrorAction("check", limit=limit)
+    return MirrorAction(None, usage="Usage: !mirror sync [limit] | !mirror list [limit] | !mirror check [limit]")

@@ -6,38 +6,11 @@ import asyncio
 import time
 import traceback
 
-from dataclasses import dataclass
-
 from codex_discord_runtime import normalize_runner_key
 
 
 THREAD_RUNNERS_LOCK = asyncio.Lock()
 THREAD_RUNNERS: dict[str, dict[str, object]] = {}
-
-
-@dataclass(frozen=True)
-class ThreadAskJob:
-    channel: object
-    prompt: str
-    target_thread_id: str | None
-    queued: bool = False
-    ack_sent: bool = False
-    source_message: object | None = None
-
-
-def coerce_thread_ask_job(job: object) -> ThreadAskJob:
-    if isinstance(job, ThreadAskJob):
-        return job
-    if not isinstance(job, dict):
-        raise RuntimeError("Thread runner job is invalid.")
-    return ThreadAskJob(
-        channel=job.get("channel"),
-        prompt=str(job.get("prompt") or ""),
-        target_thread_id=str(job.get("target_thread_id") or "").strip() or None,
-        queued=bool(job.get("queued")),
-        ack_sent=bool(job.get("ack_sent")),
-        source_message=job.get("source_message"),
-    )
 
 
 async def get_thread_runner(
@@ -117,14 +90,14 @@ async def enqueue_thread_ask(
     if not isinstance(queue, asyncio.Queue):
         raise RuntimeError("Thread runner queue is invalid.")
     await queue.put(
-        ThreadAskJob(
-            channel=channel,
-            prompt=prompt,
-            target_thread_id=target_thread_id,
-            queued=queued,
-            ack_sent=ack_sent,
-            source_message=source_message,
-        )
+        {
+            "channel": channel,
+            "prompt": prompt,
+            "target_thread_id": target_thread_id,
+            "queued": queued,
+            "ack_sent": ack_sent,
+            "source_message": source_message,
+        }
     )
     task = runner.get("task")
     if not isinstance(task, asyncio.Task) or task.done():
@@ -138,11 +111,7 @@ async def report_thread_runner_job_failed(
     *,
     log_func,
 ) -> None:
-    try:
-        ask_job = coerce_thread_ask_job(job)
-    except RuntimeError:
-        return
-    channel = ask_job.channel
+    channel = job.get("channel") if isinstance(job, dict) else None
     if channel is None or not hasattr(channel, "send"):
         return
     try:
@@ -150,32 +119,6 @@ async def report_thread_runner_job_failed(
         log_func(f"thread_runner_job_failure_reported target={target_thread_id or '-'}")
     except Exception:
         log_func("thread_runner_job_failure_report_failed\n" + traceback.format_exc())
-
-
-async def run_prompt_flow(
-    channel: object,
-    prompt: str,
-    *,
-    queued: bool = False,
-    source_message: object | None = None,
-    target_thread_id: str | None = None,
-    build_context_warning_func,
-    send_chunks_func,
-    build_ask_start_message_func,
-    run_prompt_and_send_func,
-) -> None:
-    warning = build_context_warning_func(target_thread_id)
-    if warning:
-        await send_chunks_func(channel, warning)
-    await channel.send(build_ask_start_message_func(prompt, queued=queued))
-    await run_prompt_and_send_func(
-        channel,
-        prompt,
-        queued=queued,
-        ack_sent=True,
-        source_message=source_message,
-        target_thread_id=target_thread_id,
-    )
 
 
 async def thread_runner_loop(
@@ -210,13 +153,14 @@ async def thread_runner_loop(
 
         runner["active"] = True
         try:
-            ask_job = coerce_thread_ask_job(job)
-            channel = ask_job.channel
-            prompt = str(ask_job.prompt or "").strip()
-            job_target_thread_id = ask_job.target_thread_id
+            if not isinstance(job, dict):
+                raise RuntimeError("Thread runner job is invalid.")
+            channel = job.get("channel")
+            prompt = str(job.get("prompt") or "").strip()
+            job_target_thread_id = str(job.get("target_thread_id") or "").strip() or None
             if prompt and hasattr(channel, "send"):
-                queued = ask_job.queued
-                ack_sent = ask_job.ack_sent
+                queued = bool(job.get("queued"))
+                ack_sent = bool(job.get("ack_sent"))
                 if queued:
                     busy_state, _busy_thread_id, busy_ref = await to_thread_func(
                         get_busy_state_func,
@@ -241,7 +185,7 @@ async def thread_runner_loop(
                     prompt,
                     queued=queued,
                     ack_sent=ack_sent,
-                    source_message=ask_job.source_message,
+                    source_message=job.get("source_message"),
                     target_thread_id=job_target_thread_id,
                 )
         except Exception:

@@ -17,11 +17,6 @@ from types import SimpleNamespace
 
 import codex_discord_bot as bot
 import codex_discord_commands as commands
-import codex_discord_delivery as delivery
-import codex_discord_prompt_guard as prompt_guard
-import codex_discord_runner as runner
-import codex_discord_runtime as runtime
-import codex_discord_session_mirror as session_mirror
 import codex_desktop_bridge as bridge
 import codex_windows_harness as harness
 
@@ -218,556 +213,6 @@ class EnvPatch:
             os.environ.pop(self.key, None)
         else:
             os.environ[self.key] = self.original
-
-
-class RecentAppPromptGuardContractTests(unittest.IsolatedAsyncioTestCase):
-    def make_guard(
-        self,
-        session_path: Path,
-        *,
-        recheck_seconds: float = 0.01,
-        log_lines: list[str] | None = None,
-        choose_thread_func=None,
-    ) -> prompt_guard.RecentAppPromptGuard:
-        logs = log_lines if log_lines is not None else []
-        thread = SimpleNamespace(rollout_path=str(session_path))
-
-        def normalize(text: str) -> str:
-            return " ".join(str(text or "").split()).casefold()
-
-        def extract_message_text(payload: dict) -> str:
-            content = payload.get("content") or []
-            if not isinstance(content, list):
-                return ""
-            return "\n".join(str(item.get("text") or "") for item in content if isinstance(item, dict))
-
-        return prompt_guard.RecentAppPromptGuard(
-            config=prompt_guard.RecentAppPromptGuardConfig(
-                max_age_seconds=120.0,
-                scan_bytes=1024 * 1024,
-                recheck_seconds=recheck_seconds,
-            ),
-            choose_thread_func=choose_thread_func or (lambda _target_thread_id, _cwd=None: thread),
-            normalize_prompt_text_func=normalize,
-            extract_message_text_func=extract_message_text,
-            log_func=logs.append,
-            format_log_text_len_func=len,
-            now_func=lambda: datetime.datetime(2026, 6, 6, 4, 0, tzinfo=datetime.timezone.utc),
-        )
-
-    def write_user_event(self, session_path: Path, text: str) -> None:
-        event = {
-            "timestamp": "2026-06-06T03:59:59+00:00",
-            "type": "event_msg",
-            "payload": {"type": "user_message", "message": text},
-        }
-        session_path.write_text(json.dumps(event) + "\n", encoding="utf-8")
-
-    def test_has_recent_user_prompt_matches_session_tail(self) -> None:
-        with tempfile.TemporaryDirectory() as temp_dir:
-            session_path = Path(temp_dir) / "session.jsonl"
-            self.write_user_event(session_path, "same prompt")
-            guard = self.make_guard(session_path)
-
-            self.assertTrue(guard.has_recent_user_prompt("thread-1", "same   prompt"))
-
-    async def test_wait_for_user_prompt_rechecks_after_flush_delay(self) -> None:
-        with tempfile.TemporaryDirectory() as temp_dir:
-            session_path = Path(temp_dir) / "session.jsonl"
-            session_path.write_text("", encoding="utf-8")
-            logs: list[str] = []
-            guard = self.make_guard(session_path, log_lines=logs)
-
-            async def direct_to_thread(func, *args):
-                return func(*args)
-
-            async def flush_session_after_delay(_delay: float) -> None:
-                self.write_user_event(session_path, "late prompt")
-
-            self.assertTrue(
-                await guard.wait_for_user_prompt(
-                    "thread-1",
-                    "late prompt",
-                    to_thread_func=direct_to_thread,
-                    sleep_func=flush_session_after_delay,
-                )
-            )
-            self.assertTrue(any("recent_codex_prompt_dedupe_recheck_hit target=thread-1" in line for line in logs))
-
-    async def test_wait_for_user_prompt_without_target_does_not_choose_selected_thread(self) -> None:
-        with tempfile.TemporaryDirectory() as temp_dir:
-            session_path = Path(temp_dir) / "session.jsonl"
-            session_path.write_text("", encoding="utf-8")
-            choose_called = False
-
-            def fail_choose_thread(_target_thread_id, _cwd=None):
-                nonlocal choose_called
-                choose_called = True
-                raise AssertionError("targetless prompts should not scan the selected Codex thread")
-
-            guard = self.make_guard(session_path, choose_thread_func=fail_choose_thread)
-
-            self.assertFalse(await guard.wait_for_user_prompt(None, "same prompt"))
-            self.assertFalse(choose_called)
-
-
-class SessionMirrorCollectorContractTests(unittest.TestCase):
-    def make_collector(self, *, now: float = 100.0) -> session_mirror.SessionMirrorCollector:
-        return session_mirror.SessionMirrorCollector(
-            origin_prompts={},
-            origin_prompt_ttl_seconds=120.0,
-            recent_text_ttl_seconds=120.0,
-            normalize_target_key_func=lambda target_thread_id: str(target_thread_id or "").strip(),
-            time_func=lambda: now,
-        )
-
-    def test_collects_items_without_discord_echo_or_duplicate_commentary(self) -> None:
-        collector = self.make_collector()
-        collector.mark_recent_discord_origin_prompt("thread-1", "from discord")
-        events = [
-            {
-                "timestamp": "1",
-                "type": "event_msg",
-                "payload": {"type": "user_message", "message": "from discord"},
-            },
-            {
-                "timestamp": "2",
-                "type": "response_item",
-                "payload": {
-                    "type": "message",
-                    "role": "user",
-                    "content": [{"type": "input_text", "text": "from app"}],
-                },
-            },
-            {
-                "timestamp": "3",
-                "type": "event_msg",
-                "payload": {"type": "agent_message", "phase": "commentary", "message": "working"},
-            },
-            {
-                "timestamp": "4",
-                "type": "response_item",
-                "payload": {
-                    "type": "message",
-                    "role": "assistant",
-                    "phase": "commentary",
-                    "content": [{"type": "output_text", "text": "working"}],
-                },
-            },
-            {
-                "timestamp": "5",
-                "type": "response_item",
-                "payload": {
-                    "type": "message",
-                    "role": "assistant",
-                    "phase": "final_answer",
-                    "content": [{"type": "output_text", "text": "done"}],
-                },
-            },
-        ]
-
-        items = collector.collect_session_mirror_items(
-            "thread-1",
-            events,
-            seen_agent_messages={},
-            seen_user_messages={},
-        )
-
-        self.assertEqual([item["kind"] for item in items], ["user", "commentary", "final"])
-        self.assertEqual([item["text"] for item in items], ["from app", "working", "done"])
-
-    def test_collects_interactive_notice_from_injected_function(self) -> None:
-        collector = session_mirror.SessionMirrorCollector(
-            origin_prompts={},
-            origin_prompt_ttl_seconds=120.0,
-            recent_text_ttl_seconds=120.0,
-            normalize_target_key_func=lambda target_thread_id: str(target_thread_id or "").strip(),
-            make_interactive_notice_func=lambda payload: f"notice:{payload.get('name')}",
-            time_func=lambda: 100.0,
-        )
-
-        items = collector.collect_session_mirror_items(
-            "thread-1",
-            [
-                {
-                    "timestamp": "1",
-                    "type": "response_item",
-                    "payload": {"type": "function_call", "name": "approval"},
-                }
-            ],
-            seen_agent_messages={},
-            seen_user_messages={},
-        )
-
-        self.assertEqual(items[0]["kind"], "interactive")
-        self.assertEqual(items[0]["text"], "notice:approval")
-
-    def test_formats_mirror_text_by_kind(self) -> None:
-        self.assertEqual(
-            session_mirror.format_session_mirror_text({"kind": "commentary", "text": "working"}),
-            "In progress\n\nworking",
-        )
-        self.assertEqual(
-            session_mirror.format_session_mirror_text({"kind": "user", "text": "hello"}),
-            "Codex app user\n\nhello",
-        )
-        self.assertEqual(
-            session_mirror.format_session_mirror_text({"kind": "final", "text": "done"}),
-            "done",
-        )
-
-
-class AskDeliveryContractTests(unittest.TestCase):
-    def make_result(self, **overrides) -> delivery.AskStreamResult:
-        values = {
-            "exit_code": 0,
-            "output": "",
-            "sent_live": False,
-            "saw_final": False,
-            "saw_aborted": False,
-            "saw_timeout": False,
-            "suppressed_after_steering": False,
-        }
-        values.update(overrides)
-        return delivery.AskStreamResult(**values)
-
-    def test_classifies_final_result(self) -> None:
-        result = self.make_result(saw_final=True)
-
-        self.assertEqual(
-            delivery.classify_ask_stream_result(result),
-            delivery.AskDeliveryStatus.FINAL,
-        )
-
-    def test_classifies_no_final_result(self) -> None:
-        result = self.make_result()
-
-        self.assertEqual(
-            delivery.classify_ask_stream_result(result),
-            delivery.AskDeliveryStatus.NO_FINAL,
-        )
-
-    def test_classifies_aborted_result(self) -> None:
-        result = self.make_result(saw_final=True, saw_aborted=True)
-
-        self.assertEqual(
-            delivery.classify_ask_stream_result(result),
-            delivery.AskDeliveryStatus.ABORTED,
-        )
-
-    def test_classifies_timeout_result(self) -> None:
-        result = self.make_result(saw_timeout=True)
-
-        self.assertEqual(
-            delivery.classify_ask_stream_result(result),
-            delivery.AskDeliveryStatus.TIMEOUT,
-        )
-
-    def test_classifies_busy_error_before_generic_failure(self) -> None:
-        result = self.make_result(exit_code=1, output="busy")
-
-        self.assertEqual(
-            delivery.classify_ask_stream_result(
-                result,
-                is_busy_error_func=lambda exit_code, output: exit_code == 1 and output == "busy",
-            ),
-            delivery.AskDeliveryStatus.BUSY_REJECTED,
-        )
-
-    def test_classifies_generic_failure(self) -> None:
-        result = self.make_result(exit_code=2, output="boom")
-
-        self.assertEqual(
-            delivery.classify_ask_stream_result(result, is_busy_error_func=lambda _exit, _output: False),
-            delivery.AskDeliveryStatus.FAILED,
-        )
-
-    def test_classifies_suppressed_result_before_final(self) -> None:
-        result = self.make_result(saw_final=True, suppressed_after_steering=True)
-
-        self.assertEqual(
-            delivery.classify_ask_stream_result(result),
-            delivery.AskDeliveryStatus.SUPPRESSED,
-        )
-
-    def test_builds_result_from_relay_attributes(self) -> None:
-        relay = SimpleNamespace(
-            sent_live=True,
-            saw_final=True,
-            saw_aborted=False,
-            saw_timeout=True,
-            suppressed_after_steering=False,
-        )
-
-        self.assertEqual(
-            delivery.ask_stream_result_from_relay(0, None, relay),
-            delivery.AskStreamResult(
-                exit_code=0,
-                output="",
-                sent_live=True,
-                saw_final=True,
-                saw_aborted=False,
-                saw_timeout=True,
-                suppressed_after_steering=False,
-            ),
-        )
-
-    def test_formats_ask_stream_done_log(self) -> None:
-        result = self.make_result(saw_final=True, sent_live=True)
-
-        self.assertEqual(
-            delivery.format_ask_stream_done_log(
-                result,
-                delivery.AskDeliveryStatus.FINAL,
-                target_thread_id="thread-1",
-                output_len=42,
-            ),
-            "ask_stream_done exit=0 target=thread-1 status=final "
-            "sent_live=True final=True aborted=False timeout=False output_len=42",
-        )
-
-    def test_formats_ask_stream_retry_done_log(self) -> None:
-        result = self.make_result(exit_code=1, output="busy")
-
-        self.assertEqual(
-            delivery.format_ask_stream_retry_done_log(
-                result,
-                delivery.AskDeliveryStatus.BUSY_REJECTED,
-                attempt=2,
-                target_thread_id=None,
-                output_len=4,
-            ),
-            "ask_stream_retry_done attempt=2 exit=1 target=- status=busy_rejected "
-            "sent_live=False final=False aborted=False timeout=False output_len=4",
-        )
-
-
-class RuntimeStateContractTests(unittest.TestCase):
-    def test_runtime_state_tracks_handoff_and_relay_per_target(self) -> None:
-        state = runtime.RuntimeState({}, {}, now_func=lambda: 25.0)
-
-        self.assertEqual(state.mark_steering_handoff("thread-a"), 25.0)
-        self.assertTrue(state.had_steering_handoff_since("thread-a", 24.0))
-        self.assertFalse(state.had_steering_handoff_since("thread-b", 24.0))
-        self.assertFalse(state.had_steering_handoff_since("thread-a", 25.0))
-
-        first = state.register_discord_relay("thread-a")
-        second = state.register_discord_relay("thread-a")
-        selected = state.register_discord_relay(None)
-
-        self.assertEqual((first, second, selected), (1, 2, 1))
-        self.assertTrue(state.is_discord_relay_stale("thread-a", first))
-        self.assertFalse(state.is_discord_relay_stale("thread-a", second))
-        self.assertFalse(state.is_discord_relay_stale(None, selected))
-
-    def test_runtime_state_uses_selected_key_for_targetless_work(self) -> None:
-        state = runtime.RuntimeState({}, {}, now_func=lambda: 10.0)
-
-        state.mark_steering_handoff(None)
-        generation = state.register_discord_relay(None)
-
-        self.assertIn(runtime.normalize_runner_key(None), state.steering_handoffs)
-        self.assertEqual(state.relay_generations[runtime.normalize_runner_key(None)], generation)
-
-
-class ThreadAskJobContractTests(unittest.IsolatedAsyncioTestCase):
-    async def test_enqueue_thread_ask_puts_thread_job_contract(self) -> None:
-        queue: asyncio.Queue = asyncio.Queue()
-        keepalive = asyncio.create_task(asyncio.sleep(60))
-        source_message = FakeMessage()
-
-        async def fake_get_thread_runner(_target_thread_id):
-            return {"queue": queue, "task": keepalive}
-
-        async def fail_thread_runner_loop(_target_thread_id):
-            raise AssertionError("enqueue should not start a new loop when task is alive")
-
-        try:
-            size = await runner.enqueue_thread_ask(
-                FakeTarget(),
-                "hello runner",
-                "thread-1",
-                queued=True,
-                ack_sent=True,
-                source_message=source_message,
-                get_thread_runner_func=fake_get_thread_runner,
-                thread_runner_loop_func=fail_thread_runner_loop,
-            )
-            job = queue.get_nowait()
-        finally:
-            keepalive.cancel()
-            try:
-                await keepalive
-            except asyncio.CancelledError:
-                pass
-
-        self.assertEqual(size, 1)
-        self.assertIsInstance(job, runner.ThreadAskJob)
-        self.assertEqual(job.prompt, "hello runner")
-        self.assertEqual(job.target_thread_id, "thread-1")
-        self.assertTrue(job.queued)
-        self.assertTrue(job.ack_sent)
-        self.assertIs(job.source_message, source_message)
-
-    def test_coerces_legacy_dict_job(self) -> None:
-        channel = FakeTarget()
-        source_message = FakeMessage()
-
-        job = runner.coerce_thread_ask_job(
-            {
-                "channel": channel,
-                "prompt": "legacy",
-                "target_thread_id": " thread-1 ",
-                "queued": True,
-                "ack_sent": True,
-                "source_message": source_message,
-            }
-        )
-
-        self.assertEqual(
-            job,
-            runner.ThreadAskJob(
-                channel=channel,
-                prompt="legacy",
-                target_thread_id="thread-1",
-                queued=True,
-                ack_sent=True,
-                source_message=source_message,
-            ),
-        )
-
-    async def test_thread_runner_loop_dispatches_thread_job(self) -> None:
-        target_thread_id = "thread-1"
-        queue: asyncio.Queue = asyncio.Queue()
-        local_runner = {
-            "queue": queue,
-            "task": None,
-            "active": False,
-            "target_thread_id": target_thread_id,
-        }
-        calls: list[tuple[object, str, bool, bool, object | None, str | None]] = []
-        logs: list[str] = []
-        source_message = FakeMessage()
-        channel = FakeTarget()
-
-        async def fake_get_thread_runner(_target_thread_id):
-            return local_runner
-
-        async def fake_wait_for_idle(_target_thread_id):
-            return "idle", target_thread_id, "taxlab:1"
-
-        async def fake_run_prompt_and_send(
-            channel,
-            prompt,
-            *,
-            queued=False,
-            ack_sent=False,
-            source_message=None,
-            target_thread_id=None,
-        ):
-            calls.append((channel, prompt, queued, ack_sent, source_message, target_thread_id))
-
-        async def fake_report_failed(_job, _target_thread_id):
-            raise AssertionError("valid jobs should not report failure")
-
-        task = asyncio.create_task(
-            runner.thread_runner_loop(
-                target_thread_id,
-                get_busy_state_func=lambda _target_thread_id: ("idle", target_thread_id, "taxlab:1"),
-                wait_for_idle_func=fake_wait_for_idle,
-                run_prompt_and_send_func=fake_run_prompt_and_send,
-                report_job_failed_func=fake_report_failed,
-                log_func=logs.append,
-                runners={bot.normalize_runner_key(target_thread_id): local_runner},
-                runners_lock=asyncio.Lock(),
-                get_thread_runner_func=fake_get_thread_runner,
-            )
-        )
-        try:
-            await queue.put(
-                runner.ThreadAskJob(
-                    channel=channel,
-                    prompt=" dispatch me ",
-                    target_thread_id=target_thread_id,
-                    queued=False,
-                    ack_sent=True,
-                    source_message=source_message,
-                )
-            )
-            await asyncio.wait_for(queue.join(), timeout=1)
-        finally:
-            task.cancel()
-            try:
-                await task
-            except asyncio.CancelledError:
-                pass
-
-        self.assertEqual(
-            calls,
-            [(channel, "dispatch me", False, True, source_message, target_thread_id)],
-        )
-        self.assertEqual(logs, [])
-
-
-class PromptFlowContractTests(unittest.IsolatedAsyncioTestCase):
-    async def test_run_prompt_flow_sends_warning_ack_and_dispatches(self) -> None:
-        channel = FakeTarget()
-        source_message = FakeMessage()
-        dispatched: list[tuple[object, str, bool, bool, object | None, str | None]] = []
-
-        async def fake_run_prompt_and_send(
-            channel,
-            prompt,
-            *,
-            queued=False,
-            ack_sent=False,
-            source_message=None,
-            target_thread_id=None,
-        ):
-            dispatched.append((channel, prompt, queued, ack_sent, source_message, target_thread_id))
-
-        await runner.run_prompt_flow(
-            channel,
-            "please run",
-            queued=True,
-            source_message=source_message,
-            target_thread_id="thread-1",
-            build_context_warning_func=lambda target_thread_id: f"warning for {target_thread_id}",
-            send_chunks_func=bot.send_chunks,
-            build_ask_start_message_func=bot.build_ask_start_message,
-            run_prompt_and_send_func=fake_run_prompt_and_send,
-        )
-
-        self.assertEqual(
-            channel.messages,
-            [
-                ("warning for thread-1", None),
-                ("Queued\nmessage: please run", None),
-            ],
-        )
-        self.assertEqual(
-            dispatched,
-            [(channel, "please run", True, True, source_message, "thread-1")],
-        )
-
-    async def test_run_prompt_flow_skips_empty_warning(self) -> None:
-        channel = FakeTarget()
-        dispatched: list[str] = []
-
-        async def fake_run_prompt_and_send(channel, prompt, **_kwargs):
-            dispatched.append(prompt)
-
-        await runner.run_prompt_flow(
-            channel,
-            "please run",
-            build_context_warning_func=lambda _target_thread_id: "",
-            send_chunks_func=bot.send_chunks,
-            build_ask_start_message_func=bot.build_ask_start_message,
-            run_prompt_and_send_func=fake_run_prompt_and_send,
-        )
-
-        self.assertEqual(channel.messages, [("In progress\nmessage: please run", None)])
-        self.assertEqual(dispatched, ["please run"])
 
 
 class DiscordBotHelperTests(unittest.IsolatedAsyncioTestCase):
@@ -1016,6 +461,156 @@ class DiscordBotHelperTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(lines, ["child:start", "child:end"])
         self.assertEqual(result.get("output"), "child:start\nchild:end")
 
+    def test_run_ask_stream_uses_sidecar_for_explicit_target_thread(self) -> None:
+        original_run_bridge_command_stream = bot.run_bridge_command_stream
+        captured_argv: list[str] = []
+
+        class FakeRelay:
+            def __init__(self) -> None:
+                self.lines: list[str] = []
+                self.finished = False
+
+            def feed_line(self, line: str) -> None:
+                self.lines.append(line)
+
+            def finish(self) -> None:
+                self.finished = True
+
+        def fake_run_bridge_command_stream(argv, on_line):
+            captured_argv.extend(argv)
+            on_line("[final_answer]")
+            on_line("done")
+            on_line("[ready]")
+            return 0, "[final_answer]\ndone\n[ready]"
+
+        try:
+            bot.run_bridge_command_stream = fake_run_bridge_command_stream
+            relay = FakeRelay()
+            exit_code, output = bot.run_ask_stream(
+                "please run",
+                relay,
+                target_thread_id="thread-1",
+            )
+        finally:
+            bot.run_bridge_command_stream = original_run_bridge_command_stream
+
+        self.assertEqual(exit_code, 0)
+        self.assertIn("done", output)
+        self.assertIn("--sidecar", captured_argv)
+        self.assertNotIn("--ipc", captured_argv)
+        self.assertNotIn("--ipc-recover-ui", captured_argv)
+        self.assertTrue(relay.finished)
+
+    def test_run_ask_stream_does_not_ui_fallback_after_sidecar_failure(self) -> None:
+        original_run_bridge_command_stream = bot.run_bridge_command_stream
+        captured_argvs: list[list[str]] = []
+
+        class FakeRelay:
+            def __init__(self) -> None:
+                self.lines: list[str] = []
+                self.finished = False
+
+            def feed_line(self, line: str) -> None:
+                self.lines.append(line)
+
+            def finish(self) -> None:
+                self.finished = True
+
+        def fake_run_bridge_command_stream(argv, on_line):
+            captured_argvs.append(list(argv))
+            return 1, "ERROR: Local sidecar could not attach to the selected thread in time."
+
+        try:
+            bot.run_bridge_command_stream = fake_run_bridge_command_stream
+            relay = FakeRelay()
+            exit_code, output = bot.run_ask_stream(
+                "please run",
+                relay,
+                target_thread_id="thread-1",
+            )
+        finally:
+            bot.run_bridge_command_stream = original_run_bridge_command_stream
+
+        self.assertEqual(exit_code, 1)
+        self.assertIn("Local sidecar could not attach", output)
+        self.assertEqual(len(captured_argvs), 1)
+        self.assertIn("--sidecar", captured_argvs[0])
+        self.assertNotIn("--ui", captured_argvs[0])
+        self.assertTrue(relay.finished)
+
+    def test_command_ask_sidecar_transport_starts_turn_without_ipc(self) -> None:
+        original_choose_thread = bridge.choose_thread
+        original_get_busy_state = bridge.get_thread_busy_state
+        original_start_sidecar = bridge.start_turn_via_sidecar
+        original_start_ipc = bridge.start_turn_via_ipc
+        original_wait_delivery = bridge.wait_for_prompt_delivery
+        original_watch_final = bridge.watch_for_final_answer
+        original_sync = bridge.sync_session_index_with_state
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            session_path = Path(temp_dir) / "session.jsonl"
+            session_path.write_text("", encoding="utf-8")
+            thread_info = bridge.ThreadInfo(
+                id="thread-1",
+                title="Thread",
+                cwd=temp_dir,
+                updated_at=1,
+                rollout_path=str(session_path),
+                model="gpt",
+                reasoning_effort="high",
+                tokens_used=1,
+            )
+            calls: list[tuple[str, str]] = []
+
+            def fake_start_sidecar(selected_thread, prompt, *, timeout_sec=10.0, keep_client_open=False):
+                calls.append((selected_thread.id, prompt))
+                return {"owner_client_id": "", "turn_id": "turn-1", "attempts": "1"}
+
+            def fake_start_ipc(*args, **kwargs):
+                raise AssertionError("sidecar ask must not call IPC start-turn")
+
+            def fake_watch_final(**kwargs):
+                return {
+                    "commentary": [],
+                    "final_answer": "done",
+                    "final_streamed_live": False,
+                    "status": "ready",
+                }
+
+            try:
+                bridge.choose_thread = lambda thread_id=None, cwd=None: thread_info
+                bridge.get_thread_busy_state = lambda selected_thread, **kwargs: "idle"
+                bridge.start_turn_via_sidecar = fake_start_sidecar
+                bridge.start_turn_via_ipc = fake_start_ipc
+                bridge.wait_for_prompt_delivery = (
+                    lambda recent_offsets, prompt, timeout_sec=6.0: thread_info
+                )
+                bridge.watch_for_final_answer = fake_watch_final
+                bridge.sync_session_index_with_state = lambda: None
+
+                parser = bridge.build_parser()
+                args = parser.parse_args(
+                    ["ask", "--sidecar", "--thread-id", "thread-1", "please run"]
+                )
+                stdout = io.StringIO()
+                with redirect_stdout(stdout):
+                    exit_code = args.func(args)
+            finally:
+                bridge.choose_thread = original_choose_thread
+                bridge.get_thread_busy_state = original_get_busy_state
+                bridge.start_turn_via_sidecar = original_start_sidecar
+                bridge.start_turn_via_ipc = original_start_ipc
+                bridge.wait_for_prompt_delivery = original_wait_delivery
+                bridge.watch_for_final_answer = original_watch_final
+                bridge.sync_session_index_with_state = original_sync
+
+        text = stdout.getvalue()
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(calls, [("thread-1", "please run")])
+        self.assertIn("transport: local-sidecar turn/start", text)
+        self.assertIn("[sidecar_delivery] turn_id=turn-1 attempts=1", text)
+        self.assertIn("[final_answer]\ndone", text)
+
     def test_discord_busy_detection_ignores_other_thread_busy_error(self) -> None:
         output = "ERROR: Another mapped thread is still working."
 
@@ -1030,6 +625,45 @@ class DiscordBotHelperTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertTrue(bot.is_selected_thread_busy_error(1, output))
+
+    def test_bridge_ipc_start_turn_inherits_summary_setting(self) -> None:
+        original_write_ipc_message = bridge._write_ipc_message
+        original_read_ipc_response = bridge._read_ipc_response
+        written_payloads: list[dict] = []
+        try:
+            bridge._write_ipc_message = lambda _handle, payload: written_payloads.append(payload)
+            bridge._read_ipc_response = lambda _handle, _request_id, timeout_sec, owner_clients: {
+                "resultType": "success",
+                "handledByClientId": "client-1",
+                "result": {"result": {"turn": {"id": "turn-1"}}},
+            }
+            thread = bridge.ThreadInfo(
+                id="thread-1",
+                title="Thread",
+                cwd="C:\\repo",
+                updated_at=1,
+                rollout_path="session.jsonl",
+                model="gpt",
+                reasoning_effort="high",
+                tokens_used=0,
+            )
+
+            result = bridge._request_start_turn_via_ipc(
+                1,
+                "source-client",
+                thread,
+                "prompt",
+                1.0,
+                {},
+            )
+
+            self.assertEqual(result["turn_id"], "turn-1")
+            turn_start_params = written_payloads[0]["params"]["turnStartParams"]
+            self.assertTrue(turn_start_params["inheritThreadSettings"])
+            self.assertIsNone(turn_start_params["summary"])
+        finally:
+            bridge._write_ipc_message = original_write_ipc_message
+            bridge._read_ipc_response = original_read_ipc_response
 
     def test_bridge_ipc_ask_ignores_other_busy_threads(self) -> None:
         original_choose_thread = bridge.choose_thread
@@ -1116,10 +750,13 @@ class DiscordBotHelperTests(unittest.IsolatedAsyncioTestCase):
         original_get_thread_ui_name = bridge.get_thread_ui_name
         original_is_thread_busy = bridge.is_thread_busy
         original_get_thread_busy_state = bridge.get_thread_busy_state
+        original_start_turn_via_ipc = bridge.start_turn_via_ipc
+        original_wait_for_prompt_delivery = bridge.wait_for_prompt_delivery
+        original_watch_for_final_answer = bridge.watch_for_final_answer
         try:
             with tempfile.TemporaryDirectory() as temp_dir:
                 session_path = Path(temp_dir) / "session.jsonl"
-                session_path.write_text("", encoding="utf-8")
+                session_path.write_text("old", encoding="utf-8")
                 target_thread = bridge.ThreadInfo(
                     id="target-thread",
                     title="Target",
@@ -1136,6 +773,22 @@ class DiscordBotHelperTests(unittest.IsolatedAsyncioTestCase):
                 bridge.get_thread_ui_name = lambda thread_id, thread=None: None
                 bridge.is_thread_busy = lambda path: True
                 bridge.get_thread_busy_state = lambda thread, allow_resume=True: "busy"
+                start_calls: list[tuple[str, str]] = []
+                bridge.start_turn_via_ipc = lambda thread, prompt, timeout_sec=10.0, allow_ui_recovery=False: (
+                    start_calls.append((thread.id, prompt))
+                    or {
+                        "owner_client_id": "client-1",
+                        "turn_id": "turn-1",
+                    }
+                )
+                bridge.wait_for_prompt_delivery = lambda session_offsets, prompt, timeout_sec=4.0: target_thread
+                bridge.watch_for_final_answer = lambda **kwargs: {
+                    "commentary": [],
+                    "final_answer": "done",
+                    "status": "ready",
+                    "streamed_live": False,
+                    "final_streamed_live": False,
+                }
                 args = SimpleNamespace(
                     thread_id="target-thread",
                     cwd=None,
@@ -1143,28 +796,45 @@ class DiscordBotHelperTests(unittest.IsolatedAsyncioTestCase):
                     dry_run=False,
                     force_while_busy=False,
                     ipc=True,
+                    ipc_recover_ui=False,
+                    background=False,
+                    wait=True,
+                    timeout=30.0,
+                    include_commentary=False,
+                    stream=False,
                 )
 
-                with self.assertRaisesRegex(RuntimeError, "selected thread is still busy"):
-                    with redirect_stdout(io.StringIO()):
-                        bridge.command_ask(args)
+                stdout = io.StringIO()
+                with redirect_stdout(stdout):
+                    exit_code = bridge.command_ask(args)
+
+            self.assertEqual(exit_code, 0)
+            self.assertEqual(start_calls, [("target-thread", "qa prompt")])
+            self.assertIn("[ipc_delivery] owner_client=client-1 turn_id=turn-1", stdout.getvalue())
+            self.assertIn("[final_answer]\ndone", stdout.getvalue())
         finally:
             bridge.choose_thread = original_choose_thread
             bridge.get_busy_threads = original_get_busy_threads
             bridge.get_thread_ui_name = original_get_thread_ui_name
             bridge.is_thread_busy = original_is_thread_busy
             bridge.get_thread_busy_state = original_get_thread_busy_state
+            bridge.start_turn_via_ipc = original_start_turn_via_ipc
+            bridge.wait_for_prompt_delivery = original_wait_for_prompt_delivery
+            bridge.watch_for_final_answer = original_watch_for_final_answer
 
-    def test_bridge_ipc_ask_still_blocks_target_busy_when_other_thread_busy(self) -> None:
+    def test_bridge_ipc_ask_keeps_busy_target_steerable_when_other_thread_busy(self) -> None:
         original_choose_thread = bridge.choose_thread
         original_get_busy_threads = bridge.get_busy_threads
         original_get_thread_ui_name = bridge.get_thread_ui_name
         original_is_thread_busy = bridge.is_thread_busy
         original_get_thread_busy_state = bridge.get_thread_busy_state
+        original_start_turn_via_ipc = bridge.start_turn_via_ipc
+        original_wait_for_prompt_delivery = bridge.wait_for_prompt_delivery
+        original_watch_for_final_answer = bridge.watch_for_final_answer
         try:
             with tempfile.TemporaryDirectory() as temp_dir:
                 session_path = Path(temp_dir) / "session.jsonl"
-                session_path.write_text("", encoding="utf-8")
+                session_path.write_text("old", encoding="utf-8")
                 target_thread = bridge.ThreadInfo(
                     id="target-thread",
                     title="Target",
@@ -1191,6 +861,22 @@ class DiscordBotHelperTests(unittest.IsolatedAsyncioTestCase):
                 bridge.get_thread_ui_name = lambda thread_id, thread=None: None
                 bridge.is_thread_busy = lambda path: True
                 bridge.get_thread_busy_state = lambda thread, allow_resume=True: "busy"
+                start_calls: list[tuple[str, str]] = []
+                bridge.start_turn_via_ipc = lambda thread, prompt, timeout_sec=10.0, allow_ui_recovery=False: (
+                    start_calls.append((thread.id, prompt))
+                    or {
+                        "owner_client_id": "client-1",
+                        "turn_id": "turn-1",
+                    }
+                )
+                bridge.wait_for_prompt_delivery = lambda session_offsets, prompt, timeout_sec=4.0: target_thread
+                bridge.watch_for_final_answer = lambda **kwargs: {
+                    "commentary": [],
+                    "final_answer": "done",
+                    "status": "ready",
+                    "streamed_live": False,
+                    "final_streamed_live": False,
+                }
                 args = SimpleNamespace(
                     thread_id="target-thread",
                     cwd=None,
@@ -1198,17 +884,31 @@ class DiscordBotHelperTests(unittest.IsolatedAsyncioTestCase):
                     dry_run=False,
                     force_while_busy=False,
                     ipc=True,
+                    ipc_recover_ui=False,
+                    background=False,
+                    wait=True,
+                    timeout=30.0,
+                    include_commentary=False,
+                    stream=False,
                 )
 
-                with self.assertRaisesRegex(RuntimeError, "selected thread is still busy"):
-                    with redirect_stdout(io.StringIO()):
-                        bridge.command_ask(args)
+                stdout = io.StringIO()
+                with redirect_stdout(stdout):
+                    exit_code = bridge.command_ask(args)
+
+            self.assertEqual(exit_code, 0)
+            self.assertEqual(start_calls, [("target-thread", "qa prompt")])
+            self.assertIn("[ipc_delivery] owner_client=client-1 turn_id=turn-1", stdout.getvalue())
+            self.assertIn("[final_answer]\ndone", stdout.getvalue())
         finally:
             bridge.choose_thread = original_choose_thread
             bridge.get_busy_threads = original_get_busy_threads
             bridge.get_thread_ui_name = original_get_thread_ui_name
             bridge.is_thread_busy = original_is_thread_busy
             bridge.get_thread_busy_state = original_get_thread_busy_state
+            bridge.start_turn_via_ipc = original_start_turn_via_ipc
+            bridge.wait_for_prompt_delivery = original_wait_for_prompt_delivery
+            bridge.watch_for_final_answer = original_watch_for_final_answer
 
     def test_bridge_ipc_ask_allows_sidecar_idle_orphan_without_force(self) -> None:
         original_choose_thread = bridge.choose_thread
@@ -2510,6 +2210,34 @@ class DiscordBotHelperTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("busy_choice_cleanup_deleted count=3", log_text)
         self.assertIn("persistent_component_claim_cleanup_deleted count=2", log_text)
 
+    async def test_stop_marker_loop_closes_bot_and_removes_marker(self) -> None:
+        old_stop_path = bot.STOP_REQUEST_PATH
+        old_poll_seconds = bot.STOP_MARKER_POLL_SECONDS
+        with tempfile.TemporaryDirectory() as temp_dir:
+            marker_path = Path(temp_dir) / ".codex_discord_bot.stop"
+            marker_path.write_text("1", encoding="ascii")
+            fake_client = SimpleNamespace(closed=False, close_calls=0)
+
+            def is_closed() -> bool:
+                return bool(fake_client.closed)
+
+            async def close() -> None:
+                fake_client.close_calls += 1
+                fake_client.closed = True
+
+            fake_client.is_closed = is_closed
+            fake_client.close = close
+            bot.STOP_REQUEST_PATH = marker_path
+            bot.STOP_MARKER_POLL_SECONDS = 0.01
+            try:
+                await asyncio.wait_for(bot.CodexDiscordBot.stop_marker_loop(fake_client), timeout=1)
+            finally:
+                bot.STOP_REQUEST_PATH = old_stop_path
+                bot.STOP_MARKER_POLL_SECONDS = old_poll_seconds
+
+            self.assertEqual(fake_client.close_calls, 1)
+            self.assertFalse(marker_path.exists())
+
     def test_startup_probe_targets_include_allowed_and_mirror_channels(self) -> None:
         old_db_path = bot.MIRROR_DB_PATH
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp_dir:
@@ -2552,9 +2280,11 @@ class DiscordBotHelperTests(unittest.IsolatedAsyncioTestCase):
 
     def test_discord_doctor_message_includes_adapter_diagnostics(self) -> None:
         old_db_path = bot.MIRROR_DB_PATH
+        old_build_mirror_check = bot.build_mirror_check
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp_dir:
             bot.MIRROR_DB_PATH = Path(temp_dir) / "mirror.sqlite"
             try:
+                bot.build_mirror_check = lambda: "Mirror check\ncodex_threads: 0"
                 bot.init_mirror_db()
                 with sqlite3.connect(bot.MIRROR_DB_PATH) as conn:
                     conn.execute(
@@ -2609,6 +2339,7 @@ class DiscordBotHelperTests(unittest.IsolatedAsyncioTestCase):
                     output = bot.build_discord_doctor_message(fake_bot, 222)
             finally:
                 bot.MIRROR_DB_PATH = old_db_path
+                bot.build_mirror_check = old_build_mirror_check
 
         self.assertIn("Discord adapter diagnostics", output)
         self.assertIn("channel_id: 222", output)
@@ -2653,6 +2384,25 @@ class DiscordBotHelperTests(unittest.IsolatedAsyncioTestCase):
         user_section = output.split("Recent user/control hook events:", 1)[1].split("Recent hook events:", 1)[0]
         self.assertNotIn("bot=True", user_section)
         self.assertNotIn("sensitive prompt", output)
+
+    def test_discord_doctor_message_surfaces_mirror_check_file_failure(self) -> None:
+        old_db_path = bot.MIRROR_DB_PATH
+        old_build_mirror_check = bot.build_mirror_check
+        try:
+            with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp_dir:
+                bot.MIRROR_DB_PATH = Path(temp_dir) / "mirror.sqlite"
+                bot.init_mirror_db()
+                bot.build_mirror_check = lambda: (_ for _ in ()).throw(
+                    FileNotFoundError("missing state db")
+                )
+
+                output = bot.build_discord_doctor_message(SimpleNamespace(), 222)
+
+            self.assertIn("Mirror check failed", output)
+            self.assertIn("ERROR: missing state db", output)
+        finally:
+            bot.MIRROR_DB_PATH = old_db_path
+            bot.build_mirror_check = old_build_mirror_check
 
     async def test_discord_channel_history_sanitizes_message_content(self) -> None:
         class FakeHistoryChannel:
@@ -3141,6 +2891,11 @@ class DiscordBotHelperTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(readme_match)
         readme_commands = set(re.findall(r"/([a-z_]+)", readme_match.group(1)))
         self.assertEqual(readme_commands, expected_commands)
+        help_prefix_commands = set(re.findall(r"^!([a-z_]+)", help_text, re.MULTILINE))
+        readme_prefix_commands = set(re.findall(r"`!([a-z_]+)", readme))
+        self.assertLessEqual(help_prefix_commands, readme_prefix_commands)
+        self.assertIn("Numeric refs follow the same visible sidebar numbering as `!list`.", readme)
+        self.assertIn("!mirror check [limit]", help_text)
 
         source = Path(bot.__file__).read_text(encoding="utf-8")
         command_names = set(re.findall(r'@bot\.tree\.command\(name="([^"]+)"', source))
@@ -4284,31 +4039,421 @@ class DiscordBotHelperTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Context warning: 70.0% (high)", warning)
 
     async def test_plain_ask_does_not_check_busy_before_prompt_flow(self) -> None:
+        original_get_interactive_state = bot.get_interactive_state_for_thread
+        original_get_busy_state = bot.get_busy_state_for_thread
+        original_run_prompt_flow = bot.run_prompt_flow
         calls: list[tuple[str, str | None, object]] = []
-        marked: list[tuple[str | None, str]] = []
+        try:
+            bot.get_interactive_state_for_thread = lambda target_thread_id: ("", None, "")
+            bot.get_busy_state_for_thread = lambda target_thread_id: (_ for _ in ()).throw(
+                AssertionError("plain ask should not inspect busy state before sending")
+            )
 
-        async def fake_run_prompt_flow(channel, prompt, *, source_message=None, target_thread_id=None):
-            calls.append((prompt, target_thread_id, source_message))
+            async def fake_run_prompt_flow(channel, prompt, *, source_message=None, target_thread_id=None):
+                calls.append((prompt, target_thread_id, source_message))
 
-        async def fake_wait_for_recent_prompt(target_thread_id, prompt):
-            return False
+            bot.run_prompt_flow = fake_run_prompt_flow
+            message = FakeMessage()
+            await bot.handle_plain_ask(message, "please send", target_thread_id="thread-1")
 
-        message = FakeMessage()
-        await bot.handle_plain_ask(
-            message,
-            "please send",
-            target_thread_id="thread-1",
-            get_interactive_state_func=lambda target_thread_id: ("", None, ""),
-            wait_for_recent_prompt_func=fake_wait_for_recent_prompt,
-            mark_recent_discord_origin_prompt_func=lambda target_thread_id, prompt: marked.append(
-                (target_thread_id, prompt)
-            ),
-            run_prompt_flow_func=fake_run_prompt_flow,
-        )
+            self.assertEqual(message.channel.messages, [])
+            self.assertEqual(calls, [("please send", "thread-1", message)])
+        finally:
+            bot.get_interactive_state_for_thread = original_get_interactive_state
+            bot.get_busy_state_for_thread = original_get_busy_state
+            bot.run_prompt_flow = original_run_prompt_flow
 
-        self.assertEqual(message.channel.messages, [])
-        self.assertEqual(marked, [("thread-1", "please send")])
-        self.assertEqual(calls, [("please send", "thread-1", message)])
+    async def test_plain_ask_idle_runner_check_does_not_create_queue_state(self) -> None:
+        original_get_interactive_state = bot.get_interactive_state_for_thread
+        original_has_recent_prompt = bot.has_recent_codex_app_user_prompt
+        original_run_prompt_flow = bot.run_prompt_flow
+        old_prompts = dict(bot.RECENT_DISCORD_ORIGIN_PROMPTS)
+        target_key = bot.normalize_runner_key("thread-1")
+        calls: list[tuple[str, str | None]] = []
+        try:
+            bot.RECENT_DISCORD_ORIGIN_PROMPTS.clear()
+            async with bot.THREAD_RUNNERS_LOCK:
+                bot.THREAD_RUNNERS.pop(target_key, None)
+            bot.get_interactive_state_for_thread = lambda target_thread_id: ("", None, "")
+            bot.has_recent_codex_app_user_prompt = lambda target_thread_id, prompt: False
+
+            async def fake_run_prompt_flow(channel, prompt, *, source_message=None, target_thread_id=None):
+                calls.append((prompt, target_thread_id))
+
+            bot.run_prompt_flow = fake_run_prompt_flow
+            await bot.handle_plain_ask(FakeMessage(), "first request", target_thread_id="thread-1")
+
+            self.assertEqual(calls, [("first request", "thread-1")])
+            async with bot.THREAD_RUNNERS_LOCK:
+                self.assertNotIn(target_key, bot.THREAD_RUNNERS)
+        finally:
+            async with bot.THREAD_RUNNERS_LOCK:
+                bot.THREAD_RUNNERS.pop(target_key, None)
+            bot.RECENT_DISCORD_ORIGIN_PROMPTS.clear()
+            bot.RECENT_DISCORD_ORIGIN_PROMPTS.update(old_prompts)
+            bot.get_interactive_state_for_thread = original_get_interactive_state
+            bot.has_recent_codex_app_user_prompt = original_has_recent_prompt
+            bot.run_prompt_flow = original_run_prompt_flow
+
+    async def test_plain_ask_offers_queue_or_steer_when_same_thread_runner_is_busy(self) -> None:
+        original_get_interactive_state = bot.get_interactive_state_for_thread
+        original_has_recent_prompt = bot.has_recent_codex_app_user_prompt
+        original_is_thread_runner_busy = bot.is_thread_runner_busy
+        original_run_prompt_flow = bot.run_prompt_flow
+        old_prompts = dict(bot.RECENT_DISCORD_ORIGIN_PROMPTS)
+        try:
+            bot.RECENT_DISCORD_ORIGIN_PROMPTS.clear()
+            bot.get_interactive_state_for_thread = lambda target_thread_id: ("", None, "")
+            bot.has_recent_codex_app_user_prompt = lambda target_thread_id, prompt: False
+
+            async def runner_busy(target_thread_id):
+                return target_thread_id == "thread-1"
+
+            async def fail_run_prompt_flow(*args, **kwargs):
+                raise AssertionError("same-thread busy ask must wait for user queue/steer choice")
+
+            bot.is_thread_runner_busy = runner_busy
+            bot.run_prompt_flow = fail_run_prompt_flow
+            message = FakeMessage()
+
+            with tempfile.TemporaryDirectory() as temp_dir:
+                log_path = Path(temp_dir) / "discord-smoke.log"
+                with EnvPatch("CODEX_DISCORD_LOG_PATH", str(log_path)):
+                    await bot.handle_plain_ask(message, "second request", target_thread_id="thread-1")
+                log_text = log_path.read_text(encoding="utf-8")
+
+            self.assertEqual(len(message.channel.messages), 1)
+            content, view = message.channel.messages[0]
+            self.assertIn("Choose the Discord action for this message.", content)
+            self.assertIsInstance(view, bot.BusyChoiceView)
+            self.assertEqual(view.target_thread_id, "thread-1")
+            self.assertTrue(view.allow_steer)
+            steer_button = next(
+                item for item in view.children if getattr(item, "label", "") == "Steer now"
+            )
+            self.assertFalse(getattr(steer_button, "disabled", False))
+            self.assertIn("busy_choice_sent reason=same_thread_runner_busy target=thread-1", log_text)
+        finally:
+            bot.RECENT_DISCORD_ORIGIN_PROMPTS.clear()
+            bot.RECENT_DISCORD_ORIGIN_PROMPTS.update(old_prompts)
+            bot.get_interactive_state_for_thread = original_get_interactive_state
+            bot.has_recent_codex_app_user_prompt = original_has_recent_prompt
+            bot.is_thread_runner_busy = original_is_thread_runner_busy
+            bot.run_prompt_flow = original_run_prompt_flow
+
+    async def test_plain_ask_offers_choice_while_same_thread_direct_ask_is_active(self) -> None:
+        original_get_interactive_state = bot.get_interactive_state_for_thread
+        original_has_recent_prompt = bot.has_recent_codex_app_user_prompt
+        original_run_ask_stream = bot.run_ask_stream
+        original_build_context_warning = bot.build_context_warning
+        original_resolve_target_ref = bot.resolve_target_ref
+        original_should_delegate = bot.should_delegate_output_to_session_mirror
+        old_prompts = dict(bot.RECENT_DISCORD_ORIGIN_PROMPTS)
+        target_key = bot.normalize_runner_key("thread-1")
+        started = threading.Event()
+        release = threading.Event()
+        try:
+            bot.RECENT_DISCORD_ORIGIN_PROMPTS.clear()
+            async with bot.THREAD_RUNNERS_LOCK:
+                bot.THREAD_RUNNERS.pop(target_key, None)
+            bot.ASK_DELIVERY_LOCKS.pop(target_key, None)
+            bot.get_interactive_state_for_thread = lambda target_thread_id: ("", None, "")
+            bot.has_recent_codex_app_user_prompt = lambda target_thread_id, prompt: False
+            bot.build_context_warning = lambda target_thread_id: ""
+            bot.resolve_target_ref = lambda target_thread_id: (target_thread_id, "taxlab:1")
+            bot.should_delegate_output_to_session_mirror = lambda channel, target_thread_id: False
+
+            def fake_run_ask_stream(prompt, relay, *, target_thread_id=None):
+                started.set()
+                release.wait(timeout=2)
+                return 0, "done"
+
+            bot.run_ask_stream = fake_run_ask_stream
+            channel = FakeTarget()
+            first_message = FakeMessage()
+            second_message = FakeMessage()
+            first_message.channel = channel
+            second_message.channel = channel
+
+            first_task = asyncio.create_task(
+                bot.handle_plain_ask(first_message, "first request", target_thread_id="thread-1")
+            )
+            self.assertTrue(await asyncio.to_thread(started.wait, 1))
+
+            await bot.handle_plain_ask(second_message, "second request", target_thread_id="thread-1")
+
+            busy_messages = [
+                (content, view)
+                for content, view in channel.messages
+                if isinstance(view, bot.BusyChoiceView)
+            ]
+            self.assertEqual(len(busy_messages), 1)
+            content, view = busy_messages[0]
+            self.assertIn("Choose the Discord action for this message.", content)
+            self.assertEqual(view.target_thread_id, "thread-1")
+            self.assertTrue(view.allow_steer)
+            labels = [getattr(item, "label", "") for item in view.children]
+            self.assertEqual(labels, ["Steer now", "Queue next", "Ignore"])
+            async with bot.THREAD_RUNNERS_LOCK:
+                self.assertNotIn(target_key, bot.THREAD_RUNNERS)
+
+            release.set()
+            await asyncio.wait_for(first_task, timeout=1)
+        finally:
+            release.set()
+            if "first_task" in locals() and not first_task.done():
+                first_task.cancel()
+                try:
+                    await first_task
+                except asyncio.CancelledError:
+                    pass
+            async with bot.THREAD_RUNNERS_LOCK:
+                bot.THREAD_RUNNERS.pop(target_key, None)
+            bot.ASK_DELIVERY_LOCKS.pop(target_key, None)
+            bot.RECENT_DISCORD_ORIGIN_PROMPTS.clear()
+            bot.RECENT_DISCORD_ORIGIN_PROMPTS.update(old_prompts)
+            bot.get_interactive_state_for_thread = original_get_interactive_state
+            bot.has_recent_codex_app_user_prompt = original_has_recent_prompt
+            bot.run_ask_stream = original_run_ask_stream
+            bot.build_context_warning = original_build_context_warning
+            bot.resolve_target_ref = original_resolve_target_ref
+            bot.should_delegate_output_to_session_mirror = original_should_delegate
+
+    async def test_plain_ask_selected_target_uses_resolved_thread_for_busy_choice(self) -> None:
+        original_get_interactive_state = bot.get_interactive_state_for_thread
+        original_has_recent_prompt = bot.has_recent_codex_app_user_prompt
+        original_run_ask_stream = bot.run_ask_stream
+        original_build_context_warning = bot.build_context_warning
+        original_resolve_target_ref = bot.resolve_target_ref
+        original_should_delegate = bot.should_delegate_output_to_session_mirror
+        old_prompts = dict(bot.RECENT_DISCORD_ORIGIN_PROMPTS)
+        target_key = bot.normalize_runner_key("thread-1")
+        selected_key = bot.normalize_runner_key(None)
+        started = threading.Event()
+        release = threading.Event()
+        try:
+            bot.RECENT_DISCORD_ORIGIN_PROMPTS.clear()
+            async with bot.THREAD_RUNNERS_LOCK:
+                bot.THREAD_RUNNERS.pop(target_key, None)
+                bot.THREAD_RUNNERS.pop(selected_key, None)
+            bot.ASK_DELIVERY_LOCKS.pop(target_key, None)
+            bot.ASK_DELIVERY_LOCKS.pop(selected_key, None)
+            bot.get_interactive_state_for_thread = lambda target_thread_id: ("", "thread-1", "taxlab:1")
+            bot.has_recent_codex_app_user_prompt = lambda target_thread_id, prompt: False
+            bot.build_context_warning = lambda target_thread_id: ""
+            bot.resolve_target_ref = lambda target_thread_id: (target_thread_id or "thread-1", "taxlab:1")
+            bot.should_delegate_output_to_session_mirror = lambda channel, target_thread_id: False
+
+            def fake_run_ask_stream(prompt, relay, *, target_thread_id=None):
+                started.set()
+                release.wait(timeout=2)
+                return 0, "done"
+
+            bot.run_ask_stream = fake_run_ask_stream
+            channel = FakeTarget()
+            first_message = FakeMessage()
+            second_message = FakeMessage()
+            first_message.channel = channel
+            second_message.channel = channel
+
+            first_task = asyncio.create_task(
+                bot.handle_plain_ask(first_message, "first request", target_thread_id=None)
+            )
+            self.assertTrue(await asyncio.to_thread(started.wait, 1))
+
+            await bot.handle_plain_ask(second_message, "second request", target_thread_id=None)
+
+            busy_messages = [
+                (content, view)
+                for content, view in channel.messages
+                if isinstance(view, bot.BusyChoiceView)
+            ]
+            self.assertEqual(len(busy_messages), 1)
+            _content, view = busy_messages[0]
+            self.assertEqual(view.target_thread_id, "thread-1")
+            async with bot.THREAD_RUNNERS_LOCK:
+                self.assertNotIn(target_key, bot.THREAD_RUNNERS)
+                self.assertNotIn(selected_key, bot.THREAD_RUNNERS)
+
+            release.set()
+            await asyncio.wait_for(first_task, timeout=1)
+        finally:
+            release.set()
+            if "first_task" in locals() and not first_task.done():
+                first_task.cancel()
+                try:
+                    await first_task
+                except asyncio.CancelledError:
+                    pass
+            async with bot.THREAD_RUNNERS_LOCK:
+                bot.THREAD_RUNNERS.pop(target_key, None)
+                bot.THREAD_RUNNERS.pop(selected_key, None)
+            bot.ASK_DELIVERY_LOCKS.pop(target_key, None)
+            bot.ASK_DELIVERY_LOCKS.pop(selected_key, None)
+            bot.RECENT_DISCORD_ORIGIN_PROMPTS.clear()
+            bot.RECENT_DISCORD_ORIGIN_PROMPTS.update(old_prompts)
+            bot.get_interactive_state_for_thread = original_get_interactive_state
+            bot.has_recent_codex_app_user_prompt = original_has_recent_prompt
+            bot.run_ask_stream = original_run_ask_stream
+            bot.build_context_warning = original_build_context_warning
+            bot.resolve_target_ref = original_resolve_target_ref
+            bot.should_delegate_output_to_session_mirror = original_should_delegate
+
+    async def test_plain_ask_offers_choice_before_first_direct_ask_acquires_delivery_lock(self) -> None:
+        original_get_interactive_state = bot.get_interactive_state_for_thread
+        original_has_recent_prompt = bot.has_recent_codex_app_user_prompt
+        original_run_ask_stream = bot.run_ask_stream
+        original_build_context_warning = bot.build_context_warning
+        original_resolve_target_ref = bot.resolve_target_ref
+        original_should_delegate = bot.should_delegate_output_to_session_mirror
+        old_prompts = dict(bot.RECENT_DISCORD_ORIGIN_PROMPTS)
+        target_key = bot.normalize_runner_key("thread-1")
+        start_send_entered = threading.Event()
+        release_start_send = threading.Event()
+        run_calls: list[str] = []
+
+        class BlockingStartTarget(FakeTarget):
+            async def send(self, content: str, view=None) -> None:
+                if view is None and content.startswith("In progress\nmessage: first request"):
+                    start_send_entered.set()
+                    await asyncio.to_thread(release_start_send.wait, 2)
+                await super().send(content, view=view)
+
+        try:
+            bot.RECENT_DISCORD_ORIGIN_PROMPTS.clear()
+            async with bot.THREAD_RUNNERS_LOCK:
+                bot.THREAD_RUNNERS.pop(target_key, None)
+            async with bot.ACTIVE_DIRECT_ASK_LOCK:
+                bot.ACTIVE_DIRECT_ASK_TARGET_KEYS.discard(target_key)
+            bot.ASK_DELIVERY_LOCKS.pop(target_key, None)
+            bot.get_interactive_state_for_thread = lambda target_thread_id: ("", None, "")
+            bot.has_recent_codex_app_user_prompt = lambda target_thread_id, prompt: False
+            bot.build_context_warning = lambda target_thread_id: ""
+            bot.resolve_target_ref = lambda target_thread_id: (target_thread_id, "taxlab:1")
+            bot.should_delegate_output_to_session_mirror = lambda channel, target_thread_id: False
+
+            def fake_run_ask_stream(prompt, relay, *, target_thread_id=None):
+                run_calls.append(prompt)
+                return 0, "done"
+
+            bot.run_ask_stream = fake_run_ask_stream
+            channel = BlockingStartTarget()
+            first_message = FakeMessage()
+            second_message = FakeMessage()
+            first_message.channel = channel
+            second_message.channel = channel
+
+            first_task = asyncio.create_task(
+                bot.handle_plain_ask(first_message, "first request", target_thread_id="thread-1")
+            )
+            self.assertTrue(await asyncio.to_thread(start_send_entered.wait, 1))
+
+            await bot.handle_plain_ask(second_message, "second request", target_thread_id="thread-1")
+
+            busy_messages = [
+                (content, view)
+                for content, view in channel.messages
+                if isinstance(view, bot.BusyChoiceView)
+            ]
+            self.assertEqual(len(busy_messages), 1)
+            _content, view = busy_messages[0]
+            self.assertEqual(view.target_thread_id, "thread-1")
+            self.assertEqual(run_calls, [])
+
+            release_start_send.set()
+            await asyncio.wait_for(first_task, timeout=1)
+            self.assertEqual(run_calls, ["first request"])
+        finally:
+            release_start_send.set()
+            if "first_task" in locals() and not first_task.done():
+                first_task.cancel()
+                try:
+                    await first_task
+                except asyncio.CancelledError:
+                    pass
+            async with bot.THREAD_RUNNERS_LOCK:
+                bot.THREAD_RUNNERS.pop(target_key, None)
+            async with bot.ACTIVE_DIRECT_ASK_LOCK:
+                bot.ACTIVE_DIRECT_ASK_TARGET_KEYS.discard(target_key)
+            bot.ASK_DELIVERY_LOCKS.pop(target_key, None)
+            bot.RECENT_DISCORD_ORIGIN_PROMPTS.clear()
+            bot.RECENT_DISCORD_ORIGIN_PROMPTS.update(old_prompts)
+            bot.get_interactive_state_for_thread = original_get_interactive_state
+            bot.has_recent_codex_app_user_prompt = original_has_recent_prompt
+            bot.run_ask_stream = original_run_ask_stream
+            bot.build_context_warning = original_build_context_warning
+            bot.resolve_target_ref = original_resolve_target_ref
+            bot.should_delegate_output_to_session_mirror = original_should_delegate
+
+    async def test_plain_ask_offers_choice_before_same_thread_direct_ask_enters_stream(self) -> None:
+        original_get_interactive_state = bot.get_interactive_state_for_thread
+        original_has_recent_prompt = bot.has_recent_codex_app_user_prompt
+        original_run_prompt_flow = bot.run_prompt_flow
+        old_prompts = dict(bot.RECENT_DISCORD_ORIGIN_PROMPTS)
+        target_key = bot.normalize_runner_key("thread-1")
+        started = asyncio.Event()
+        release = asyncio.Event()
+        flow_calls: list[tuple[str, str | None]] = []
+        try:
+            bot.RECENT_DISCORD_ORIGIN_PROMPTS.clear()
+            async with bot.THREAD_RUNNERS_LOCK:
+                bot.THREAD_RUNNERS.pop(target_key, None)
+            async with bot.ACTIVE_DIRECT_ASK_LOCK:
+                bot.ACTIVE_DIRECT_ASK_TARGET_KEYS.discard(target_key)
+            bot.get_interactive_state_for_thread = lambda target_thread_id: ("", None, "")
+            bot.has_recent_codex_app_user_prompt = lambda target_thread_id, prompt: False
+
+            async def fake_run_prompt_flow(channel, prompt, *, source_message=None, target_thread_id=None):
+                flow_calls.append((prompt, target_thread_id))
+                if prompt == "first request":
+                    started.set()
+                    await release.wait()
+                    return
+                raise AssertionError("second same-thread ask must wait for a queue/steer choice")
+
+            bot.run_prompt_flow = fake_run_prompt_flow
+            channel = FakeTarget()
+            first_message = FakeMessage()
+            second_message = FakeMessage()
+            first_message.channel = channel
+            second_message.channel = channel
+
+            first_task = asyncio.create_task(
+                bot.handle_plain_ask(first_message, "first request", target_thread_id="thread-1")
+            )
+            await asyncio.wait_for(started.wait(), timeout=1)
+
+            await bot.handle_plain_ask(second_message, "second request", target_thread_id="thread-1")
+
+            busy_messages = [
+                (content, view)
+                for content, view in channel.messages
+                if isinstance(view, bot.BusyChoiceView)
+            ]
+            self.assertEqual(flow_calls, [("first request", "thread-1")])
+            self.assertEqual(len(busy_messages), 1)
+            _content, view = busy_messages[0]
+            self.assertEqual(view.target_thread_id, "thread-1")
+
+            release.set()
+            await asyncio.wait_for(first_task, timeout=1)
+        finally:
+            release.set()
+            if "first_task" in locals() and not first_task.done():
+                first_task.cancel()
+                try:
+                    await first_task
+                except asyncio.CancelledError:
+                    pass
+            async with bot.THREAD_RUNNERS_LOCK:
+                bot.THREAD_RUNNERS.pop(target_key, None)
+            async with bot.ACTIVE_DIRECT_ASK_LOCK:
+                bot.ACTIVE_DIRECT_ASK_TARGET_KEYS.discard(target_key)
+            bot.RECENT_DISCORD_ORIGIN_PROMPTS.clear()
+            bot.RECENT_DISCORD_ORIGIN_PROMPTS.update(old_prompts)
+            bot.get_interactive_state_for_thread = original_get_interactive_state
+            bot.has_recent_codex_app_user_prompt = original_has_recent_prompt
+            bot.run_prompt_flow = original_run_prompt_flow
 
     async def test_stale_busy_plain_ask_still_sends_without_preflight(self) -> None:
         original_get_interactive_state = bot.get_interactive_state_for_thread
@@ -4401,108 +4546,38 @@ class DiscordBotHelperTests(unittest.IsolatedAsyncioTestCase):
             bot.run_prompt_flow = original_run_prompt_flow
 
     async def test_plain_ask_skips_recent_codex_app_duplicate(self) -> None:
-        old_prompts = dict(bot.RECENT_DISCORD_ORIGIN_PROMPTS)
-        try:
-            bot.RECENT_DISCORD_ORIGIN_PROMPTS.clear()
-
-            async def fake_wait_for_recent_prompt(target_thread_id, prompt):
-                return True
-
-            async def fail_run_prompt_flow(*args, **kwargs):
-                raise AssertionError("duplicate app prompts must not be sent to Codex again")
-
-            message = FakeMessage()
-
-            with tempfile.TemporaryDirectory() as temp_dir:
-                log_path = Path(temp_dir) / "discord-smoke.log"
-                with EnvPatch("CODEX_DISCORD_LOG_PATH", str(log_path)):
-                    await bot.handle_plain_ask(
-                        message,
-                        "same prompt",
-                        target_thread_id="thread-1",
-                        get_interactive_state_func=lambda target_thread_id: ("", None, ""),
-                        wait_for_recent_prompt_func=fake_wait_for_recent_prompt,
-                        run_prompt_flow_func=fail_run_prompt_flow,
-                    )
-                log_text = log_path.read_text(encoding="utf-8")
-
-            self.assertEqual(
-                message.channel.messages,
-                [("Already in Codex app. Skipping duplicate Discord delivery for this mapped thread.", None)],
-            )
-            self.assertEqual(bot.RECENT_DISCORD_ORIGIN_PROMPTS, {})
-            self.assertIn("plain_ask_duplicate_recent_app_prompt_skipped target=thread-1", log_text)
-        finally:
-            bot.RECENT_DISCORD_ORIGIN_PROMPTS.clear()
-            bot.RECENT_DISCORD_ORIGIN_PROMPTS.update(old_prompts)
-
-    async def test_plain_ask_uses_recent_codex_app_duplicate_guard_before_sending(self) -> None:
-        old_prompts = dict(bot.RECENT_DISCORD_ORIGIN_PROMPTS)
-        calls: list[tuple[str | None, str]] = []
-        try:
-            bot.RECENT_DISCORD_ORIGIN_PROMPTS.clear()
-
-            async def fake_wait_for_recent_prompt(target_thread_id, prompt):
-                calls.append((target_thread_id, prompt))
-                return True
-
-            async def fail_run_prompt_flow(*args, **kwargs):
-                raise AssertionError("duplicate app prompts must not be sent to Codex again")
-
-            message = FakeMessage()
-
-            with tempfile.TemporaryDirectory() as temp_dir:
-                log_path = Path(temp_dir) / "discord-smoke.log"
-                with EnvPatch("CODEX_DISCORD_LOG_PATH", str(log_path)):
-                    await bot.handle_plain_ask(
-                        message,
-                        "same prompt",
-                        target_thread_id="thread-1",
-                        get_interactive_state_func=lambda target_thread_id: ("", None, ""),
-                        wait_for_recent_prompt_func=fake_wait_for_recent_prompt,
-                        run_prompt_flow_func=fail_run_prompt_flow,
-                    )
-                log_text = log_path.read_text(encoding="utf-8")
-
-            self.assertEqual(calls, [("thread-1", "same prompt")])
-            self.assertEqual(
-                message.channel.messages,
-                [("Already in Codex app. Skipping duplicate Discord delivery for this mapped thread.", None)],
-            )
-            self.assertEqual(bot.RECENT_DISCORD_ORIGIN_PROMPTS, {})
-            self.assertIn("plain_ask_duplicate_recent_app_prompt_skipped target=thread-1", log_text)
-        finally:
-            bot.RECENT_DISCORD_ORIGIN_PROMPTS.clear()
-            bot.RECENT_DISCORD_ORIGIN_PROMPTS.update(old_prompts)
-
-    async def test_plain_ask_without_mapped_target_does_not_dedupe_against_selected_app_prompt(self) -> None:
         original_get_interactive_state = bot.get_interactive_state_for_thread
-        original_wait_for_recent_prompt = bot.wait_for_recent_codex_app_user_prompt
+        original_has_recent_prompt = bot.has_recent_codex_app_user_prompt
         original_run_prompt_flow = bot.run_prompt_flow
-        calls: list[tuple[str, str | None, object]] = []
+        old_prompts = dict(bot.RECENT_DISCORD_ORIGIN_PROMPTS)
         try:
+            bot.RECENT_DISCORD_ORIGIN_PROMPTS.clear()
             bot.get_interactive_state_for_thread = lambda target_thread_id: ("", None, "")
+            bot.has_recent_codex_app_user_prompt = lambda target_thread_id, prompt: True
 
-            async def fake_wait_for_recent_prompt(target_thread_id, prompt):
-                if target_thread_id is not None:
-                    raise AssertionError("selected/default asks should not scan the app-selected thread")
-                return False
+            async def fail_run_prompt_flow(*args, **kwargs):
+                raise AssertionError("duplicate app prompts must not be sent to Codex again")
 
-            bot.wait_for_recent_codex_app_user_prompt = fake_wait_for_recent_prompt
-
-            async def fake_run_prompt_flow(channel, prompt, *, source_message=None, target_thread_id=None):
-                calls.append((prompt, target_thread_id, source_message))
-
-            bot.run_prompt_flow = fake_run_prompt_flow
+            bot.run_prompt_flow = fail_run_prompt_flow
             message = FakeMessage()
 
-            await bot.handle_plain_ask(message, "same prompt", target_thread_id=None)
+            with tempfile.TemporaryDirectory() as temp_dir:
+                log_path = Path(temp_dir) / "discord-smoke.log"
+                with EnvPatch("CODEX_DISCORD_LOG_PATH", str(log_path)):
+                    await bot.handle_plain_ask(message, "same prompt", target_thread_id="thread-1")
+                log_text = log_path.read_text(encoding="utf-8")
 
-            self.assertEqual(message.channel.messages, [])
-            self.assertEqual(calls, [("same prompt", None, message)])
+            self.assertEqual(
+                message.channel.messages,
+                [("Already in Codex app. Skipping duplicate Discord delivery for this mapped thread.", None)],
+            )
+            self.assertEqual(bot.RECENT_DISCORD_ORIGIN_PROMPTS, {})
+            self.assertIn("plain_ask_duplicate_recent_app_prompt_skipped target=thread-1", log_text)
         finally:
+            bot.RECENT_DISCORD_ORIGIN_PROMPTS.clear()
+            bot.RECENT_DISCORD_ORIGIN_PROMPTS.update(old_prompts)
             bot.get_interactive_state_for_thread = original_get_interactive_state
-            bot.wait_for_recent_codex_app_user_prompt = original_wait_for_recent_prompt
+            bot.has_recent_codex_app_user_prompt = original_has_recent_prompt
             bot.run_prompt_flow = original_run_prompt_flow
 
     async def test_pending_approval_plain_text_refreshes_buttons_without_submitting(self) -> None:
@@ -4728,7 +4803,7 @@ class DiscordBotHelperTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("Codex app did not accept this Discord message yet.", content)
             self.assertIn("No approval/input menu was exposed", content)
             self.assertIsNone(view)
-            self.assertEqual(calls, [True])
+            self.assertEqual(calls, [False])
             self.assertIn("ask_stream_busy_transport_failure kind=target target=thread-1", log_text)
             self.assertIn("ask_stream_busy_retry_exhausted target=thread-1 attempts=0", log_text)
             self.assertNotIn("busy_choice_sent reason=ask_target_busy_failure", log_text)
@@ -4737,6 +4812,180 @@ class DiscordBotHelperTests(unittest.IsolatedAsyncioTestCase):
             bot.run_ask_stream = original_run_ask_stream
             bot.build_context_warning = original_build_context_warning
             bot.get_interactive_state_for_thread = original_get_interactive_state
+
+    async def test_ask_target_busy_failure_suppressed_when_prompt_was_recorded(self) -> None:
+        original_resolve_target_ref = bot.resolve_target_ref
+        original_run_ask_stream = bot.run_ask_stream
+        original_build_context_warning = bot.build_context_warning
+        original_get_interactive_state = bot.get_interactive_state_for_thread
+        original_should_delegate = bot.should_delegate_output_to_session_mirror
+        original_choose_thread = bridge.choose_thread
+        original_snapshot = bridge.snapshot_recent_session_offsets
+        original_wait = bridge.wait_for_prompt_delivery
+        original_get_workspace_ref = bridge.get_thread_workspace_ref
+        calls: list[bool] = []
+        try:
+            with tempfile.TemporaryDirectory() as temp_dir:
+                session_path = Path(temp_dir) / "session.jsonl"
+                session_path.write_text("", encoding="utf-8")
+                thread = bridge.ThreadInfo(
+                    id="thread-1",
+                    title="Thread",
+                    cwd=str(Path(temp_dir)),
+                    updated_at=1,
+                    rollout_path=str(session_path),
+                    model="gpt",
+                    reasoning_effort="high",
+                    tokens_used=1,
+                )
+                recent_offsets = {"thread-1": (thread, session_path, 0)}
+
+                bot.resolve_target_ref = lambda target_thread_id: (target_thread_id, "taxlab:1")
+                bot.get_interactive_state_for_thread = lambda target_thread_id: ("", None, "")
+                bot.should_delegate_output_to_session_mirror = lambda channel, target_thread_id: True
+                bridge.choose_thread = lambda thread_id=None, cwd=None: thread
+                bridge.snapshot_recent_session_offsets = (
+                    lambda limit=10, include_threads=None: recent_offsets
+                )
+                bridge.wait_for_prompt_delivery = (
+                    lambda session_offsets, prompt, timeout_sec=4.0: thread
+                )
+                bridge.get_thread_workspace_ref = lambda selected, threads=None: "taxlab:1"
+
+                def fake_run_ask_stream(prompt, relay, *, force_while_busy=False, wait=True, target_thread_id=None):
+                    calls.append(force_while_busy)
+                    return (
+                        1,
+                        "\n".join(
+                            [
+                                "Ask failed (exit 1)",
+                                "",
+                                "ERROR: The selected thread is still busy. Wait, switch to another thread, or pass --force-while-busy.",
+                            ]
+                        ),
+                    )
+
+                bot.run_ask_stream = fake_run_ask_stream
+                bot.build_context_warning = lambda target_thread_id: ""
+
+                log_path = Path(temp_dir) / "discord-smoke.log"
+                message = FakeMessage()
+                with EnvPatch("CODEX_DISCORD_LOG_PATH", str(log_path)):
+                    with EnvPatch("DISCORD_ASK_BUSY_RETRY_ATTEMPTS", "0"):
+                        await bot.run_prompt_and_send(
+                            message.channel,
+                            "please steer",
+                            ack_sent=True,
+                            source_message=message,
+                            target_thread_id="thread-1",
+                        )
+                log_text = log_path.read_text(encoding="utf-8")
+
+            self.assertEqual(message.channel.messages, [])
+            self.assertEqual(calls, [False])
+            self.assertIn("ask_stream_busy_transport_failure kind=target target=thread-1", log_text)
+            self.assertIn("ask_busy_nonzero_but_delivered target=thread-1", log_text)
+            self.assertNotIn("ask_stream_busy_retry_exhausted", log_text)
+        finally:
+            bot.resolve_target_ref = original_resolve_target_ref
+            bot.run_ask_stream = original_run_ask_stream
+            bot.build_context_warning = original_build_context_warning
+            bot.get_interactive_state_for_thread = original_get_interactive_state
+            bot.should_delegate_output_to_session_mirror = original_should_delegate
+            bridge.choose_thread = original_choose_thread
+            bridge.snapshot_recent_session_offsets = original_snapshot
+            bridge.wait_for_prompt_delivery = original_wait
+            bridge.get_thread_workspace_ref = original_get_workspace_ref
+
+    async def test_ask_target_busy_failure_in_mirrored_thread_waits_for_session_mirror(self) -> None:
+        original_resolve_target_ref = bot.resolve_target_ref
+        original_run_ask_stream = bot.run_ask_stream
+        original_build_context_warning = bot.build_context_warning
+        original_get_interactive_state = bot.get_interactive_state_for_thread
+        original_should_delegate = bot.should_delegate_output_to_session_mirror
+        original_wait_settle = bot.wait_for_mirrored_busy_delegation_settle
+        original_choose_thread = bridge.choose_thread
+        original_snapshot = bridge.snapshot_recent_session_offsets
+        original_wait = bridge.wait_for_prompt_delivery
+        calls: list[bool] = []
+        settle_calls: list[tuple[str, str | None]] = []
+        try:
+            with tempfile.TemporaryDirectory() as temp_dir:
+                session_path = Path(temp_dir) / "session.jsonl"
+                session_path.write_text("", encoding="utf-8")
+                thread = bridge.ThreadInfo(
+                    id="thread-1",
+                    title="Thread",
+                    cwd=str(Path(temp_dir)),
+                    updated_at=1,
+                    rollout_path=str(session_path),
+                    model="gpt",
+                    reasoning_effort="high",
+                    tokens_used=1,
+                )
+                recent_offsets = {"thread-1": (thread, session_path, 0)}
+
+                bot.resolve_target_ref = lambda target_thread_id: (target_thread_id, "taxlab:1")
+                bot.get_interactive_state_for_thread = lambda target_thread_id: ("", None, "")
+                bot.should_delegate_output_to_session_mirror = lambda channel, target_thread_id: True
+                bridge.choose_thread = lambda thread_id=None, cwd=None: thread
+                bridge.snapshot_recent_session_offsets = (
+                    lambda limit=10, include_threads=None: recent_offsets
+                )
+                bridge.wait_for_prompt_delivery = (
+                    lambda session_offsets, prompt, timeout_sec=4.0: None
+                )
+
+                async def fake_wait_settle(prompt, *, target_thread_id=None, recent_offsets=None) -> None:
+                    settle_calls.append((prompt, target_thread_id))
+
+                bot.wait_for_mirrored_busy_delegation_settle = fake_wait_settle
+
+                def fake_run_ask_stream(prompt, relay, *, force_while_busy=False, wait=True, target_thread_id=None):
+                    calls.append(force_while_busy)
+                    return (
+                        1,
+                        "\n".join(
+                            [
+                                "Ask failed (exit 1)",
+                                "",
+                                "ERROR: The selected thread is still busy. Wait, switch to another thread, or pass --force-while-busy.",
+                            ]
+                        ),
+                    )
+
+                bot.run_ask_stream = fake_run_ask_stream
+                bot.build_context_warning = lambda target_thread_id: ""
+
+                log_path = Path(temp_dir) / "discord-smoke.log"
+                message = FakeMessage()
+                with EnvPatch("CODEX_DISCORD_LOG_PATH", str(log_path)):
+                    with EnvPatch("DISCORD_ASK_BUSY_RETRY_ATTEMPTS", "0"):
+                        await bot.run_prompt_and_send(
+                            message.channel,
+                            "please steer",
+                            ack_sent=True,
+                            source_message=message,
+                            target_thread_id="thread-1",
+                        )
+                log_text = log_path.read_text(encoding="utf-8")
+
+            self.assertEqual(message.channel.messages, [])
+            self.assertEqual(calls, [False])
+            self.assertEqual(settle_calls, [("please steer", "thread-1")])
+            self.assertIn("ask_stream_busy_transport_failure kind=target target=thread-1", log_text)
+            self.assertIn("ask_stream_busy_delegated_to_session_mirror target=thread-1", log_text)
+            self.assertNotIn("ask_stream_busy_retry_exhausted", log_text)
+        finally:
+            bot.resolve_target_ref = original_resolve_target_ref
+            bot.run_ask_stream = original_run_ask_stream
+            bot.build_context_warning = original_build_context_warning
+            bot.get_interactive_state_for_thread = original_get_interactive_state
+            bot.should_delegate_output_to_session_mirror = original_should_delegate
+            bot.wait_for_mirrored_busy_delegation_settle = original_wait_settle
+            bridge.choose_thread = original_choose_thread
+            bridge.snapshot_recent_session_offsets = original_snapshot
+            bridge.wait_for_prompt_delivery = original_wait
 
     async def test_ask_target_busy_failure_retries_without_queueing(self) -> None:
         original_resolve_target_ref = bot.resolve_target_ref
@@ -4787,7 +5036,7 @@ class DiscordBotHelperTests(unittest.IsolatedAsyncioTestCase):
             self.assertIsNone(retry_view)
             self.assertIn("Codex app did not accept this Discord message yet.", final_status)
             self.assertIsNone(final_view)
-            self.assertEqual(calls, [True, True])
+            self.assertEqual(calls, [False, False])
             self.assertIn("ask_stream_retry_done attempt=1", log_text)
             self.assertNotIn("busy_choice_sent reason=ask_target_busy_failure", log_text)
         finally:
@@ -4893,6 +5142,50 @@ class DiscordBotHelperTests(unittest.IsolatedAsyncioTestCase):
             bot.resolve_target_ref = original_resolve_target_ref
             bot.run_ask_stream = original_run_ask_stream
 
+    async def test_ask_stream_ipc_start_turn_timeout_does_not_send_failure(self) -> None:
+        original_resolve_target_ref = bot.resolve_target_ref
+        original_run_ask_stream = bot.run_ask_stream
+        try:
+            bot.resolve_target_ref = lambda target_thread_id: (target_thread_id, "taxlab:1")
+
+            def fake_run_ask_stream(prompt, relay, *, force_while_busy=False, wait=True, target_thread_id=None):
+                return (
+                    1,
+                    "\n".join(
+                        [
+                            "target_thread: thread-1",
+                            "ui_activation: ipc-thread-follower-start-turn",
+                            "ERROR: IPC start-turn failed: thread-follower-start-turn-timeout",
+                        ]
+                    ),
+                )
+
+            bot.run_ask_stream = fake_run_ask_stream
+
+            with tempfile.TemporaryDirectory() as temp_dir:
+                log_path = Path(temp_dir) / "discord-smoke.log"
+                message = FakeMessage()
+                with EnvPatch("CODEX_DISCORD_LOG_PATH", str(log_path)):
+                    await bot.run_prompt_and_send(
+                        message.channel,
+                        "please run",
+                        ack_sent=True,
+                        source_message=message,
+                        target_thread_id="thread-1",
+                    )
+                log_text = log_path.read_text(encoding="utf-8")
+
+            self.assertEqual(len(message.channel.messages), 1)
+            content, view = message.channel.messages[0]
+            self.assertIn("[delivery_pending]", content)
+            self.assertIn("thread-follower-start-turn-timeout", content)
+            self.assertNotIn("Ask failed", content)
+            self.assertIsNone(view)
+            self.assertIn("ask_stream_ipc_delivery_pending exit=1 target=thread-1", log_text)
+        finally:
+            bot.resolve_target_ref = original_resolve_target_ref
+            bot.run_ask_stream = original_run_ask_stream
+
     async def test_ask_stream_delegates_final_to_session_mirror_for_mapped_thread(self) -> None:
         original_resolve_target_ref = bot.resolve_target_ref
         original_run_ask_stream = bot.run_ask_stream
@@ -4978,13 +5271,18 @@ class DiscordBotHelperTests(unittest.IsolatedAsyncioTestCase):
             bot.run_ask_stream = original_run_ask_stream
 
     async def test_ask_stream_no_final_is_suppressed_after_steering_handoff(self) -> None:
+        original_resolve_target_ref = bot.resolve_target_ref
+        original_run_ask_stream = bot.run_ask_stream
         old_handoffs = dict(bot.STEERING_HANDOFFS)
         try:
             bot.STEERING_HANDOFFS.clear()
+            bot.resolve_target_ref = lambda target_thread_id: (target_thread_id, "taxlab:1")
 
             def fake_run_ask_stream(prompt, relay, *, force_while_busy=False, wait=True, target_thread_id=None):
                 bot.STEERING_HANDOFFS[bot.normalize_runner_key(target_thread_id)] = time.monotonic() + 1.0
                 return 0, "[delivery_verified] taxlab:1"
+
+            bot.run_ask_stream = fake_run_ask_stream
 
             with tempfile.TemporaryDirectory() as temp_dir:
                 log_path = Path(temp_dir) / "discord-smoke.log"
@@ -4996,8 +5294,6 @@ class DiscordBotHelperTests(unittest.IsolatedAsyncioTestCase):
                         ack_sent=True,
                         source_message=message,
                         target_thread_id="thread-1",
-                        resolve_target_ref_func=lambda target_thread_id: (target_thread_id, "taxlab:1"),
-                        run_ask_stream_func=fake_run_ask_stream,
                     )
                 log_text = log_path.read_text(encoding="utf-8")
 
@@ -5006,11 +5302,16 @@ class DiscordBotHelperTests(unittest.IsolatedAsyncioTestCase):
         finally:
             bot.STEERING_HANDOFFS.clear()
             bot.STEERING_HANDOFFS.update(old_handoffs)
+            bot.resolve_target_ref = original_resolve_target_ref
+            bot.run_ask_stream = original_run_ask_stream
 
     async def test_ask_stream_commentary_is_sent_after_steering_handoff(self) -> None:
+        original_resolve_target_ref = bot.resolve_target_ref
+        original_run_ask_stream = bot.run_ask_stream
         old_handoffs = dict(bot.STEERING_HANDOFFS)
         try:
             bot.STEERING_HANDOFFS.clear()
+            bot.resolve_target_ref = lambda target_thread_id: (target_thread_id, "taxlab:1")
 
             def fake_run_ask_stream(prompt, relay, *, force_while_busy=False, wait=True, target_thread_id=None):
                 bot.STEERING_HANDOFFS[bot.normalize_runner_key(target_thread_id)] = time.monotonic() + 1.0
@@ -5020,6 +5321,8 @@ class DiscordBotHelperTests(unittest.IsolatedAsyncioTestCase):
                 relay.finish()
                 return 0, "[commentary]\nchecking live relay\n\n[ready]"
 
+            bot.run_ask_stream = fake_run_ask_stream
+
             with tempfile.TemporaryDirectory() as temp_dir:
                 log_path = Path(temp_dir) / "discord-smoke.log"
                 message = FakeMessage()
@@ -5030,26 +5333,26 @@ class DiscordBotHelperTests(unittest.IsolatedAsyncioTestCase):
                         ack_sent=True,
                         source_message=message,
                         target_thread_id="thread-1",
-                        resolve_target_ref_func=lambda target_thread_id: (target_thread_id, "taxlab:1"),
-                        run_ask_stream_func=fake_run_ask_stream,
                     )
                 log_text = log_path.read_text(encoding="utf-8")
 
             sent = [content for content, _view in message.channel.messages]
             self.assertEqual(sent, ["In progress\n\nchecking live relay"])
-            self.assertIn(
-                "ask_stream_done exit=0 target=thread-1 status=no_final sent_live=True final=False",
-                log_text,
-            )
+            self.assertIn("ask_stream_done exit=0 target=thread-1 sent_live=True final=False", log_text)
             self.assertIn("ask_stream_suppressed_after_steering target=thread-1 sent_live=True", log_text)
         finally:
             bot.STEERING_HANDOFFS.clear()
             bot.STEERING_HANDOFFS.update(old_handoffs)
+            bot.resolve_target_ref = original_resolve_target_ref
+            bot.run_ask_stream = original_run_ask_stream
 
     async def test_ask_stream_final_is_suppressed_after_steering_handoff(self) -> None:
+        original_resolve_target_ref = bot.resolve_target_ref
+        original_run_ask_stream = bot.run_ask_stream
         old_handoffs = dict(bot.STEERING_HANDOFFS)
         try:
             bot.STEERING_HANDOFFS.clear()
+            bot.resolve_target_ref = lambda target_thread_id: (target_thread_id, "taxlab:1")
 
             def fake_run_ask_stream(prompt, relay, *, force_while_busy=False, wait=True, target_thread_id=None):
                 bot.STEERING_HANDOFFS[bot.normalize_runner_key(target_thread_id)] = time.monotonic() + 1.0
@@ -5059,6 +5362,8 @@ class DiscordBotHelperTests(unittest.IsolatedAsyncioTestCase):
                 relay.finish()
                 return 0, "[final_answer]\noriginal final\n\n[ready]"
 
+            bot.run_ask_stream = fake_run_ask_stream
+
             with tempfile.TemporaryDirectory() as temp_dir:
                 log_path = Path(temp_dir) / "discord-smoke.log"
                 message = FakeMessage()
@@ -5069,8 +5374,6 @@ class DiscordBotHelperTests(unittest.IsolatedAsyncioTestCase):
                         ack_sent=True,
                         source_message=message,
                         target_thread_id="thread-1",
-                        resolve_target_ref_func=lambda target_thread_id: (target_thread_id, "taxlab:1"),
-                        run_ask_stream_func=fake_run_ask_stream,
                     )
                 log_text = log_path.read_text(encoding="utf-8")
 
@@ -5080,11 +5383,16 @@ class DiscordBotHelperTests(unittest.IsolatedAsyncioTestCase):
         finally:
             bot.STEERING_HANDOFFS.clear()
             bot.STEERING_HANDOFFS.update(old_handoffs)
+            bot.resolve_target_ref = original_resolve_target_ref
+            bot.run_ask_stream = original_run_ask_stream
 
     async def test_ask_stream_stale_relay_suppresses_fallback_after_newer_relay(self) -> None:
+        original_resolve_target_ref = bot.resolve_target_ref
+        original_run_ask_stream = bot.run_ask_stream
         old_generations = dict(bot.ACTIVE_DISCORD_RELAY_GENERATIONS)
         try:
             bot.ACTIVE_DISCORD_RELAY_GENERATIONS.clear()
+            bot.resolve_target_ref = lambda target_thread_id: (target_thread_id, "taxlab:1")
 
             def fake_run_ask_stream(prompt, relay, *, force_while_busy=False, wait=True, target_thread_id=None):
                 bot.DiscordAskRelay(
@@ -5099,6 +5407,8 @@ class DiscordBotHelperTests(unittest.IsolatedAsyncioTestCase):
                 relay.finish()
                 return 0, "[final_answer]\nstale final\n\n[ready]"
 
+            bot.run_ask_stream = fake_run_ask_stream
+
             with tempfile.TemporaryDirectory() as temp_dir:
                 log_path = Path(temp_dir) / "discord-smoke.log"
                 message = FakeMessage()
@@ -5109,8 +5419,6 @@ class DiscordBotHelperTests(unittest.IsolatedAsyncioTestCase):
                         ack_sent=True,
                         source_message=message,
                         target_thread_id="thread-1",
-                        resolve_target_ref_func=lambda target_thread_id: (target_thread_id, "taxlab:1"),
-                        run_ask_stream_func=fake_run_ask_stream,
                     )
                 log_text = log_path.read_text(encoding="utf-8")
 
@@ -5121,45 +5429,59 @@ class DiscordBotHelperTests(unittest.IsolatedAsyncioTestCase):
         finally:
             bot.ACTIVE_DISCORD_RELAY_GENERATIONS.clear()
             bot.ACTIVE_DISCORD_RELAY_GENERATIONS.update(old_generations)
+            bot.resolve_target_ref = original_resolve_target_ref
+            bot.run_ask_stream = original_run_ask_stream
 
     async def test_run_prompt_and_send_uses_typing_indicator(self) -> None:
-        def fake_run_ask_stream(prompt, relay, *, force_while_busy=False, wait=True, target_thread_id=None):
-            relay.feed_line("[final_answer]")
-            relay.feed_line("done")
-            relay.feed_line("[ready]")
-            relay.finish()
-            return 0, "[final_answer]\ndone\n\n[ready]"
+        original_resolve_target_ref = bot.resolve_target_ref
+        original_run_ask_stream = bot.run_ask_stream
+        try:
+            bot.resolve_target_ref = lambda target_thread_id: (target_thread_id, "taxlab:1")
 
-        with tempfile.TemporaryDirectory() as temp_dir:
-            log_path = Path(temp_dir) / "discord-smoke.log"
+            def fake_run_ask_stream(prompt, relay, *, force_while_busy=False, wait=True, target_thread_id=None):
+                relay.feed_line("[final_answer]")
+                relay.feed_line("done")
+                relay.feed_line("[ready]")
+                relay.finish()
+                return 0, "[final_answer]\ndone\n\n[ready]"
+
+            bot.run_ask_stream = fake_run_ask_stream
+
             message = FakeMessage()
-            with EnvPatch("CODEX_DISCORD_LOG_PATH", str(log_path)):
-                await bot.run_prompt_and_send(
-                    message.channel,
-                    "please run",
-                    ack_sent=True,
-                    source_message=message,
-                    target_thread_id="thread-1",
-                    resolve_target_ref_func=lambda target_thread_id: (target_thread_id, "taxlab:1"),
-                    run_ask_stream_func=fake_run_ask_stream,
-                )
-            log_text = log_path.read_text(encoding="utf-8")
+            await bot.run_prompt_and_send(
+                message.channel,
+                "please run",
+                ack_sent=True,
+                source_message=message,
+                target_thread_id="thread-1",
+            )
 
-        self.assertEqual(message.channel.typing_events, ["enter", "exit"])
-        self.assertEqual(message.channel.messages, [("done", None)])
-        self.assertIn(
-            "ask_stream_done exit=0 target=thread-1 status=final sent_live=True final=True",
-            log_text,
-        )
+            self.assertEqual(message.channel.typing_events, ["enter", "exit"])
+            self.assertEqual(message.channel.messages, [("done", None)])
+        finally:
+            bot.resolve_target_ref = original_resolve_target_ref
+            bot.run_ask_stream = original_run_ask_stream
 
-    async def test_run_prompt_and_send_starts_different_targets_without_bridge_serialization(self) -> None:
+    async def test_run_prompt_and_send_starts_different_active_app_target_without_queueing(self) -> None:
+        original_resolve_target_ref = bot.resolve_target_ref
+        original_run_ask_stream = bot.run_ask_stream
+        old_condition = bot.CODEX_APP_TURN_CONDITION
+        old_active_key = bot.CODEX_APP_ACTIVE_TARGET_KEY
+        old_active_count = bot.CODEX_APP_ACTIVE_TARGET_COUNT
+        old_ask_locks = bot.ASK_DELIVERY_LOCKS
         first_started = threading.Event()
         release_first = threading.Event()
         second_started = threading.Event()
-        calls: list[str | None] = []
+        calls: list[tuple[str, str | None]] = []
         try:
+            bot.CODEX_APP_TURN_CONDITION = None
+            bot.CODEX_APP_ACTIVE_TARGET_KEY = None
+            bot.CODEX_APP_ACTIVE_TARGET_COUNT = 0
+            bot.ASK_DELIVERY_LOCKS = {}
+            bot.resolve_target_ref = lambda target_thread_id: (target_thread_id, target_thread_id or "selected")
+
             def fake_run_ask_stream(prompt, relay, *, force_while_busy=False, wait=True, target_thread_id=None):
-                calls.append(target_thread_id)
+                calls.append(("ask", target_thread_id))
                 if target_thread_id == "thread-a":
                     first_started.set()
                     release_first.wait(2)
@@ -5170,6 +5492,8 @@ class DiscordBotHelperTests(unittest.IsolatedAsyncioTestCase):
                 relay.feed_line("[ready]")
                 relay.finish()
                 return 0, f"[final_answer]\ndone {target_thread_id}\n\n[ready]"
+
+            bot.run_ask_stream = fake_run_ask_stream
 
             with tempfile.TemporaryDirectory() as temp_dir:
                 log_path = Path(temp_dir) / "discord-smoke.log"
@@ -5182,11 +5506,6 @@ class DiscordBotHelperTests(unittest.IsolatedAsyncioTestCase):
                             "first",
                             ack_sent=True,
                             target_thread_id="thread-a",
-                            resolve_target_ref_func=lambda target_thread_id: (
-                                target_thread_id,
-                                target_thread_id or "selected",
-                            ),
-                            run_ask_stream_func=fake_run_ask_stream,
                         )
                     )
                     await asyncio.to_thread(first_started.wait, 1)
@@ -5196,11 +5515,6 @@ class DiscordBotHelperTests(unittest.IsolatedAsyncioTestCase):
                             "second",
                             ack_sent=True,
                             target_thread_id="thread-b",
-                            resolve_target_ref_func=lambda target_thread_id: (
-                                target_thread_id,
-                                target_thread_id or "selected",
-                            ),
-                            run_ask_stream_func=fake_run_ask_stream,
                         )
                     )
                     await asyncio.to_thread(second_started.wait, 1)
@@ -5209,20 +5523,38 @@ class DiscordBotHelperTests(unittest.IsolatedAsyncioTestCase):
                     await asyncio.wait_for(asyncio.gather(task_a, task_b), timeout=3)
                 log_text = log_path.read_text(encoding="utf-8")
 
-            self.assertEqual(calls, ["thread-a", "thread-b"])
+            self.assertEqual(calls, [("ask", "thread-a"), ("ask", "thread-b")])
             self.assertEqual(target_a.messages, [("done thread-a", None)])
             self.assertEqual(target_b.messages, [("done thread-b", None)])
-            self.assertNotIn("codex_app_turn_wait", log_text)
-            self.assertNotIn("ask_after_cross_session_wait", log_text)
+            self.assertNotIn("codex_app_turn_wait target=thread-b active=thread-a", log_text)
+            self.assertNotIn("ask_after_cross_session_wait_done exit=0 target=thread-b", log_text)
         finally:
             release_first.set()
+            bot.CODEX_APP_TURN_CONDITION = old_condition
+            bot.CODEX_APP_ACTIVE_TARGET_KEY = old_active_key
+            bot.CODEX_APP_ACTIVE_TARGET_COUNT = old_active_count
+            bot.ASK_DELIVERY_LOCKS = old_ask_locks
+            bot.resolve_target_ref = original_resolve_target_ref
+            bot.run_ask_stream = original_run_ask_stream
 
-    async def test_run_prompt_and_send_allows_same_active_app_target_for_steering(self) -> None:
+    async def test_run_prompt_and_send_serializes_same_active_app_target(self) -> None:
+        original_resolve_target_ref = bot.resolve_target_ref
+        original_run_ask_stream = bot.run_ask_stream
+        old_condition = bot.CODEX_APP_TURN_CONDITION
+        old_active_key = bot.CODEX_APP_ACTIVE_TARGET_KEY
+        old_active_count = bot.CODEX_APP_ACTIVE_TARGET_COUNT
+        old_ask_locks = bot.ASK_DELIVERY_LOCKS
         first_started = threading.Event()
         second_started = threading.Event()
         release_first = threading.Event()
         calls: list[str | None] = []
         try:
+            bot.CODEX_APP_TURN_CONDITION = None
+            bot.CODEX_APP_ACTIVE_TARGET_KEY = None
+            bot.CODEX_APP_ACTIVE_TARGET_COUNT = 0
+            bot.ASK_DELIVERY_LOCKS = {}
+            bot.resolve_target_ref = lambda target_thread_id: (target_thread_id, target_thread_id or "selected")
+
             def fake_run_ask_stream(prompt, relay, *, force_while_busy=False, wait=True, target_thread_id=None):
                 calls.append(target_thread_id)
                 if prompt == "first":
@@ -5236,17 +5568,13 @@ class DiscordBotHelperTests(unittest.IsolatedAsyncioTestCase):
                 relay.finish()
                 return 0, f"[final_answer]\ndone {prompt}\n\n[ready]"
 
+            bot.run_ask_stream = fake_run_ask_stream
             task_a = asyncio.create_task(
                 bot.run_prompt_and_send(
                     FakeTarget(),
                     "first",
                     ack_sent=True,
                     target_thread_id="thread-a",
-                    resolve_target_ref_func=lambda target_thread_id: (
-                        target_thread_id,
-                        target_thread_id or "selected",
-                    ),
-                    run_ask_stream_func=fake_run_ask_stream,
                 )
             )
             await asyncio.to_thread(first_started.wait, 1)
@@ -5256,21 +5584,109 @@ class DiscordBotHelperTests(unittest.IsolatedAsyncioTestCase):
                     "second",
                     ack_sent=True,
                     target_thread_id="thread-a",
-                    resolve_target_ref_func=lambda target_thread_id: (
-                        target_thread_id,
-                        target_thread_id or "selected",
-                    ),
-                    run_ask_stream_func=fake_run_ask_stream,
                 )
             )
+            await asyncio.sleep(0.1)
+            self.assertFalse(second_started.is_set())
+            release_first.set()
             await asyncio.to_thread(second_started.wait, 1)
             self.assertTrue(second_started.is_set())
-            release_first.set()
             await asyncio.wait_for(asyncio.gather(task_a, task_b), timeout=3)
 
             self.assertEqual(calls, ["thread-a", "thread-a"])
         finally:
             release_first.set()
+            bot.CODEX_APP_TURN_CONDITION = old_condition
+            bot.CODEX_APP_ACTIVE_TARGET_KEY = old_active_key
+            bot.CODEX_APP_ACTIVE_TARGET_COUNT = old_active_count
+            bot.ASK_DELIVERY_LOCKS = old_ask_locks
+            bot.resolve_target_ref = original_resolve_target_ref
+            bot.run_ask_stream = original_run_ask_stream
+
+    async def test_run_prompt_and_send_holds_same_target_lock_during_busy_mirror_wait(self) -> None:
+        original_resolve_target_ref = bot.resolve_target_ref
+        original_run_ask_stream = bot.run_ask_stream
+        original_should_delegate = bot.should_delegate_output_to_session_mirror
+        original_snapshot = bot.snapshot_ask_prompt_delivery_state
+        original_wait_settle = bot.wait_for_mirrored_busy_delegation_settle
+        old_ask_locks = bot.ASK_DELIVERY_LOCKS
+        first_started = threading.Event()
+        second_started = threading.Event()
+        release_settle = asyncio.Event()
+        calls: list[str] = []
+        try:
+            bot.ASK_DELIVERY_LOCKS = {}
+            bot.resolve_target_ref = lambda target_thread_id: (target_thread_id, target_thread_id or "selected")
+            bot.should_delegate_output_to_session_mirror = lambda channel, target_thread_id: True
+            bot.snapshot_ask_prompt_delivery_state = lambda target_thread_id: (None, {})
+
+            async def fake_wait_settle(prompt, *, target_thread_id=None, recent_offsets=None) -> None:
+                await release_settle.wait()
+
+            bot.wait_for_mirrored_busy_delegation_settle = fake_wait_settle
+
+            def fake_run_ask_stream(prompt, relay, *, force_while_busy=False, wait=True, target_thread_id=None):
+                calls.append(prompt)
+                if prompt == "first":
+                    first_started.set()
+                    return (
+                        1,
+                        "\n".join(
+                            [
+                                "Ask failed (exit 1)",
+                                "",
+                                "ERROR: The selected thread is still busy. Wait, switch to another thread, or pass --force-while-busy.",
+                            ]
+                        ),
+                    )
+                second_started.set()
+                relay.feed_line("[final_answer]")
+                relay.feed_line("second done")
+                relay.feed_line("[ready]")
+                relay.finish()
+                return 0, "[final_answer]\nsecond done\n\n[ready]"
+
+            bot.run_ask_stream = fake_run_ask_stream
+            with tempfile.TemporaryDirectory() as temp_dir:
+                log_path = Path(temp_dir) / "discord-smoke.log"
+                with EnvPatch("CODEX_DISCORD_LOG_PATH", str(log_path)):
+                    with EnvPatch("DISCORD_ASK_BUSY_RETRY_ATTEMPTS", "0"):
+                        task_a = asyncio.create_task(
+                            bot.run_prompt_and_send(
+                                FakeTarget(),
+                                "first",
+                                ack_sent=True,
+                                target_thread_id="thread-a",
+                            )
+                        )
+                        await asyncio.to_thread(first_started.wait, 1)
+                        self.assertTrue(first_started.is_set())
+                        task_b = asyncio.create_task(
+                            bot.run_prompt_and_send(
+                                FakeTarget(),
+                                "second",
+                                ack_sent=True,
+                                target_thread_id="thread-a",
+                            )
+                        )
+                        await asyncio.sleep(0.1)
+                        self.assertFalse(second_started.is_set())
+                        release_settle.set()
+                        await asyncio.to_thread(second_started.wait, 1)
+                        await asyncio.wait_for(asyncio.gather(task_a, task_b), timeout=2)
+                log_text = log_path.read_text(encoding="utf-8")
+
+            self.assertEqual(calls, ["first", "second"])
+            self.assertIn("ask_delivery_wait target=thread-a", log_text)
+            self.assertIn("ask_delivery_wait_done target=thread-a", log_text)
+        finally:
+            release_settle.set()
+            bot.ASK_DELIVERY_LOCKS = old_ask_locks
+            bot.resolve_target_ref = original_resolve_target_ref
+            bot.run_ask_stream = original_run_ask_stream
+            bot.should_delegate_output_to_session_mirror = original_should_delegate
+            bot.snapshot_ask_prompt_delivery_state = original_snapshot
+            bot.wait_for_mirrored_busy_delegation_settle = original_wait_settle
 
     async def test_busy_choice_send_falls_back_when_view_send_fails(self) -> None:
         original_build_context_warning = bot.build_context_warning
@@ -6500,6 +6916,18 @@ class DiscordBotHelperTests(unittest.IsolatedAsyncioTestCase):
         def fake_resolve(channel_id, ref):
             return ["--target", f"{channel_id}:{ref or '-'}"]
 
+        list_default = commands.build_prefix_bridge_action(
+            "list",
+            "",
+            222,
+            resolve_target_args_func=fake_resolve,
+        )
+        list_limited = commands.build_prefix_bridge_action(
+            "list",
+            "10",
+            222,
+            resolve_target_args_func=fake_resolve,
+        )
         status = commands.build_prefix_bridge_action(
             "status",
             "abc",
@@ -6524,12 +6952,29 @@ class DiscordBotHelperTests(unittest.IsolatedAsyncioTestCase):
             222,
             resolve_target_args_func=fake_resolve,
         )
+        archive = commands.build_prefix_bridge_action(
+            "archive",
+            "4",
+            222,
+            resolve_target_args_func=fake_resolve,
+            resolve_archive_target_args_func=lambda channel_id, ref: [
+                "--archive-target",
+                f"{channel_id}:{ref or '-'}",
+            ],
+        )
 
+        self.assertEqual(list_default.argv, ["list", "--ui-visible"])
+        self.assertEqual(list_limited.argv, ["list", "--limit", "10"])
         self.assertEqual(status.argv, ["status", "--target", "222:abc"])
         self.assertEqual(open_abort.argv, ["open", "--abort", "taxlab:1"])
         self.assertEqual(missing_use.usage, "Usage: !use <ref>")
         self.assertEqual(confirm_delete.argv, ["delete_archive", "--confirm", "thread-1"])
+        self.assertEqual(archive.argv, ["archive", "--archive-target", "222:4"])
         self.assertEqual(commands.parse_usage_days("bad").usage, "Usage: !usage [days]")
+        self.assertIsNone(commands.parse_bridge_sync_limit("sync", "").limit)
+        self.assertIsNone(commands.parse_mirror_action("sync").limit)
+        self.assertIsNone(commands.parse_mirror_action("list").limit)
+        self.assertEqual(commands.parse_mirror_action("check 7").limit, 7)
         self.assertEqual(commands.parse_bridge_sync_limit("bridge", "bad 1").usage, "Usage: !bridge sync [limit]")
         self.assertEqual(commands.parse_mirror_action("sync bad").usage, "Usage: !mirror sync [limit]")
         self.assertEqual(commands.parse_mirror_action("doctor").subcommand, "check")
@@ -6552,6 +6997,90 @@ class DiscordBotHelperTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(message.channel.messages, [("ok", None)])
         finally:
             bot.run_bridge_and_send = original_run_bridge_and_send
+
+    async def test_prefix_archive_numeric_ref_uses_ui_visible_order(self) -> None:
+        original_run_bridge_and_send = bot.run_bridge_and_send
+        original_load_ui_visible_threads = bridge.load_ui_visible_threads
+        original_resolve_thread_ref = bridge.resolve_thread_ref
+        calls: list[tuple[list[str], str]] = []
+
+        def make_thread(thread_id: str, updated_at: int) -> bridge.ThreadInfo:
+            return bridge.ThreadInfo(
+                id=thread_id,
+                title=thread_id,
+                cwd=r"C:\repo",
+                updated_at=updated_at,
+                rollout_path=f"{thread_id}.jsonl",
+                model="gpt",
+                reasoning_effort="high",
+                tokens_used=1,
+            )
+
+        async def fake_run_bridge_and_send(target, argv, title, failure_title=None):
+            calls.append((argv, title))
+            await target.send("ok")
+            return 0, "ok"
+
+        def fail_recent_resolver(ref: str):
+            raise AssertionError(f"archive numeric ref should use UI-visible order, got {ref}")
+
+        try:
+            bot.run_bridge_and_send = fake_run_bridge_and_send
+            bridge.load_ui_visible_threads = lambda: [
+                make_thread("visible-1", 3),
+                make_thread("visible-2", 2),
+                make_thread("visible-3", 1),
+            ]
+            bridge.resolve_thread_ref = fail_recent_resolver
+
+            message = FakeMessage(channel_id=333)
+            await bot.handle_prefix_command(None, message, "archive 2")
+
+            self.assertEqual(calls, [(["archive", "--thread-id", "visible-2"], "Archive")])
+            self.assertEqual(message.channel.messages, [("ok", None)])
+        finally:
+            bot.run_bridge_and_send = original_run_bridge_and_send
+            bridge.load_ui_visible_threads = original_load_ui_visible_threads
+            bridge.resolve_thread_ref = original_resolve_thread_ref
+
+    async def test_prefix_archive_named_ref_keeps_thread_ref_resolver(self) -> None:
+        original_run_bridge_and_send = bot.run_bridge_and_send
+        original_load_ui_visible_threads = bridge.load_ui_visible_threads
+        original_resolve_thread_ref = bridge.resolve_thread_ref
+        calls: list[tuple[list[str], str]] = []
+
+        thread = bridge.ThreadInfo(
+            id="workspace-thread",
+            title="workspace",
+            cwd=r"C:\repo",
+            updated_at=1,
+            rollout_path="workspace.jsonl",
+            model="gpt",
+            reasoning_effort="high",
+            tokens_used=1,
+        )
+
+        async def fake_run_bridge_and_send(target, argv, title, failure_title=None):
+            calls.append((argv, title))
+            await target.send("ok")
+            return 0, "ok"
+
+        try:
+            bot.run_bridge_and_send = fake_run_bridge_and_send
+            bridge.load_ui_visible_threads = lambda: (_ for _ in ()).throw(
+                AssertionError("archive named ref should not scan UI-visible threads")
+            )
+            bridge.resolve_thread_ref = lambda ref: thread
+
+            message = FakeMessage(channel_id=333)
+            await bot.handle_prefix_command(None, message, "archive taxlab:1")
+
+            self.assertEqual(calls, [(["archive", "--thread-id", "workspace-thread"], "Archive")])
+            self.assertEqual(message.channel.messages, [("ok", None)])
+        finally:
+            bot.run_bridge_and_send = original_run_bridge_and_send
+            bridge.load_ui_visible_threads = original_load_ui_visible_threads
+            bridge.resolve_thread_ref = original_resolve_thread_ref
 
     async def test_prefix_open_abort_routes_to_shared_bridge_action(self) -> None:
         original_run_bridge_and_send = bot.run_bridge_and_send
@@ -7203,6 +7732,74 @@ class DiscordBotHelperTests(unittest.IsolatedAsyncioTestCase):
             bot.MIRROR_DB_PATH = old_db_path
             bot.discord.TextChannel = original_text_channel
 
+    async def test_get_or_create_project_channel_renames_cached_mirror_channel(self) -> None:
+        old_db_path = bot.MIRROR_DB_PATH
+        original_text_channel = bot.discord.TextChannel
+
+        class FakeTextChannel:
+            def __init__(self) -> None:
+                self.id = 111
+                self.name = "old-name"
+                self.topic = "old topic"
+                self.category_id = 999
+                self.edits: list[dict[str, object]] = []
+
+            async def edit(self, **kwargs):
+                self.edits.append(kwargs)
+                self.name = str(kwargs.get("name", self.name))
+                self.topic = str(kwargs.get("topic", self.topic))
+
+        class FakeGuild:
+            def __init__(self, channel: FakeTextChannel) -> None:
+                self.text_channels = [channel]
+
+            def get_channel(self, channel_id: int):
+                return self.text_channels[0] if channel_id == 111 else None
+
+            async def fetch_channel(self, channel_id: int):
+                raise AssertionError("cached project channel should be used")
+
+        try:
+            bot.discord.TextChannel = FakeTextChannel
+            with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp_dir:
+                bot.MIRROR_DB_PATH = Path(temp_dir) / "mirror.sqlite"
+                bot.init_mirror_db()
+                with sqlite3.connect(bot.MIRROR_DB_PATH) as conn:
+                    conn.execute(
+                        """
+                        INSERT INTO mirror_projects (
+                            project_key, project_name, discord_channel_id, updated_at
+                        ) VALUES (?, ?, ?, ?)
+                        """,
+                        (r"c:\taxlab", "old", 111, 1.0),
+                    )
+                existing = FakeTextChannel()
+
+                channel = await bot.get_or_create_project_channel(
+                    FakeGuild(existing),
+                    SimpleNamespace(id=999),
+                    r"c:\taxlab",
+                    "taxlab",
+                )
+
+                self.assertIs(channel, existing)
+                self.assertEqual(existing.name, "codex-taxlab")
+                self.assertEqual(existing.topic, "Codex project mirror: taxlab")
+                self.assertEqual(len(existing.edits), 1)
+                with sqlite3.connect(bot.MIRROR_DB_PATH) as conn:
+                    row = conn.execute(
+                        """
+                        SELECT project_name, discord_channel_id
+                        FROM mirror_projects
+                        WHERE project_key = ?
+                        """,
+                        (r"c:\taxlab",),
+                    ).fetchone()
+                self.assertEqual(row, ("taxlab", 111))
+        finally:
+            bot.MIRROR_DB_PATH = old_db_path
+            bot.discord.TextChannel = original_text_channel
+
     async def test_get_or_create_thread_channel_reuses_existing_thread_by_name(self) -> None:
         old_db_path = bot.MIRROR_DB_PATH
         original_thread = bot.discord.Thread
@@ -7256,6 +7853,89 @@ class DiscordBotHelperTests(unittest.IsolatedAsyncioTestCase):
                         ("thread-1",),
                     ).fetchone()
                 self.assertEqual(row, (111, 222))
+        finally:
+            bot.MIRROR_DB_PATH = old_db_path
+            bot.discord.Thread = original_thread
+            bot.bridge.get_thread_ui_name = original_get_thread_ui_name
+
+    async def test_get_or_create_thread_channel_renames_cached_mirror_thread(self) -> None:
+        old_db_path = bot.MIRROR_DB_PATH
+        original_thread = bot.discord.Thread
+        original_get_thread_ui_name = bot.bridge.get_thread_ui_name
+
+        class FakeThread:
+            def __init__(self) -> None:
+                self.id = 222
+                self.name = "old title"
+                self.edits: list[dict[str, object]] = []
+
+            async def edit(self, **kwargs):
+                self.edits.append(kwargs)
+                self.name = str(kwargs.get("name", self.name))
+
+        class FakeGuild:
+            def __init__(self, thread: FakeThread) -> None:
+                self.thread = thread
+
+            def get_thread(self, thread_id: int):
+                return self.thread if thread_id == 222 else None
+
+        class FakeProjectChannel:
+            def __init__(self, thread: FakeThread) -> None:
+                self.id = 111
+                self.threads = []
+                self.guild = FakeGuild(thread)
+
+            async def create_thread(self, *args, **kwargs):
+                raise AssertionError("cached mirror thread should be reused")
+
+        try:
+            bot.discord.Thread = FakeThread
+            bot.bridge.get_thread_ui_name = lambda thread_id, thread=None: "Current title"
+            with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp_dir:
+                bot.MIRROR_DB_PATH = Path(temp_dir) / "mirror.sqlite"
+                bot.init_mirror_db()
+                with sqlite3.connect(bot.MIRROR_DB_PATH) as conn:
+                    conn.execute(
+                        """
+                        INSERT INTO mirror_threads (
+                            codex_thread_id, project_key, thread_title,
+                            discord_channel_id, discord_thread_id, updated_at
+                        ) VALUES (?, ?, ?, ?, ?, ?)
+                        """,
+                        ("thread-1", r"c:\taxlab", "old title", 111, 222, 1.0),
+                    )
+                codex_thread = bot.bridge.ThreadInfo(
+                    id="thread-1",
+                    title="Fallback title",
+                    cwd=str(Path(temp_dir)),
+                    updated_at=1,
+                    rollout_path=str(Path(temp_dir) / "thread.jsonl"),
+                    model="gpt",
+                    reasoning_effort="high",
+                    tokens_used=1,
+                )
+                existing = FakeThread()
+
+                thread = await bot.get_or_create_thread_channel(
+                    codex_thread,
+                    r"c:\taxlab",
+                    FakeProjectChannel(existing),
+                )
+
+                self.assertIs(thread, existing)
+                self.assertEqual(existing.name, "Current title")
+                self.assertEqual(len(existing.edits), 1)
+                with sqlite3.connect(bot.MIRROR_DB_PATH) as conn:
+                    row = conn.execute(
+                        """
+                        SELECT thread_title, discord_channel_id, discord_thread_id
+                        FROM mirror_threads
+                        WHERE codex_thread_id = ?
+                        """,
+                        ("thread-1",),
+                    ).fetchone()
+                self.assertEqual(row, ("Current title", 111, 222))
         finally:
             bot.MIRROR_DB_PATH = old_db_path
             bot.discord.Thread = original_thread

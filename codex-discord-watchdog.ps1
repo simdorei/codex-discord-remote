@@ -14,6 +14,14 @@ $StopRequestPath = Join-Path $ScriptDir '.codex_discord_bot.stop'
 $DisablePath = Join-Path $ScriptDir '.codex_discord_bot.disabled'
 $HeadlessLauncher = Join-Path $ScriptDir 'codex-discord-bot-headless.vbs'
 $LauncherLogPath = Join-Path $ScriptDir 'discord_launcher.log'
+$Sha256 = [Security.Cryptography.SHA256]::Create()
+try {
+    $ScriptDirHash = $Sha256.ComputeHash([Text.Encoding]::UTF8.GetBytes($ScriptDir.ToLowerInvariant()))
+    $ScriptDirHashText = (($ScriptDirHash | ForEach-Object { $_.ToString('x2') }) -join '')
+    $RuntimeMutexName = 'Local\CodexDiscordBot_' + $ScriptDirHashText.Substring(0, 16)
+} finally {
+    $Sha256.Dispose()
+}
 
 function Write-LauncherLog {
     param([string]$Message)
@@ -69,7 +77,60 @@ function Get-BotProcesses {
     }
 }
 
+function Test-RuntimeMutexHeld {
+    $created = $false
+    $mutex = $null
+    try {
+        $mutex = [Threading.Mutex]::new($true, $RuntimeMutexName, [ref]$created)
+        return -not $created
+    } catch {
+        Write-LauncherLog "runtime_mutex_probe_failed mutex=$RuntimeMutexName error=$($_.Exception.GetType().Name)"
+        return $false
+    } finally {
+        if ($mutex -ne $null) {
+            if ($created) {
+                $mutex.ReleaseMutex()
+            }
+            $mutex.Dispose()
+        }
+    }
+}
+
+function Wait-RuntimeBotExit {
+    param([int]$TimeoutSeconds = 8)
+
+    for ($i = 0; $i -lt $TimeoutSeconds; $i++) {
+        Start-Sleep -Seconds 1
+        if (-not (Test-BotProcessAlive)) {
+            return $true
+        }
+    }
+    return $false
+}
+
+function Request-GracefulRuntimeStop {
+    try {
+        Set-Content -LiteralPath $StopRequestPath -Encoding ASCII -Value '1'
+    } catch {
+        Write-LauncherLog "watchdog_graceful_stop_marker_failed marker=$StopRequestPath error=$($_.Exception.GetType().Name)"
+        return $false
+    }
+    Write-LauncherLog "watchdog_graceful_stop_requested marker=$StopRequestPath"
+    if (Wait-RuntimeBotExit -TimeoutSeconds 8) {
+        Remove-Item -LiteralPath $StopRequestPath -Force -ErrorAction SilentlyContinue
+        Write-LauncherLog "watchdog_graceful_stop_done marker=$StopRequestPath"
+        return $true
+    }
+    Write-LauncherLog "watchdog_graceful_stop_timeout marker=$StopRequestPath"
+    return $false
+}
+
 function Stop-RuntimeBotProcess {
+    if (Request-GracefulRuntimeStop) {
+        return
+    }
+    Remove-Item -LiteralPath $StopRequestPath -Force -ErrorAction SilentlyContinue
+
     $runtimePid = Get-RuntimePid
     if ($runtimePid -ne $null) {
         $runtimeProcess = Get-CimInstance Win32_Process -Filter "ProcessId=$runtimePid" -ErrorAction SilentlyContinue
@@ -90,7 +151,11 @@ function Stop-RuntimeBotProcess {
 
     $matchedProcesses = @(Get-BotProcesses)
     if ($matchedProcesses.Count -eq 0) {
-        Write-LauncherLog "watchdog_restart_no_runtime_pid lock=$RuntimeLockPath"
+        if (Test-RuntimeMutexHeld) {
+            Write-LauncherLog "watchdog_restart_mutex_still_held mutex=$RuntimeMutexName lock=$RuntimeLockPath"
+        } else {
+            Write-LauncherLog "watchdog_restart_no_runtime_pid lock=$RuntimeLockPath"
+        }
         return
     }
     foreach ($process in $matchedProcesses) {
@@ -120,6 +185,10 @@ function Test-BotProcessAlive {
         if ($process -ne $null) {
             return $true
         }
+    }
+    if (Test-RuntimeMutexHeld) {
+        Write-LauncherLog "runtime_mutex_alive mutex=$RuntimeMutexName lock=$RuntimeLockPath"
+        return $true
     }
     return $false
 }

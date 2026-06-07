@@ -4,8 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import time
-from dataclasses import dataclass
-from typing import Callable
 
 
 def normalize_runner_key(target_thread_id: str | None) -> str:
@@ -44,29 +42,6 @@ def is_discord_relay_stale(
     generation: int,
 ) -> bool:
     return generations.get(normalize_runner_key(target_thread_id), 0) > generation
-
-
-@dataclass(frozen=True)
-class RuntimeState:
-    steering_handoffs: dict[str, float]
-    relay_generations: dict[str, int]
-    now_func: Callable[[], float] = time.monotonic
-
-    def mark_steering_handoff(self, target_thread_id: str | None) -> float:
-        return mark_steering_handoff(
-            self.steering_handoffs,
-            target_thread_id,
-            now_func=self.now_func,
-        )
-
-    def had_steering_handoff_since(self, target_thread_id: str | None, started_at: float) -> bool:
-        return had_steering_handoff_since(self.steering_handoffs, target_thread_id, started_at)
-
-    def register_discord_relay(self, target_thread_id: str | None) -> int:
-        return register_discord_relay(self.relay_generations, target_thread_id)
-
-    def is_discord_relay_stale(self, target_thread_id: str | None, generation: int) -> bool:
-        return is_discord_relay_stale(self.relay_generations, target_thread_id, generation)
 
 
 async def build_runners_message(

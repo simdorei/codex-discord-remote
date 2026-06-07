@@ -41,7 +41,7 @@ def build_help(*, qa_commands_enabled: bool) -> str:
         "!bridge sync [limit]",
         "!mirror sync [limit]",
         "!mirror list [limit]",
-        "!mirror check",
+        "!mirror check [limit]",
         "!approval",
         "!archive [ref]",
         "!delete_archive <ref>",

@@ -9,7 +9,7 @@ This is not an official OpenAI client, hosted relay, or npm package. It is a loc
 - Maps Discord channels and threads to local Codex threads.
 - Sends plain Discord messages directly into the mapped Codex thread.
 - Mirrors Codex approval/input/follow-up choices back into Discord when the app exposes them.
-- Avoids Discord-side global busy prompts and lets different mapped Codex targets start independently.
+- Avoids Discord-side global busy prompts while serializing cross-target Codex app turns so one thread does not abort another.
 - Supports slash commands, `!` commands, startup diagnostics, history polling, and a tray/watchdog launcher.
 - Can be used alongside other Discord bots or Discord-based CLIs. For example, you can ask a separate Discord CLI/bot to do work in a project thread, then mention the Codex bridge in the same Discord thread to inspect, steer, or continue the local Codex-side work.
 
@@ -78,7 +78,6 @@ DISCORD_PLAIN_ASK_MENTION_USER_IDS=your_bridge_bot_user_id
 DISCORD_PLAIN_ASK_CONTEXT_FALLBACK=0
 DISCORD_STREAM_COMMENTARY=1
 DISCORD_SESSION_MIRROR=1
-DISCORD_RECENT_APP_PROMPT_DEDUPE_RECHECK_SECONDS=0.6
 DISCORD_ENABLE_ATTACHMENTS=1
 ```
 
@@ -91,7 +90,6 @@ Notes:
 - Messages authored by other bots are ignored unless they explicitly mention the Codex bridge user.
 - `DISCORD_STREAM_COMMENTARY=1` mirrors Codex in-progress commentary to Discord. Set it to `0` if you only want final answers.
 - `DISCORD_SESSION_MIRROR=1` tails mapped Codex session files and mirrors new app-side user text, commentary, final answers, aborts, and approval/input prompts into the mapped Discord thread.
-- `DISCORD_RECENT_APP_PROMPT_DEDUPE_RECHECK_SECONDS` adds a short mapped-thread recheck before Discord submits a prompt, catching near-simultaneous app-side steering duplicates.
 - `DISCORD_ENABLE_ATTACHMENTS=1` saves Discord attachments under `discord_attachments\` and includes the local paths in the Codex prompt. Small text-like attachments are also inlined as previews.
 
 ## Run
@@ -136,6 +134,36 @@ Registered Discord slash commands:
 
 - /help, /list, /archived_list, /use, /status, /doctor, /where, /context, /usage, /runners, /mirror_check, /bridge_sync, /new, /ask, /ask_ipc
 
+Common `!` commands:
+
+| Command | Effect |
+| --- | --- |
+| `!help` | Shows the command list. |
+| `!list [limit]` | Lists Codex threads. Without a limit, it uses the currently visible Codex sidebar order; with a limit, it uses the recent thread list. |
+| `!archived_list [limit]` | Lists archived Codex threads. Alias: `!archive_list`. |
+| `!use <ref>` | Selects a Codex thread by id, workspace ref, or list-style ref. |
+| `!open <ref>` | Opens the target Codex thread. |
+| `!open_abort <ref>` | Opens the target Codex thread and aborts the active turn. |
+| `!status [ref]` | Shows status for the mapped/current thread or a supplied ref. |
+| `!doctor` | Runs Discord and local bridge diagnostics. |
+| `!discover_codex` | Shows the detected Codex Desktop path. |
+| `!restart_codex` | Restarts Codex Desktop through the local bridge. |
+| `!chatid` | Prints Discord guild/channel/user ids for configuration. |
+| `!where` | Shows the Codex thread mapped to the current Discord channel. |
+| `!context [all]` | Shows context usage for the current thread, or visible/mapped threads with `all`. |
+| `!usage [days]` | Shows local Codex usage estimates. |
+| `!runners` | Shows Discord runner queues. |
+| `!bridge sync [limit]` | Refreshes local bridge state and Discord mirror state. Without a limit, it uses the visible Codex sidebar scope. |
+| `!mirror sync [limit]` | Syncs Discord mirror project/thread channels. Without a limit, it uses the visible Codex sidebar scope. |
+| `!mirror list [limit]` | Lists mirror mappings. Without a limit, it uses the visible Codex sidebar scope. |
+| `!mirror check [limit]` | Checks mirror mappings and stale rows. Without a limit, it uses the visible Codex sidebar scope. |
+| `!approval` | Re-sends the pending approval controls for the mapped/current Codex thread when one exists. |
+| `!archive [ref]` | Archives the mapped/current Codex thread or a supplied ref. Numeric refs follow the same visible sidebar numbering as `!list`. |
+| `!delete_archive <ref>` | Previews deletion of an archived Codex thread. |
+| `!confirm_delete_archive <ref>` | Permanently deletes the archived thread after previewing. |
+| `!new <prompt>` | Creates a new Codex thread with the first prompt. |
+| `!ask <prompt>` | Sends a prompt to the mapped Codex thread, or selected thread outside mirrors. |
+
 ## Interop With Other Discord Tools
 
 This harness is intentionally Discord-native, so it can share a Discord thread with other bots or command-line agents that post through Discord.
@@ -160,26 +188,14 @@ Steering is handled by Codex Desktop, not by a Discord-side global busy gate.
 - Discord does not preflight idle/busy state and does not auto-queue ordinary asks.
 - If Codex Desktop exposes approval/input/follow-up choices, Discord mirrors those choices.
 - Same-thread follow-ups can still reach Codex Desktop for steering.
-- Different mapped target threads are submitted independently, so one Discord thread does not block another at the bridge layer.
+- Different target threads wait for the active Codex app turn before starting, because the current desktop transport is single-active-turn in practice.
 - The default install configures `followUpQueueMode = "steer"` for Codex Desktop.
-
-## Internal Boundaries
-
-The bot entrypoint stays in `codex_discord_bot.py`, but risky bridge behavior is split into small contract modules:
-
-- `codex_discord_delivery.py`: ask stream result classification and stable log formatting.
-- `codex_discord_runner.py`: per-target runner queues, `ThreadAskJob`, and prompt-flow dispatch.
-- `codex_discord_session_mirror.py`: Codex session events to Discord mirror items, echo suppression, and mirror text formatting.
-- `codex_discord_prompt_guard.py`: recent Codex app prompt detection used to avoid duplicate Discord delivery.
-- `codex_discord_runtime.py`: steering handoff and relay generation state scoped by target thread.
-
-When changing behavior, prefer adding or extending a focused contract test around these modules before touching the Discord event handlers.
 
 ## Validation
 
 ```powershell
 py -3 -m unittest tests.test_codex_discord_bot
-py -3 -m py_compile codex_desktop_bridge.py codex_windows_harness.py codex_discord_bot.py codex_discord_delivery.py codex_discord_prompt_guard.py codex_discord_runner.py codex_discord_runtime.py codex_discord_session_mirror.py tests\test_codex_discord_bot.py
+py -3 -m py_compile codex_desktop_bridge.py codex_windows_harness.py codex_discord_bot.py tests\test_codex_discord_bot.py
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\codex-discord-watchdog.ps1 -DryRun
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\codex-discord-tray.ps1 -Once
 git diff --check
@@ -197,7 +213,7 @@ Live Discord QA should verify:
 - Discord image/text attachments are saved locally and referenced in the Codex prompt
 - app-exposed approval/input menus are mirrored when they appear after delivery
 - different mapped target threads route to the correct Codex threads
-- cross-target Discord asks can start independently without bridge-level global busy serialization
+- cross-target Discord asks wait for the active Codex app turn so they do not abort each other
 - other bot messages are ignored unless they mention the Codex bridge
 - duplicate bot starts keep one Discord websocket owner
 - headless launch shows either the tray icon or clear runtime/log evidence
