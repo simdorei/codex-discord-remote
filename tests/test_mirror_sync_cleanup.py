@@ -666,8 +666,9 @@ class MirrorSyncCleanupTests(unittest.IsolatedAsyncioTestCase):
         old_subprocess_run = bot.bridge.subprocess.run
         captured: dict[str, object] = {}
 
-        def fake_run(command: list[str], **_kwargs: object) -> SimpleNamespace:
+        def fake_run(command: list[str], **kwargs: object) -> SimpleNamespace:
             captured["command"] = command
+            captured["creationflags"] = kwargs.get("creationflags")
             return SimpleNamespace(
                 returncode=0,
                 stdout="VISIBLE_NAME:dGFzaw==\n",
@@ -698,6 +699,10 @@ class MirrorSyncCleanupTests(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn("*Codex*", script)
             self.assertIn("$rect.Width -gt 420", script)
             self.assertIn("$rect.Right -gt (Get-SidebarRightBoundary $WindowRect)", script)
+            self.assertEqual(
+                captured["creationflags"],
+                getattr(bot.bridge.subprocess, "CREATE_NO_WINDOW", 0),
+            )
         finally:
             bot.bridge.find_codex_window = old_find_codex_window
             bot.bridge.focus_window = old_focus_window

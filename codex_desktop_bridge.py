@@ -3703,6 +3703,7 @@ foreach ($name in $names) {
             text=True,
             encoding="utf-8",
             errors="replace",
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
             timeout=15,
             check=False,
         )
@@ -3982,6 +3983,7 @@ exit 4
             ["powershell", "-NoProfile", "-Command", script],
             capture_output=True,
             text=True,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
             timeout=10,
             check=False,
         )
@@ -4248,6 +4250,7 @@ Write-Output ("OK:" + (($target.Current.Name -replace "`r|`n", ' ').Trim()))
             text=True,
             encoding="utf-8",
             errors="replace",
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
             timeout=15,
             check=False,
             env=env,
@@ -4625,6 +4628,7 @@ Write-Output ("OK:" + (Normalize-Name $target.Current.Name))
             text=True,
             encoding="utf-8",
             errors="replace",
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
             timeout=25,
             check=False,
             env=env,
@@ -4770,6 +4774,7 @@ exit 5
             text=True,
             encoding="utf-8",
             errors="replace",
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
             timeout=12,
             check=False,
             env=env,
@@ -5250,6 +5255,7 @@ exit 6
         capture_output=True,
         text=True,
         encoding="utf-8",
+        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
     )
     stdout = (result.stdout or "").strip()
     stderr = (result.stderr or "").strip()
@@ -5522,6 +5528,7 @@ exit 6
         capture_output=True,
         text=True,
         encoding="utf-8",
+        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
     )
     stdout = (result.stdout or "").strip()
     stderr = (result.stderr or "").strip()

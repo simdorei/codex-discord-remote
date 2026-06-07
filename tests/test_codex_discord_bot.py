@@ -2011,7 +2011,7 @@ class DiscordBotHelperTests(unittest.IsolatedAsyncioTestCase):
                     if getattr(item, "label", "") == "Steer now"
                 )
                 calls: list[tuple[str, str | None]] = []
-                streamed: list[tuple[object, str | None]] = []
+                streamed: list[tuple[object, str | None, dict[str, object]]] = []
 
                 def fake_steer(prompt: str, target_thread_id: str | None) -> bot.SteeringPromptResult:
                     calls.append((prompt, target_thread_id))
@@ -2024,8 +2024,8 @@ class DiscordBotHelperTests(unittest.IsolatedAsyncioTestCase):
                         start_offset=0,
                     )
 
-                async def fake_stream(channel, steering_result, target_thread_id: str | None) -> bool:
-                    streamed.append((steering_result, target_thread_id))
+                async def fake_stream(channel, steering_result, target_thread_id: str | None, **kwargs) -> bool:
+                    streamed.append((steering_result, target_thread_id, kwargs))
                     return True
 
                 first = FakeInteraction(command_name="-", channel_id=222)
@@ -2059,6 +2059,7 @@ class DiscordBotHelperTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(second_handled)
         self.assertEqual(calls, [("please steer", "thread-1")])
         self.assertEqual(len(streamed), 1)
+        self.assertEqual(streamed[0][2], {"send_commentary_blocks": None, "send_final_blocks": True})
         self.assertEqual(first.response.defer_kwargs, [{"thinking": True, "ephemeral": True}])
         self.assertTrue(first.followup.messages[0].startswith("Steering sent"))
         self.assertEqual(message.channel.messages, [("Discord steering submitted.\nmessage: please steer", None)])
@@ -4025,7 +4026,7 @@ class DiscordBotHelperTests(unittest.IsolatedAsyncioTestCase):
                     rollout_path=str(session_path),
                     model="gpt",
                     reasoning_effort="high",
-                    tokens_used=1,
+                    tokens_used=175_000_000,
                 )
                 bot.resolve_target_ref = lambda target_thread_id: ("thread-1", "taxlab:1")
                 bridge.choose_thread = lambda thread_id, _cwd=None: thread
@@ -4037,6 +4038,7 @@ class DiscordBotHelperTests(unittest.IsolatedAsyncioTestCase):
             bridge.choose_thread = original_choose_thread
 
         self.assertIn("Context warning: 70.0% (high)", warning)
+        self.assertIn("token_used_total=175.0M", warning)
 
     async def test_plain_ask_does_not_check_busy_before_prompt_flow(self) -> None:
         original_get_interactive_state = bot.get_interactive_state_for_thread
@@ -4642,7 +4644,7 @@ class DiscordBotHelperTests(unittest.IsolatedAsyncioTestCase):
         try:
             bot.get_mirrored_codex_thread_id = lambda channel_id: "thread-1"
             observed: list[tuple[str, str | None]] = []
-            streamed: list[tuple[object, str | None]] = []
+            streamed: list[tuple[object, str | None, dict[str, object]]] = []
 
             def fake_run_steering(prompt: str, target_thread_id: str | None) -> bot.SteeringPromptResult:
                 observed.append((prompt, target_thread_id))
@@ -4655,8 +4657,8 @@ class DiscordBotHelperTests(unittest.IsolatedAsyncioTestCase):
                     start_offset=0,
                 )
 
-            async def fake_stream(channel, steering_result, target_thread_id: str | None) -> bool:
-                streamed.append((steering_result, target_thread_id))
+            async def fake_stream(channel, steering_result, target_thread_id: str | None, **kwargs) -> bool:
+                streamed.append((steering_result, target_thread_id, kwargs))
                 return True
 
             bot.run_steering_prompt = fake_run_steering
@@ -4677,6 +4679,7 @@ class DiscordBotHelperTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(observed, [("please steer now", "thread-1")])
         self.assertEqual(len(streamed), 1)
         self.assertEqual(streamed[0][1], "thread-1")
+        self.assertEqual(streamed[0][2], {"send_commentary_blocks": False, "send_final_blocks": False})
         self.assertEqual(len(message.channel.messages), 1)
         self.assertEqual(message.channel.messages[0][0], "Steering sent\n\n[qa_delivery_verified]")
 
@@ -5723,7 +5726,8 @@ class DiscordBotHelperTests(unittest.IsolatedAsyncioTestCase):
     async def test_steer_now_success_attaches_watch(self) -> None:
         original_run_steering_prompt = bot.run_steering_prompt
         original_stream_steering = bot.stream_steering_prompt_result_to_channel
-        calls: list[tuple[object, object, str | None]] = []
+        original_should_delegate = bot.should_delegate_output_to_session_mirror
+        calls: list[tuple[object, object, str | None, dict[str, object]]] = []
         try:
             steering_result = bot.SteeringPromptResult(
                 0,
@@ -5737,13 +5741,14 @@ class DiscordBotHelperTests(unittest.IsolatedAsyncioTestCase):
             def fake_run_steering_prompt(prompt, target_thread_id):
                 return steering_result
 
-            async def fake_stream_steering(channel, result, target_thread_id):
-                calls.append((channel, result, target_thread_id))
+            async def fake_stream_steering(channel, result, target_thread_id, **kwargs):
+                calls.append((channel, result, target_thread_id, kwargs))
                 await channel.send("steered final")
                 return True
 
             bot.run_steering_prompt = fake_run_steering_prompt
             bot.stream_steering_prompt_result_to_channel = fake_stream_steering
+            bot.should_delegate_output_to_session_mirror = lambda channel, target_thread_id: False
 
             with tempfile.TemporaryDirectory() as temp_dir:
                 log_path = Path(temp_dir) / "discord-smoke.log"
@@ -5761,7 +5766,17 @@ class DiscordBotHelperTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(len(interaction.followup.messages), 1)
             self.assertEqual(interaction.followup.kwargs[0], {"ephemeral": True})
             self.assertIn("Steering sent", interaction.followup.messages[0])
-            self.assertEqual(calls, [(message.channel, steering_result, "thread-1")])
+            self.assertEqual(
+                calls,
+                [
+                    (
+                        message.channel,
+                        steering_result,
+                        "thread-1",
+                        {"send_commentary_blocks": None, "send_final_blocks": True},
+                    )
+                ],
+            )
             self.assertEqual(
                 message.channel.messages,
                 [
@@ -5774,6 +5789,70 @@ class DiscordBotHelperTests(unittest.IsolatedAsyncioTestCase):
         finally:
             bot.run_steering_prompt = original_run_steering_prompt
             bot.stream_steering_prompt_result_to_channel = original_stream_steering
+            bot.should_delegate_output_to_session_mirror = original_should_delegate
+
+    async def test_steer_now_delegates_public_output_to_session_mirror(self) -> None:
+        original_run_steering_prompt = bot.run_steering_prompt
+        original_stream_steering = bot.stream_steering_prompt_result_to_channel
+        original_should_delegate = bot.should_delegate_output_to_session_mirror
+        calls: list[tuple[object, object, str | None, dict[str, object]]] = []
+        try:
+            steering_result = bot.SteeringPromptResult(
+                0,
+                "target_thread: thread-1\n[delivery_verified] taxlab:1",
+                target_thread_id="thread-1",
+                target_ref="taxlab:1",
+                session_path="session.jsonl",
+                start_offset=10,
+            )
+
+            def fake_run_steering_prompt(prompt, target_thread_id):
+                return steering_result
+
+            async def fake_stream_steering(channel, result, target_thread_id, **kwargs):
+                calls.append((channel, result, target_thread_id, kwargs))
+                if kwargs.get("send_final_blocks", True):
+                    await channel.send("steered final")
+                return True
+
+            bot.run_steering_prompt = fake_run_steering_prompt
+            bot.stream_steering_prompt_result_to_channel = fake_stream_steering
+            bot.should_delegate_output_to_session_mirror = lambda channel, target_thread_id: True
+
+            with tempfile.TemporaryDirectory() as temp_dir:
+                log_path = Path(temp_dir) / "discord-smoke.log"
+                message = FakeMessage()
+                view = bot.BusyChoiceView(message, "please steer", target_thread_id="thread-1")
+                button = next(item for item in view.children if getattr(item, "label", "") == "Steer now")
+                interaction = FakeInteraction()
+
+                with EnvPatch("CODEX_DISCORD_LOG_PATH", str(log_path)):
+                    await button.callback(interaction)
+                log_text = log_path.read_text(encoding="utf-8")
+
+            self.assertTrue(interaction.response.deferred)
+            self.assertEqual(len(interaction.followup.messages), 1)
+            self.assertIn("Steering sent", interaction.followup.messages[0])
+            self.assertEqual(
+                calls,
+                [
+                    (
+                        message.channel,
+                        steering_result,
+                        "thread-1",
+                        {"send_commentary_blocks": False, "send_final_blocks": False},
+                    )
+                ],
+            )
+            self.assertEqual(
+                message.channel.messages,
+                [("Discord steering submitted.\nmessage: please steer", None)],
+            )
+            self.assertIn("steer_now_delegated_to_session_mirror target=thread-1", log_text)
+        finally:
+            bot.run_steering_prompt = original_run_steering_prompt
+            bot.stream_steering_prompt_result_to_channel = original_stream_steering
+            bot.should_delegate_output_to_session_mirror = original_should_delegate
 
     def test_run_steering_prompt_treats_delayed_ipc_delivery_as_success(self) -> None:
         original_resolve_target_ref = bot.resolve_target_ref

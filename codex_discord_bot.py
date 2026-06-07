@@ -1264,6 +1264,12 @@ async def stream_steering_prompt_result_to_channel(
     if relay.suppressed_after_steering:
         log_line(f"steer_watch_suppressed_after_newer_handoff target={target_thread_id or '-'}")
         return True
+    if send_commentary_blocks is False and not send_final_blocks:
+        log_line(
+            f"steer_watch_public_output_delegated_to_session_mirror target={target_thread_id or '-'} "
+            f"exit={exit_code} output_len={format_log_text_len(output)}"
+        )
+        return True
     if relay.sent_live:
         if exit_code == 0 and not relay.saw_aborted:
             if relay.saw_final:
@@ -3104,7 +3110,16 @@ async def handle_persistent_busy_choice_interaction(
             ephemeral=True,
         )
         if exit_code == 0:
-            await steering_streamer(channel, steering_result, target_thread_id)
+            delegate_to_session_mirror = should_delegate_output_to_session_mirror(channel, target_thread_id)
+            if delegate_to_session_mirror:
+                log_line(f"busy_choice_persistent_steer_delegated_to_session_mirror target={target_thread_id or '-'}")
+            await steering_streamer(
+                channel,
+                steering_result,
+                target_thread_id,
+                send_commentary_blocks=False if delegate_to_session_mirror else None,
+                send_final_blocks=not delegate_to_session_mirror,
+            )
         return True
 
     busy_state, _busy_thread_id, _busy_ref = await asyncio.to_thread(
@@ -3534,6 +3549,7 @@ async def run_discord_button_qa(bot: "CodexDiscordBot", message: discord.Message
         stream_channel: discord.abc.Messageable,
         steering_result: object,
         target_thread_id: str | None,
+        **_kwargs: object,
     ) -> bool:
         watched.append(
             (
@@ -6066,10 +6082,18 @@ class BusyChoiceView(discord.ui.View):
         )
         log_line(f"steer_now_sent exit={exit_code} target={self.target_thread_id or '-'}")
         if exit_code == 0:
+            delegate_to_session_mirror = should_delegate_output_to_session_mirror(
+                self.message.channel,
+                self.target_thread_id,
+            )
+            if delegate_to_session_mirror:
+                log_line(f"steer_now_delegated_to_session_mirror target={self.target_thread_id or '-'}")
             await stream_steering_prompt_result_to_channel(
                 self.message.channel,
                 steering_result,
                 self.target_thread_id,
+                send_commentary_blocks=False if delegate_to_session_mirror else None,
+                send_final_blocks=not delegate_to_session_mirror,
             )
 
     @discord.ui.button(label="Queue next", style=discord.ButtonStyle.secondary)
@@ -6256,10 +6280,15 @@ async def handle_prefix_command(bot: CodexDiscordBot, message: discord.Message, 
         title = "Steering sent" if exit_code == 0 else f"Steering failed (exit {exit_code})"
         await send_chunks(message.channel, f"{title}\n\n{output or '(no output)'}")
         if exit_code == 0:
+            delegate_to_session_mirror = should_delegate_output_to_session_mirror(message.channel, target_thread_id)
+            if delegate_to_session_mirror:
+                log_line(f"prefix_steer_delegated_to_session_mirror target={target_thread_id}")
             await stream_steering_prompt_result_to_channel(
                 message.channel,
                 steering_result,
                 target_thread_id,
+                send_commentary_blocks=False if delegate_to_session_mirror else None,
+                send_final_blocks=not delegate_to_session_mirror,
             )
         return
     if command in {"chatid", "whoami"}:

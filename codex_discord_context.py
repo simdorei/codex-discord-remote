@@ -59,7 +59,8 @@ def build_context_warning(
         )
     return (
         f"Context warning: {context_usage.usage_ratio * 100:.1f}% ({status}), "
-        f"archive_recommended={'yes' if archive_recommended else 'no'}."
+        f"archive_recommended={'yes' if archive_recommended else 'no'}, "
+        f"token_used_total={bridge_module.format_token_k(thread.tokens_used)}."
         f"{compaction_note} "
         "Use `!context` to inspect, or `!new <prompt>` to continue in a fresh mirrored thread."
     )
