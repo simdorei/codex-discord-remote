@@ -708,6 +708,50 @@ class MirrorSyncCleanupTests(unittest.IsolatedAsyncioTestCase):
             bot.bridge.focus_window = old_focus_window
             bot.bridge.subprocess.run = old_subprocess_run
 
+    def test_scan_visible_sidebar_names_toggles_sidebar_on_hidden_scan(self) -> None:
+        old_scan_once = bot.bridge._scan_visible_sidebar_names_once
+        old_toggle = bot.bridge.toggle_codex_sidebar
+        calls: list[str] = []
+
+        def fake_scan_once() -> list[str]:
+            calls.append("scan")
+            if len(calls) == 1:
+                raise RuntimeError("Visible sidebar scan failed: NO_VISIBLE_SIDEBAR_NAMES")
+            return ["task"]
+
+        try:
+            bot.bridge._scan_visible_sidebar_names_once = fake_scan_once
+            bot.bridge.toggle_codex_sidebar = lambda: calls.append("toggle")
+
+            names = bot.bridge.scan_visible_sidebar_names()
+
+            self.assertEqual(names, ["task"])
+            self.assertEqual(calls, ["scan", "toggle", "scan"])
+        finally:
+            bot.bridge._scan_visible_sidebar_names_once = old_scan_once
+            bot.bridge.toggle_codex_sidebar = old_toggle
+
+    def test_scan_visible_sidebar_names_reports_toggle_recovery_failure(self) -> None:
+        old_scan_once = bot.bridge._scan_visible_sidebar_names_once
+        old_toggle = bot.bridge.toggle_codex_sidebar
+
+        try:
+            bot.bridge._scan_visible_sidebar_names_once = (
+                lambda: (_ for _ in ()).throw(
+                    RuntimeError("Visible sidebar scan failed: NO_VISIBLE_SIDEBAR_NAMES")
+                )
+            )
+            bot.bridge.toggle_codex_sidebar = lambda: None
+
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "initial=.*NO_VISIBLE_SIDEBAR_NAMES.*after_toggle=.*NO_VISIBLE_SIDEBAR_NAMES",
+            ):
+                bot.bridge.scan_visible_sidebar_names()
+        finally:
+            bot.bridge._scan_visible_sidebar_names_once = old_scan_once
+            bot.bridge.toggle_codex_sidebar = old_toggle
+
 
 if __name__ == "__main__":
     unittest.main()

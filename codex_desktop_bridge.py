@@ -3594,7 +3594,18 @@ def focus_window(window: WindowInfo) -> None:
     time.sleep(0.2)
 
 
-def scan_visible_sidebar_names() -> list[str]:
+def toggle_codex_sidebar() -> None:
+    window = find_codex_window()
+    focus_window(window)
+    send_hotkey(VK_CONTROL, VK_B)
+    time.sleep(0.9)
+
+
+def is_no_visible_sidebar_names_error(exc: BaseException) -> bool:
+    return "NO_VISIBLE_SIDEBAR_NAMES" in str(exc)
+
+
+def _scan_visible_sidebar_names_once() -> list[str]:
     window = find_codex_window()
     focus_window(window)
     codex_window_handle = int(window.hwnd)
@@ -3733,6 +3744,24 @@ foreach ($name in $names) {
         detail = output or error or "no VISIBLE_NAME rows"
         raise RuntimeError(f"Visible sidebar scan returned no sidebar names: {detail}")
     return names
+
+
+def scan_visible_sidebar_names() -> list[str]:
+    try:
+        return _scan_visible_sidebar_names_once()
+    except RuntimeError as exc:
+        if not is_no_visible_sidebar_names_error(exc):
+            raise
+        initial_error = exc
+
+    try:
+        toggle_codex_sidebar()
+        return _scan_visible_sidebar_names_once()
+    except Exception as exc:
+        raise RuntimeError(
+            "Visible sidebar scan failed after requested sidebar toggle recovery. "
+            f"initial={initial_error}; after_toggle={exc}"
+        ) from exc
 
 
 def visible_sidebar_name_matches_thread(visible_name: str, thread: ThreadInfo) -> bool:
