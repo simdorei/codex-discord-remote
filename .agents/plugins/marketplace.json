@@ -1,0 +1,20 @@
+{
+  "name": "codex-discord-harness",
+  "interface": {
+    "displayName": "Codex Discord Harness"
+  },
+  "plugins": [
+    {
+      "name": "codex-discord-harness",
+      "source": {
+        "source": "local",
+        "path": "./plugins/codex-discord-harness"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    }
+  ]
+}
