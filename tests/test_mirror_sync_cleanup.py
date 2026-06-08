@@ -1,9 +1,8 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import os
 import sqlite3
 import tempfile
-import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -92,7 +91,7 @@ class MirrorSyncCleanupTests(unittest.IsolatedAsyncioTestCase):
             else:
                 os.environ["CODEX_DISCORD_LOG_PATH"] = old_log_path
 
-    async def test_sync_codex_mirror_removes_rows_outside_visible_limit(self) -> None:
+    async def test_sync_codex_mirror_removes_rows_outside_requested_limit(self) -> None:
         old_db_path = bot.MIRROR_DB_PATH
         old_load_recent_threads = bot.bridge.load_recent_threads
         old_filter_mirrorable_threads = bot.filter_mirrorable_threads
@@ -119,7 +118,7 @@ class MirrorSyncCleanupTests(unittest.IsolatedAsyncioTestCase):
                 bot.MIRROR_DB_PATH = Path(temp_dir) / "mirror.sqlite"
                 os.environ["CODEX_DISCORD_LOG_PATH"] = str(Path(temp_dir) / "discord.log")
                 bot.init_mirror_db()
-                visible_thread = self.make_thread("visible-thread", str(Path(temp_dir)), "visible")
+                scoped_thread = self.make_thread("scoped-thread", str(Path(temp_dir)), "scoped")
                 hidden_active_thread = self.make_thread("hidden-active-thread", str(Path(temp_dir)), "hidden")
                 with sqlite3.connect(bot.MIRROR_DB_PATH) as conn:
                     conn.execute(
@@ -148,8 +147,8 @@ class MirrorSyncCleanupTests(unittest.IsolatedAsyncioTestCase):
                 def fake_load_recent_threads(limit: int = 20) -> list[bot.bridge.ThreadInfo]:
                     load_calls.append(limit)
                     if limit == 0:
-                        return [visible_thread, hidden_active_thread]
-                    return [visible_thread]
+                        return [scoped_thread, hidden_active_thread]
+                    return [scoped_thread]
 
                 async def fake_get_project_channel(guild, category, project_key, project_name):
                     bot.upsert_mirror_project(project_key, project_name, 111)
@@ -181,7 +180,7 @@ class MirrorSyncCleanupTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(load_calls, [7])
             self.assertIn("threads: 1", output)
             self.assertIn("stale_threads_removed: 1", output)
-            self.assertEqual(rows, [("visible-thread",)])
+            self.assertEqual(rows, [("scoped-thread",)])
         finally:
             bot.MIRROR_DB_PATH = old_db_path
             bot.bridge.load_recent_threads = old_load_recent_threads
@@ -193,10 +192,10 @@ class MirrorSyncCleanupTests(unittest.IsolatedAsyncioTestCase):
             else:
                 os.environ["CODEX_DISCORD_LOG_PATH"] = old_log_path
 
-    async def test_sync_codex_mirror_defaults_to_ui_visible_threads(self) -> None:
+    async def test_sync_codex_mirror_defaults_to_state_root_threads(self) -> None:
         old_db_path = bot.MIRROR_DB_PATH
         old_load_recent_threads = bot.bridge.load_recent_threads
-        old_load_ui_visible_threads = getattr(bot.bridge, "load_ui_visible_threads", None)
+        old_load_user_root_threads = bot.bridge.load_user_root_threads
         old_filter_mirrorable_threads = bot.filter_mirrorable_threads
         old_get_project_channel = bot.get_or_create_project_channel
         old_get_thread_channel = bot.get_or_create_thread_channel
@@ -220,15 +219,15 @@ class MirrorSyncCleanupTests(unittest.IsolatedAsyncioTestCase):
             with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp_dir:
                 bot.MIRROR_DB_PATH = Path(temp_dir) / "mirror.sqlite"
                 os.environ["CODEX_DISCORD_LOG_PATH"] = str(Path(temp_dir) / "discord.log")
-                visible_thread = self.make_thread("visible-thread", str(Path(temp_dir)), "visible")
-                load_ui_calls: list[str] = []
+                root_thread = self.make_thread("root-thread", str(Path(temp_dir)), "root")
+                load_db_calls: list[str] = []
 
                 def fake_load_recent_threads(limit: int = 20) -> list[bot.bridge.ThreadInfo]:
-                    raise AssertionError(f"default mirror sync used DB limit instead of UI visible: {limit}")
+                    raise AssertionError(f"default mirror sync used recent limit instead of DB root scope: {limit}")
 
-                def fake_load_ui_visible_threads() -> list[bot.bridge.ThreadInfo]:
-                    load_ui_calls.append("ui-visible")
-                    return [visible_thread]
+                def fake_load_user_root_threads(limit: int = 0) -> list[bot.bridge.ThreadInfo]:
+                    load_db_calls.append(f"db-root:{limit}")
+                    return [root_thread]
 
                 async def fake_get_project_channel(guild, category, project_key, project_name):
                     bot.upsert_mirror_project(project_key, project_name, 111)
@@ -239,7 +238,7 @@ class MirrorSyncCleanupTests(unittest.IsolatedAsyncioTestCase):
                     return SimpleNamespace(id=333)
 
                 bot.bridge.load_recent_threads = fake_load_recent_threads
-                bot.bridge.load_ui_visible_threads = fake_load_ui_visible_threads
+                bot.bridge.load_user_root_threads = fake_load_user_root_threads
                 bot.filter_mirrorable_threads = lambda threads: list(threads)
                 bot.get_or_create_project_channel = fake_get_project_channel
                 bot.get_or_create_thread_channel = fake_get_thread_channel
@@ -253,15 +252,12 @@ class MirrorSyncCleanupTests(unittest.IsolatedAsyncioTestCase):
 
                 output = await bot.sync_codex_mirror(fake_bot)
 
-            self.assertEqual(load_ui_calls, ["ui-visible"])
+            self.assertEqual(load_db_calls, ["db-root:0"])
             self.assertIn("threads: 1", output)
         finally:
             bot.MIRROR_DB_PATH = old_db_path
             bot.bridge.load_recent_threads = old_load_recent_threads
-            if old_load_ui_visible_threads is None:
-                delattr(bot.bridge, "load_ui_visible_threads")
-            else:
-                bot.bridge.load_ui_visible_threads = old_load_ui_visible_threads
+            bot.bridge.load_user_root_threads = old_load_user_root_threads
             bot.filter_mirrorable_threads = old_filter_mirrorable_threads
             bot.get_or_create_project_channel = old_get_project_channel
             bot.get_or_create_thread_channel = old_get_thread_channel
@@ -270,46 +266,43 @@ class MirrorSyncCleanupTests(unittest.IsolatedAsyncioTestCase):
             else:
                 os.environ["CODEX_DISCORD_LOG_PATH"] = old_log_path
 
-    def test_build_mirror_check_defaults_to_ui_visible_threads(self) -> None:
-        old_load_ui_visible_threads = getattr(bot.bridge, "load_ui_visible_threads", None)
+    def test_build_mirror_check_defaults_to_state_root_threads(self) -> None:
+        old_load_user_root_threads = bot.bridge.load_user_root_threads
         old_status_builder = bot.discord_mirror_status.build_mirror_check
-        visible_thread = self.make_thread("visible-thread", str(Path.cwd()), "visible")
+        root_thread = self.make_thread("root-thread", str(Path.cwd()), "root")
         observed_threads: list[list[bot.bridge.ThreadInfo]] = []
 
-        def fake_load_ui_visible_threads() -> list[bot.bridge.ThreadInfo]:
-            return [visible_thread]
+        def fake_load_user_root_threads(limit: int = 0) -> list[bot.bridge.ThreadInfo]:
+            return [root_thread]
 
         def fake_build_mirror_check(**kwargs) -> str:
             observed_threads.append(kwargs["threads"])
             return "Mirror check"
 
         try:
-            bot.bridge.load_ui_visible_threads = fake_load_ui_visible_threads
+            bot.bridge.load_user_root_threads = fake_load_user_root_threads
             bot.discord_mirror_status.build_mirror_check = fake_build_mirror_check
 
             output = bot.build_mirror_check()
 
             self.assertEqual(output, "Mirror check")
-            self.assertEqual(observed_threads, [[visible_thread]])
+            self.assertEqual(observed_threads, [[root_thread]])
         finally:
-            if old_load_ui_visible_threads is None:
-                delattr(bot.bridge, "load_ui_visible_threads")
-            else:
-                bot.bridge.load_ui_visible_threads = old_load_ui_visible_threads
+            bot.bridge.load_user_root_threads = old_load_user_root_threads
             bot.discord_mirror_status.build_mirror_check = old_status_builder
 
-    def test_build_mirror_list_defaults_to_actual_ui_visible_thread_ids(self) -> None:
+    def test_build_mirror_list_defaults_to_state_root_thread_ids(self) -> None:
         old_db_path = bot.MIRROR_DB_PATH
-        old_load_ui_visible_threads = bot.bridge.load_ui_visible_threads
+        old_load_user_root_threads = bot.bridge.load_user_root_threads
         old_log_path = os.environ.get("CODEX_DISCORD_LOG_PATH")
 
         try:
             with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp_dir:
                 bot.MIRROR_DB_PATH = Path(temp_dir) / "mirror.sqlite"
                 os.environ["CODEX_DISCORD_LOG_PATH"] = str(Path(temp_dir) / "discord.log")
-                visible_thread = self.make_thread("visible-thread", str(Path(temp_dir)), "visible")
+                root_thread = self.make_thread("root-thread", str(Path(temp_dir)), "root")
                 hidden_thread = self.make_thread("hidden-thread", str(Path(temp_dir)), "hidden")
-                bot.bridge.load_ui_visible_threads = lambda: [visible_thread]
+                bot.bridge.load_user_root_threads = lambda limit=0: [root_thread]
                 bot.init_mirror_db()
                 with sqlite3.connect(bot.MIRROR_DB_PATH) as conn:
                     conn.execute(
@@ -330,161 +323,24 @@ class MirrorSyncCleanupTests(unittest.IsolatedAsyncioTestCase):
                         "(codex_thread_id, project_key, thread_title, "
                         "discord_channel_id, discord_thread_id, updated_at) "
                         "VALUES (?, ?, ?, ?, ?, ?)",
-                        (visible_thread.id, str(Path(temp_dir)), "visible", 111, 333, 1.0),
+                        (root_thread.id, str(Path(temp_dir)), "root", 111, 333, 1.0),
                     )
 
                 output = bot.build_mirror_list()
 
-            self.assertIn("/ visible", output)
+            self.assertIn("/ root", output)
             self.assertNotIn("/ hidden", output)
         finally:
             bot.MIRROR_DB_PATH = old_db_path
-            bot.bridge.load_ui_visible_threads = old_load_ui_visible_threads
+            bot.bridge.load_user_root_threads = old_load_user_root_threads
             if old_log_path is None:
                 os.environ.pop("CODEX_DISCORD_LOG_PATH", None)
             else:
                 os.environ["CODEX_DISCORD_LOG_PATH"] = old_log_path
 
-    def test_visible_sidebar_matching_does_not_treat_project_heading_as_thread(self) -> None:
-        thread = self.make_thread("thread-1", str(Path.cwd()), "taxlab task detail")
-
-        matched = bot.bridge.match_visible_sidebar_threads(["taxlab"], [thread])
-
-        self.assertEqual(matched, [])
-
-    def test_visible_sidebar_matching_uses_project_heading_for_duplicate_titles(self) -> None:
-        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp_dir:
-            project_a = Path(temp_dir) / "project-a"
-            project_b = Path(temp_dir) / "project-b"
-            thread_a = self.make_thread("thread-a", str(project_a), "same task")
-            thread_b = self.make_thread("thread-b", str(project_b), "same task")
-
-            matched = bot.bridge.match_visible_sidebar_threads(
-                [bot.bridge.get_thread_workspace_name(thread_b), "same task2분"],
-                [thread_a, thread_b],
-            )
-
-        self.assertEqual(matched, [thread_b])
-
-    def test_load_ui_visible_threads_rejects_same_project_duplicate_titles(self) -> None:
-        old_scan_visible_sidebar_names = bot.bridge.scan_visible_sidebar_names
-        old_load_recent_threads = bot.bridge.load_recent_threads
-
-        try:
-            with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp_dir:
-                project = Path(temp_dir) / "project"
-                newer_thread = self.make_thread("thread-new", str(project), "same task")
-                older_thread = self.make_thread("thread-old", str(project), "same task")
-                bot.bridge.scan_visible_sidebar_names = lambda: [
-                    bot.bridge.get_thread_workspace_name(newer_thread),
-                    "same task2분",
-                ]
-                bot.bridge.load_recent_threads = lambda limit=20: [newer_thread, older_thread]
-
-                with self.assertRaisesRegex(RuntimeError, "ambiguous"):
-                    bot.bridge.load_ui_visible_threads()
-        finally:
-            bot.bridge.scan_visible_sidebar_names = old_scan_visible_sidebar_names
-            bot.bridge.load_recent_threads = old_load_recent_threads
-
-    def test_load_ui_visible_threads_uses_visible_age_for_same_project_duplicates(self) -> None:
-        old_scan_visible_sidebar_names = bot.bridge.scan_visible_sidebar_names
-        old_load_recent_threads = bot.bridge.load_recent_threads
-
-        try:
-            with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp_dir:
-                project = Path(temp_dir) / "project"
-                newer_thread = self.make_thread("thread-new", str(project), "same task")
-                older_thread = self.make_thread("thread-old", str(project), "same task")
-                now = int(time.time())
-                newer_thread.updated_at = now - (5 * 60)
-                older_thread.updated_at = now - (2 * 3600)
-                bot.bridge.scan_visible_sidebar_names = lambda: [
-                    bot.bridge.get_thread_workspace_name(newer_thread),
-                    "same task5분",
-                ]
-                bot.bridge.load_recent_threads = lambda limit=20: [newer_thread, older_thread]
-
-                matched = bot.bridge.load_ui_visible_threads()
-
-            self.assertEqual(matched, [newer_thread])
-        finally:
-            bot.bridge.scan_visible_sidebar_names = old_scan_visible_sidebar_names
-            bot.bridge.load_recent_threads = old_load_recent_threads
-
-    def test_load_ui_visible_threads_rejects_empty_active_state_after_ui_scan(self) -> None:
-        old_scan_visible_sidebar_names = bot.bridge.scan_visible_sidebar_names
-        old_load_recent_threads = bot.bridge.load_recent_threads
-
-        try:
-            bot.bridge.scan_visible_sidebar_names = lambda: ["visible task2분"]
-            bot.bridge.load_recent_threads = lambda limit=20: []
-
-            with self.assertRaisesRegex(RuntimeError, "active thread state is empty"):
-                bot.bridge.load_ui_visible_threads()
-        finally:
-            bot.bridge.scan_visible_sidebar_names = old_scan_visible_sidebar_names
-            bot.bridge.load_recent_threads = old_load_recent_threads
-
-    def test_load_ui_visible_threads_rejects_duplicate_titles_without_project_heading(self) -> None:
-        old_scan_visible_sidebar_names = bot.bridge.scan_visible_sidebar_names
-        old_load_recent_threads = bot.bridge.load_recent_threads
-
-        try:
-            with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp_dir:
-                thread_a = self.make_thread("thread-a", str(Path(temp_dir) / "project-a"), "same task")
-                thread_b = self.make_thread("thread-b", str(Path(temp_dir) / "project-b"), "same task")
-                bot.bridge.scan_visible_sidebar_names = lambda: ["same task2분"]
-                bot.bridge.load_recent_threads = lambda limit=20: [thread_a, thread_b]
-
-                with self.assertRaisesRegex(RuntimeError, "ambiguous"):
-                    bot.bridge.load_ui_visible_threads()
-        finally:
-            bot.bridge.scan_visible_sidebar_names = old_scan_visible_sidebar_names
-            bot.bridge.load_recent_threads = old_load_recent_threads
-
-    def test_load_ui_visible_threads_rejects_duplicate_workspace_headings(self) -> None:
-        old_scan_visible_sidebar_names = bot.bridge.scan_visible_sidebar_names
-        old_load_recent_threads = bot.bridge.load_recent_threads
-
-        try:
-            with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp_dir:
-                thread_a = self.make_thread("thread-a", str(Path(temp_dir) / "one" / "repo"), "same task")
-                thread_b = self.make_thread("thread-b", str(Path(temp_dir) / "two" / "repo"), "same task")
-                bot.bridge.scan_visible_sidebar_names = lambda: ["repo", "same task2분"]
-                bot.bridge.load_recent_threads = lambda limit=20: [thread_a, thread_b]
-
-                with self.assertRaisesRegex(RuntimeError, "ambiguous|unmatched"):
-                    bot.bridge.load_ui_visible_threads()
-        finally:
-            bot.bridge.scan_visible_sidebar_names = old_scan_visible_sidebar_names
-            bot.bridge.load_recent_threads = old_load_recent_threads
-
-    def test_load_ui_visible_threads_rejects_ambiguous_heading_after_previous_project(self) -> None:
-        old_scan_visible_sidebar_names = bot.bridge.scan_visible_sidebar_names
-        old_load_recent_threads = bot.bridge.load_recent_threads
-
-        try:
-            with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp_dir:
-                prior_thread = self.make_thread(
-                    "thread-prior",
-                    str(Path(temp_dir) / "project-a"),
-                    "same task",
-                )
-                repo_a = self.make_thread("thread-a", str(Path(temp_dir) / "one" / "repo"), "same task")
-                repo_b = self.make_thread("thread-b", str(Path(temp_dir) / "two" / "repo"), "same task")
-                bot.bridge.scan_visible_sidebar_names = lambda: ["project-a", "repo", "same task2분"]
-                bot.bridge.load_recent_threads = lambda limit=20: [prior_thread, repo_a, repo_b]
-
-                with self.assertRaisesRegex(RuntimeError, "ambiguous|unmatched"):
-                    bot.bridge.load_ui_visible_threads()
-        finally:
-            bot.bridge.scan_visible_sidebar_names = old_scan_visible_sidebar_names
-            bot.bridge.load_recent_threads = old_load_recent_threads
-
-    async def test_sync_codex_mirror_does_not_cleanup_when_ui_visible_scope_fails(self) -> None:
+    async def test_sync_codex_mirror_does_not_cleanup_when_state_root_scope_fails(self) -> None:
         old_db_path = bot.MIRROR_DB_PATH
-        old_load_ui_visible_threads = bot.bridge.load_ui_visible_threads
+        old_load_user_root_threads = bot.bridge.load_user_root_threads
         old_log_path = os.environ.get("CODEX_DISCORD_LOG_PATH")
 
         class FakeGuild:
@@ -521,8 +377,8 @@ class MirrorSyncCleanupTests(unittest.IsolatedAsyncioTestCase):
                         ("thread-1", "project", "thread", 111, 222, 1.0),
                     )
 
-                bot.bridge.load_ui_visible_threads = lambda: (_ for _ in ()).throw(
-                    RuntimeError("ambiguous visible scope")
+                bot.bridge.load_user_root_threads = lambda limit=0: (_ for _ in ()).throw(
+                    RuntimeError("state root scope failed")
                 )
                 fake_bot = SimpleNamespace(
                     guild_id=1,
@@ -531,7 +387,7 @@ class MirrorSyncCleanupTests(unittest.IsolatedAsyncioTestCase):
                     get_guild=lambda guild_id: FakeGuild(),
                 )
 
-                with self.assertRaisesRegex(RuntimeError, "ambiguous visible scope"):
+                with self.assertRaisesRegex(RuntimeError, "state root scope failed"):
                     await bot.sync_codex_mirror(fake_bot)
 
                 with sqlite3.connect(bot.MIRROR_DB_PATH) as conn:
@@ -542,17 +398,18 @@ class MirrorSyncCleanupTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(thread_rows, [("thread-1",)])
         finally:
             bot.MIRROR_DB_PATH = old_db_path
-            bot.bridge.load_ui_visible_threads = old_load_ui_visible_threads
+            bot.bridge.load_user_root_threads = old_load_user_root_threads
             if old_log_path is None:
                 os.environ.pop("CODEX_DISCORD_LOG_PATH", None)
             else:
                 os.environ["CODEX_DISCORD_LOG_PATH"] = old_log_path
 
-    async def test_sync_codex_mirror_does_not_cleanup_same_project_duplicate_titles(self) -> None:
+    async def test_sync_codex_mirror_keeps_same_project_duplicate_titles_from_state_root_scope(self) -> None:
         old_db_path = bot.MIRROR_DB_PATH
-        old_scan_visible_sidebar_names = bot.bridge.scan_visible_sidebar_names
-        old_load_recent_threads = bot.bridge.load_recent_threads
+        old_load_user_root_threads = bot.bridge.load_user_root_threads
         old_filter_mirrorable_threads = bot.filter_mirrorable_threads
+        old_get_project_channel = bot.get_or_create_project_channel
+        old_get_thread_channel = bot.get_or_create_thread_channel
         old_log_path = os.environ.get("CODEX_DISCORD_LOG_PATH")
 
         class FakeGuild:
@@ -576,12 +433,26 @@ class MirrorSyncCleanupTests(unittest.IsolatedAsyncioTestCase):
                 project = Path(temp_dir) / "project"
                 newer_thread = self.make_thread("thread-new", str(project), "same task")
                 older_thread = self.make_thread("thread-old", str(project), "same task")
-                bot.bridge.scan_visible_sidebar_names = lambda: [
-                    bot.bridge.get_thread_workspace_name(newer_thread),
-                    "same task2분",
-                ]
-                bot.bridge.load_recent_threads = lambda limit=20: [newer_thread, older_thread]
+                bot.bridge.load_user_root_threads = lambda limit=0: [newer_thread, older_thread]
                 bot.filter_mirrorable_threads = lambda threads: list(threads)
+
+                async def fake_get_project_channel(guild, category, project_key, project_name):
+                    bot.upsert_mirror_project(project_key, project_name, 111)
+                    return SimpleNamespace(id=111)
+
+                async def fake_get_thread_channel(codex_thread, project_key, project_channel):
+                    discord_thread_id = 222 if codex_thread.id == "thread-new" else 333
+                    bot.upsert_mirror_thread(
+                        codex_thread,
+                        project_key,
+                        codex_thread.title,
+                        111,
+                        discord_thread_id,
+                    )
+                    return SimpleNamespace(id=discord_thread_id)
+
+                bot.get_or_create_project_channel = fake_get_project_channel
+                bot.get_or_create_thread_channel = fake_get_thread_channel
                 bot.init_mirror_db()
                 with sqlite3.connect(bot.MIRROR_DB_PATH) as conn:
                     conn.execute(
@@ -606,45 +477,72 @@ class MirrorSyncCleanupTests(unittest.IsolatedAsyncioTestCase):
                     get_guild=lambda guild_id: FakeGuild(),
                 )
 
-                with self.assertRaisesRegex(RuntimeError, "ambiguous"):
-                    await bot.sync_codex_mirror(fake_bot)
+                output = await bot.sync_codex_mirror(fake_bot)
 
                 with sqlite3.connect(bot.MIRROR_DB_PATH) as conn:
                     rows = conn.execute(
                         "SELECT codex_thread_id FROM mirror_threads ORDER BY codex_thread_id"
                     ).fetchall()
 
+            self.assertIn("threads: 2", output)
             self.assertEqual(rows, [("thread-new",), ("thread-old",)])
         finally:
             bot.MIRROR_DB_PATH = old_db_path
-            bot.bridge.scan_visible_sidebar_names = old_scan_visible_sidebar_names
-            bot.bridge.load_recent_threads = old_load_recent_threads
+            bot.bridge.load_user_root_threads = old_load_user_root_threads
             bot.filter_mirrorable_threads = old_filter_mirrorable_threads
+            bot.get_or_create_project_channel = old_get_project_channel
+            bot.get_or_create_thread_channel = old_get_thread_channel
             if old_log_path is None:
                 os.environ.pop("CODEX_DISCORD_LOG_PATH", None)
             else:
                 os.environ["CODEX_DISCORD_LOG_PATH"] = old_log_path
 
-    def test_load_ui_visible_threads_rejects_unmatched_visible_rows(self) -> None:
-        old_scan_visible_sidebar_names = bot.bridge.scan_visible_sidebar_names
-        old_load_recent_threads = bot.bridge.load_recent_threads
+    def test_load_user_root_threads_reads_db_root_threads_without_subagents(self) -> None:
+        old_state_db_path = bot.bridge.STATE_DB_PATH
 
         try:
             with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp_dir:
-                thread = self.make_thread("thread-1", str(Path(temp_dir)), "visible task")
-                project_heading = bot.bridge.get_thread_workspace_name(thread)
-                bot.bridge.scan_visible_sidebar_names = lambda: [
-                    project_heading,
-                    "visible task1시간",
-                    "unknown task2분",
-                ]
-                bot.bridge.load_recent_threads = lambda limit=20: [thread]
+                state_db_path = Path(temp_dir) / "state.sqlite"
+                bot.bridge.STATE_DB_PATH = state_db_path
+                with sqlite3.connect(state_db_path) as conn:
+                    conn.execute(
+                        """
+                        CREATE TABLE threads (
+                            id TEXT PRIMARY KEY,
+                            title TEXT NOT NULL,
+                            cwd TEXT NOT NULL,
+                            updated_at INTEGER NOT NULL,
+                            rollout_path TEXT NOT NULL,
+                            model TEXT,
+                            reasoning_effort TEXT,
+                            tokens_used INTEGER NOT NULL DEFAULT 0,
+                            archived INTEGER NOT NULL DEFAULT 0,
+                            source TEXT NOT NULL,
+                            thread_source TEXT
+                        )
+                        """
+                    )
+                    conn.executemany(
+                        """
+                        INSERT INTO threads (
+                            id, title, cwd, updated_at, rollout_path, model,
+                            reasoning_effort, tokens_used, archived, source, thread_source
+                        )
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        [
+                            ("root-1", "root", "C:/repo", 3, "root.jsonl", "gpt", "high", 10, 0, "vscode", None),
+                            ("sub-1", "", "C:/repo", 4, "sub.jsonl", "gpt", "high", 20, 0, '{"subagent":{}}', "subagent"),
+                            ("archived-1", "archived", "C:/repo", 2, "archived.jsonl", "gpt", "high", 30, 1, "vscode", None),
+                            ("empty-title", "", "C:/repo", 1, "empty.jsonl", "gpt", "high", 40, 0, "vscode", None),
+                        ],
+                    )
 
-                with self.assertRaisesRegex(RuntimeError, "unmatched"):
-                    bot.bridge.load_ui_visible_threads()
+                threads = bot.bridge.load_user_root_threads()
+
+            self.assertEqual([thread.id for thread in threads], ["root-1"])
         finally:
-            bot.bridge.scan_visible_sidebar_names = old_scan_visible_sidebar_names
-            bot.bridge.load_recent_threads = old_load_recent_threads
+            bot.bridge.STATE_DB_PATH = old_state_db_path
 
     def test_codex_window_title_filter_rejects_discord_bridge_browser_title(self) -> None:
         self.assertTrue(bot.bridge.is_codex_desktop_window_title("Codex"))
@@ -659,99 +557,6 @@ class MirrorSyncCleanupTests(unittest.IsolatedAsyncioTestCase):
                 r"관리자: C:\Users\banpo\AppData\Local\OpenAI\Codex\bin\codex.exe"
             )
         )
-
-    def test_scan_visible_sidebar_names_uses_selected_codex_window_handle(self) -> None:
-        old_find_codex_window = bot.bridge.find_codex_window
-        old_focus_window = bot.bridge.focus_window
-        old_subprocess_run = bot.bridge.subprocess.run
-        captured: dict[str, object] = {}
-
-        def fake_run(command: list[str], **kwargs: object) -> SimpleNamespace:
-            captured["command"] = command
-            captured["creationflags"] = kwargs.get("creationflags")
-            return SimpleNamespace(
-                returncode=0,
-                stdout="VISIBLE_NAME:dGFzaw==\n",
-                stderr="",
-            )
-
-        try:
-            bot.bridge.find_codex_window = lambda: bot.bridge.WindowInfo(
-                hwnd=123456,
-                title="Codex",
-                left=0,
-                top=0,
-                right=1000,
-                bottom=800,
-            )
-            bot.bridge.focus_window = lambda window: captured.setdefault("focused", window.hwnd)
-            bot.bridge.subprocess.run = fake_run
-
-            names = bot.bridge.scan_visible_sidebar_names()
-
-            command = captured["command"]
-            self.assertEqual(names, ["task"])
-            self.assertEqual(captured["focused"], 123456)
-            self.assertIsInstance(command, list)
-            script = command[-1]
-            self.assertIsInstance(script, str)
-            self.assertIn("[IntPtr]123456", script)
-            self.assertNotIn("*Codex*", script)
-            self.assertIn("$rect.Width -gt 420", script)
-            self.assertIn("$rect.Right -gt (Get-SidebarRightBoundary $WindowRect)", script)
-            self.assertEqual(
-                captured["creationflags"],
-                getattr(bot.bridge.subprocess, "CREATE_NO_WINDOW", 0),
-            )
-        finally:
-            bot.bridge.find_codex_window = old_find_codex_window
-            bot.bridge.focus_window = old_focus_window
-            bot.bridge.subprocess.run = old_subprocess_run
-
-    def test_scan_visible_sidebar_names_toggles_sidebar_on_hidden_scan(self) -> None:
-        old_scan_once = bot.bridge._scan_visible_sidebar_names_once
-        old_toggle = bot.bridge.toggle_codex_sidebar
-        calls: list[str] = []
-
-        def fake_scan_once() -> list[str]:
-            calls.append("scan")
-            if len(calls) == 1:
-                raise RuntimeError("Visible sidebar scan failed: NO_VISIBLE_SIDEBAR_NAMES")
-            return ["task"]
-
-        try:
-            bot.bridge._scan_visible_sidebar_names_once = fake_scan_once
-            bot.bridge.toggle_codex_sidebar = lambda: calls.append("toggle")
-
-            names = bot.bridge.scan_visible_sidebar_names()
-
-            self.assertEqual(names, ["task"])
-            self.assertEqual(calls, ["scan", "toggle", "scan"])
-        finally:
-            bot.bridge._scan_visible_sidebar_names_once = old_scan_once
-            bot.bridge.toggle_codex_sidebar = old_toggle
-
-    def test_scan_visible_sidebar_names_reports_toggle_recovery_failure(self) -> None:
-        old_scan_once = bot.bridge._scan_visible_sidebar_names_once
-        old_toggle = bot.bridge.toggle_codex_sidebar
-
-        try:
-            bot.bridge._scan_visible_sidebar_names_once = (
-                lambda: (_ for _ in ()).throw(
-                    RuntimeError("Visible sidebar scan failed: NO_VISIBLE_SIDEBAR_NAMES")
-                )
-            )
-            bot.bridge.toggle_codex_sidebar = lambda: None
-
-            with self.assertRaisesRegex(
-                RuntimeError,
-                "initial=.*NO_VISIBLE_SIDEBAR_NAMES.*after_toggle=.*NO_VISIBLE_SIDEBAR_NAMES",
-            ):
-                bot.bridge.scan_visible_sidebar_names()
-        finally:
-            bot.bridge._scan_visible_sidebar_names_once = old_scan_once
-            bot.bridge.toggle_codex_sidebar = old_toggle
-
 
 if __name__ == "__main__":
     unittest.main()

@@ -139,7 +139,7 @@ Common `!` commands:
 | Command | Effect |
 | --- | --- |
 | `!help` | Shows the command list. |
-| `!list [limit]` | Lists Codex threads. Without a limit, it uses the currently visible Codex sidebar order; with a limit, it uses the recent thread list. |
+| `!list [limit]` | Lists Codex threads. Without a limit, it uses DB-root user threads; with a limit, it uses the recent thread list. |
 | `!archived_list [limit]` | Lists archived Codex threads. Alias: `!archive_list`. |
 | `!use <ref>` | Selects a Codex thread by id, workspace ref, or list-style ref. |
 | `!open <ref>` | Opens the target Codex thread. |
@@ -150,15 +150,15 @@ Common `!` commands:
 | `!restart_codex` | Restarts Codex Desktop through the local bridge. |
 | `!chatid` | Prints Discord guild/channel/user ids for configuration. |
 | `!where` | Shows the Codex thread mapped to the current Discord channel. |
-| `!context [all]` | Shows context usage for the current thread, or visible/mapped threads with `all`. |
+| `!context [all]` | Shows context usage for the current thread, or mapped threads with `all`. |
 | `!usage [days]` | Shows local Codex usage estimates. |
 | `!runners` | Shows Discord runner queues. |
-| `!bridge sync [limit]` | Refreshes local bridge state and Discord mirror state. Without a limit, it uses the visible Codex sidebar scope. |
-| `!mirror sync [limit]` | Syncs Discord mirror project/thread channels. Without a limit, it uses the visible Codex sidebar scope. |
-| `!mirror list [limit]` | Lists mirror mappings. Without a limit, it uses the visible Codex sidebar scope. |
-| `!mirror check [limit]` | Checks mirror mappings and stale rows. Without a limit, it uses the visible Codex sidebar scope. |
+| `!bridge sync [limit]` | Refreshes local bridge state and Discord mirror state. Without a limit, it uses DB-root user threads. |
+| `!mirror sync [limit]` | Syncs Discord mirror project/thread channels. Without a limit, it uses DB-root user threads. |
+| `!mirror list [limit]` | Lists mirror mappings. Without a limit, it uses DB-root user threads. |
+| `!mirror check [limit]` | Checks mirror mappings and stale rows. Without a limit, it uses DB-root user threads. |
 | `!approval` | Re-sends the pending approval controls for the mapped/current Codex thread when one exists. |
-| `!archive [ref]` | Archives the mapped/current Codex thread or a supplied ref. Numeric refs follow the same visible sidebar numbering as `!list`. |
+| `!archive [ref]` | Archives the mapped/current Codex thread or a supplied ref. Numeric refs follow the same DB-root numbering as `!list`. |
 | `!delete_archive <ref>` | Previews deletion of an archived Codex thread. |
 | `!confirm_delete_archive <ref>` | Permanently deletes the archived thread after previewing. |
 | `!new <prompt>` | Creates a new Codex thread with the first prompt. |

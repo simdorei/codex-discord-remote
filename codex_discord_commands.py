@@ -64,7 +64,7 @@ def parse_required_bounded_int(raw: object, *, default: int, minimum: int, maxim
 
 def build_list_argv(raw_limit: object = "", *, default: int = 10, maximum: int = 30) -> list[str]:
     if raw_limit is None or str(raw_limit).strip() == "":
-        return ["list", "--ui-visible"]
+        return ["list", "--db-root", "--limit", "0"]
     limit = parse_bounded_int(raw_limit, default=default, minimum=1, maximum=maximum)
     return ["list", "--limit", str(limit)]
 

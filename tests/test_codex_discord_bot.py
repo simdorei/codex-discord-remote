@@ -1275,6 +1275,75 @@ class DiscordBotHelperTests(unittest.IsolatedAsyncioTestCase):
             bridge.load_recent_threads = original_load_recent_threads
             bridge.CodexAppServerSidecar = original_sidecar
 
+    def test_bridge_archive_retries_windows_lock_after_stopping_codex(self) -> None:
+        original_choose_thread = bridge.choose_thread
+        original_get_busy_state = bridge.get_thread_busy_state
+        original_archive_once = bridge.archive_thread_once
+        original_stop_candidates = bridge.stop_codex_archive_lock_candidates
+        original_wait_record = bridge.wait_for_thread_record
+        original_selected = bridge.get_selected_thread_id
+        original_sync = bridge.sync_session_index_with_state
+        calls: list[str] = []
+        stop_calls: list[bool] = []
+
+        thread = bridge.ThreadInfo(
+            id="thread-1",
+            title="Locked Archive",
+            cwd="C:\\repo",
+            updated_at=1,
+            rollout_path="C:\\Users\\banpo\\.codex\\sessions\\thread-1.jsonl",
+            model="gpt",
+            reasoning_effort="high",
+            tokens_used=0,
+        )
+
+        def fake_archive_once(thread_id: str) -> None:
+            calls.append(thread_id)
+            if len(calls) == 1:
+                raise bridge.CodexSidecarError(
+                    "thread/archive failed: failed to archive thread: "
+                    "다른 프로세스가 파일을 사용 중이기 때문에 프로세스가 액세스 할 수 없습니다. (os error 32)"
+                )
+
+        try:
+            bridge.choose_thread = lambda thread_id=None, cwd=None: thread
+            bridge.get_thread_busy_state = lambda item, allow_resume=True: "idle"
+            bridge.archive_thread_once = fake_archive_once
+            bridge.stop_codex_archive_lock_candidates = lambda: stop_calls.append(True) or [
+                "codex_desktop_stop: stopped=True source=test exe=Codex.exe",
+                "codex_app_server_stop: stopped=True",
+            ]
+            bridge.wait_for_thread_record = lambda thread_id, archived=None, timeout_sec=8.0: (thread, True)
+            bridge.get_selected_thread_id = lambda: None
+            bridge.sync_session_index_with_state = lambda: None
+
+            output = io.StringIO()
+            args = SimpleNamespace(
+                thread_ref=None,
+                thread_id="thread-1",
+                cwd=None,
+                timeout=0.0,
+                no_kill_codex_on_lock=False,
+            )
+            with redirect_stdout(output):
+                self.assertEqual(bridge.command_archive(args), 0)
+
+            self.assertEqual(calls, ["thread-1", "thread-1"])
+            self.assertEqual(stop_calls, [True])
+            text = output.getvalue()
+            self.assertIn("archive_lock_error: thread/archive failed", text)
+            self.assertIn("archive_lock_retry: stopping Codex processes and retrying once", text)
+            self.assertIn("archive_lock_retry: succeeded", text)
+            self.assertIn("archived_thread: thread-1", text)
+        finally:
+            bridge.choose_thread = original_choose_thread
+            bridge.get_thread_busy_state = original_get_busy_state
+            bridge.archive_thread_once = original_archive_once
+            bridge.stop_codex_archive_lock_candidates = original_stop_candidates
+            bridge.wait_for_thread_record = original_wait_record
+            bridge.get_selected_thread_id = original_selected
+            bridge.sync_session_index_with_state = original_sync
+
     def test_windows_harness_preflight_does_not_check_target_busy(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             thread = bridge.ThreadInfo(
@@ -2895,7 +2964,7 @@ class DiscordBotHelperTests(unittest.IsolatedAsyncioTestCase):
         help_prefix_commands = set(re.findall(r"^!([a-z_]+)", help_text, re.MULTILINE))
         readme_prefix_commands = set(re.findall(r"`!([a-z_]+)", readme))
         self.assertLessEqual(help_prefix_commands, readme_prefix_commands)
-        self.assertIn("Numeric refs follow the same visible sidebar numbering as `!list`.", readme)
+        self.assertIn("Numeric refs follow the same DB-root numbering as `!list`.", readme)
         self.assertIn("!mirror check [limit]", help_text)
 
         source = Path(bot.__file__).read_text(encoding="utf-8")
@@ -4641,12 +4710,25 @@ class DiscordBotHelperTests(unittest.IsolatedAsyncioTestCase):
         original_get_mirrored = bot.get_mirrored_codex_thread_id
         original_run_steering = bot.run_steering_prompt
         original_stream = bot.stream_steering_prompt_result_to_channel
+        original_prime_cursor = bot.prime_session_mirror_cursor_for_target
+        original_choose_thread = bridge.choose_thread
+        original_get_context_usage = bridge.get_thread_context_usage
+        original_should_recommend_archive = bridge.should_recommend_archive
         try:
             bot.get_mirrored_codex_thread_id = lambda channel_id: "thread-1"
+            bridge.choose_thread = lambda thread_id, cwd=None: SimpleNamespace(id=thread_id, tokens_used=0)
+            bridge.get_thread_context_usage = lambda thread: None
+            bridge.should_recommend_archive = lambda thread, context_usage: False
             observed: list[tuple[str, str | None]] = []
+            order: list[tuple[str, str | None]] = []
             streamed: list[tuple[object, str | None, dict[str, object]]] = []
 
+            def fake_prime_cursor(target_thread_id: str | None) -> int:
+                order.append(("prime", target_thread_id))
+                return 0
+
             def fake_run_steering(prompt: str, target_thread_id: str | None) -> bot.SteeringPromptResult:
+                order.append(("run", target_thread_id))
                 observed.append((prompt, target_thread_id))
                 return bot.SteeringPromptResult(
                     0,
@@ -4663,6 +4745,7 @@ class DiscordBotHelperTests(unittest.IsolatedAsyncioTestCase):
 
             bot.run_steering_prompt = fake_run_steering
             bot.stream_steering_prompt_result_to_channel = fake_stream
+            bot.prime_session_mirror_cursor_for_target = fake_prime_cursor
             message = FakeMessage()
 
             with tempfile.TemporaryDirectory() as temp_dir:
@@ -4675,8 +4758,13 @@ class DiscordBotHelperTests(unittest.IsolatedAsyncioTestCase):
             bot.get_mirrored_codex_thread_id = original_get_mirrored
             bot.run_steering_prompt = original_run_steering
             bot.stream_steering_prompt_result_to_channel = original_stream
+            bot.prime_session_mirror_cursor_for_target = original_prime_cursor
+            bridge.choose_thread = original_choose_thread
+            bridge.get_thread_context_usage = original_get_context_usage
+            bridge.should_recommend_archive = original_should_recommend_archive
 
         self.assertEqual(observed, [("please steer now", "thread-1")])
+        self.assertEqual(order, [("prime", "thread-1"), ("run", "thread-1")])
         self.assertEqual(len(streamed), 1)
         self.assertEqual(streamed[0][1], "thread-1")
         self.assertEqual(streamed[0][2], {"send_commentary_blocks": False, "send_final_blocks": False})
@@ -4695,6 +4783,87 @@ class DiscordBotHelperTests(unittest.IsolatedAsyncioTestCase):
             message.channel.messages,
             [("Discord QA steering is disabled. Set DISCORD_ENABLE_QA_COMMANDS=1 to enable it.", None)],
         )
+
+    def test_build_context_refresh_message_includes_recent_bounded_items(self) -> None:
+        original_get_mirrored = bot.get_mirrored_codex_thread_id
+        original_resolve_selected = bot.resolve_selected_target
+        original_choose_thread = bridge.choose_thread
+        try:
+            with tempfile.TemporaryDirectory() as temp_dir:
+                session_path = Path(temp_dir) / "session.jsonl"
+                events = [
+                    {
+                        "type": "event_msg",
+                        "timestamp": "2026-06-08T00:00:00Z",
+                        "payload": {"type": "user_message", "message": "older user"},
+                    },
+                    {
+                        "type": "response_item",
+                        "timestamp": "2026-06-08T00:00:01Z",
+                        "payload": {
+                            "type": "message",
+                            "role": "user",
+                            "content": [{"type": "input_text", "text": "latest question"}],
+                        },
+                    },
+                    {
+                        "type": "response_item",
+                        "timestamp": "2026-06-08T00:00:02Z",
+                        "payload": {
+                            "type": "message",
+                            "role": "assistant",
+                            "phase": "final_answer",
+                            "content": [{"type": "output_text", "text": "latest answer"}],
+                        },
+                    },
+                ]
+                session_path.write_text(
+                    "\n".join(json.dumps(event, ensure_ascii=True) for event in events) + "\n",
+                    encoding="utf-8",
+                )
+                thread = bridge.ThreadInfo(
+                    id="thread-1",
+                    title="Thread",
+                    cwd=str(Path(temp_dir)),
+                    updated_at=1,
+                    rollout_path=str(session_path),
+                    model="gpt",
+                    reasoning_effort="high",
+                    tokens_used=1,
+                )
+                bot.get_mirrored_codex_thread_id = lambda channel_id: "thread-1"
+                bot.resolve_selected_target = lambda: (None, "")
+                bridge.choose_thread = lambda thread_id=None, cwd=None: thread
+
+                output = bot.build_context_refresh_message(222, limit=2)
+        finally:
+            bot.get_mirrored_codex_thread_id = original_get_mirrored
+            bot.resolve_selected_target = original_resolve_selected
+            bridge.choose_thread = original_choose_thread
+
+        self.assertIn("Context refresh", output)
+        self.assertIn("items: 2/2", output)
+        self.assertIn("[user]\nlatest question", output)
+        self.assertIn("[assistant final]\nlatest answer", output)
+        self.assertNotIn("older user", output)
+
+    async def test_prefix_context_refresh_uses_bounded_refresh_builder(self) -> None:
+        original_build_context_refresh = bot.build_context_refresh_message
+        calls: list[tuple[int | None, int]] = []
+        try:
+            def fake_build_context_refresh(channel_id=None, *, limit=bot.CONTEXT_REFRESH_DEFAULT_LIMIT, max_chars=0):
+                calls.append((channel_id, limit))
+                return "bounded snapshot"
+
+            bot.build_context_refresh_message = fake_build_context_refresh
+            message = FakeMessage(channel_id=789)
+
+            await bot.handle_prefix_command(SimpleNamespace(), message, "context refresh 77")
+        finally:
+            bot.build_context_refresh_message = original_build_context_refresh
+
+        self.assertEqual(calls, [(789, bot.CONTEXT_REFRESH_MAX_LIMIT)])
+        self.assertEqual(message.channel.messages, [("bounded snapshot", None)])
 
     async def test_prefix_bridge_sync_runs_refresh(self) -> None:
         original_refresh = bot.refresh_discord_bridge_session
@@ -5189,11 +5358,48 @@ class DiscordBotHelperTests(unittest.IsolatedAsyncioTestCase):
             bot.resolve_target_ref = original_resolve_target_ref
             bot.run_ask_stream = original_run_ask_stream
 
+    def test_prime_session_mirror_cursor_advances_existing_cursor_to_session_end(self) -> None:
+        original_choose_thread = bridge.choose_thread
+        original_get_cursor = bot.get_or_init_session_mirror_cursor
+        original_update_cursor = bot.update_session_mirror_cursor
+        try:
+            with tempfile.TemporaryDirectory() as temp_dir:
+                session_path = Path(temp_dir) / "session.jsonl"
+                session_path.write_text("older\nlatest\n", encoding="utf-8")
+                current_cursor = session_path.stat().st_size
+                get_calls: list[tuple[str, str, int]] = []
+                updates: list[tuple[str, str, int]] = []
+
+                bridge.choose_thread = lambda thread_id, cwd=None: SimpleNamespace(rollout_path=str(session_path))
+
+                def fake_get_cursor(codex_thread_id, rollout_path, initial_cursor):
+                    get_calls.append((codex_thread_id, rollout_path, initial_cursor))
+                    return 3
+
+                bot.get_or_init_session_mirror_cursor = fake_get_cursor
+                bot.update_session_mirror_cursor = lambda codex_thread_id, rollout_path, cursor: updates.append(
+                    (codex_thread_id, rollout_path, cursor)
+                )
+
+                with EnvPatch("DISCORD_SESSION_MIRROR", "1"):
+                    result = bot.prime_session_mirror_cursor_for_target("thread-1")
+
+            self.assertEqual(result, current_cursor)
+            self.assertEqual(get_calls, [("thread-1", str(session_path), current_cursor)])
+            self.assertEqual(updates, [("thread-1", str(session_path), current_cursor)])
+        finally:
+            bridge.choose_thread = original_choose_thread
+            bot.get_or_init_session_mirror_cursor = original_get_cursor
+            bot.update_session_mirror_cursor = original_update_cursor
+
     async def test_ask_stream_delegates_final_to_session_mirror_for_mapped_thread(self) -> None:
         original_resolve_target_ref = bot.resolve_target_ref
         original_run_ask_stream = bot.run_ask_stream
         original_get_mirrored = bot.get_mirrored_codex_thread_id
         original_prime_cursor = bot.prime_session_mirror_cursor_for_target
+        original_choose_thread = bridge.choose_thread
+        original_get_context_usage = bridge.get_thread_context_usage
+        original_should_recommend_archive = bridge.should_recommend_archive
         order: list[tuple[str, str | None]] = []
         try:
             bot.resolve_target_ref = lambda target_thread_id: (target_thread_id, "taxlab:1")
@@ -5201,6 +5407,9 @@ class DiscordBotHelperTests(unittest.IsolatedAsyncioTestCase):
             bot.prime_session_mirror_cursor_for_target = lambda target_thread_id: order.append(
                 ("prime", target_thread_id)
             )
+            bridge.choose_thread = lambda thread_id, cwd=None: SimpleNamespace(id=thread_id, tokens_used=0)
+            bridge.get_thread_context_usage = lambda thread: None
+            bridge.should_recommend_archive = lambda thread, context_usage: False
 
             def fake_run_ask_stream(prompt, relay, *, force_while_busy=False, wait=True, target_thread_id=None):
                 order.append(("ask", target_thread_id))
@@ -5235,6 +5444,61 @@ class DiscordBotHelperTests(unittest.IsolatedAsyncioTestCase):
             bot.run_ask_stream = original_run_ask_stream
             bot.get_mirrored_codex_thread_id = original_get_mirrored
             bot.prime_session_mirror_cursor_for_target = original_prime_cursor
+            bridge.choose_thread = original_choose_thread
+            bridge.get_thread_context_usage = original_get_context_usage
+            bridge.should_recommend_archive = original_should_recommend_archive
+
+    async def test_ask_stream_does_not_delegate_archive_recommended_mapped_thread(self) -> None:
+        original_resolve_target_ref = bot.resolve_target_ref
+        original_run_ask_stream = bot.run_ask_stream
+        original_get_mirrored = bot.get_mirrored_codex_thread_id
+        original_prime_cursor = bot.prime_session_mirror_cursor_for_target
+        original_choose_thread = bridge.choose_thread
+        original_get_context_usage = bridge.get_thread_context_usage
+        original_should_recommend_archive = bridge.should_recommend_archive
+        try:
+            bot.resolve_target_ref = lambda target_thread_id: (target_thread_id, "taxlab:1")
+            bot.get_mirrored_codex_thread_id = lambda channel_id: "thread-1" if channel_id == 222 else None
+            bot.prime_session_mirror_cursor_for_target = lambda target_thread_id: (_ for _ in ()).throw(
+                AssertionError("archive-recommended mapped asks must not delegate to session mirror")
+            )
+            bridge.choose_thread = lambda thread_id, cwd=None: SimpleNamespace(id=thread_id, tokens_used=999_999_999)
+            bridge.get_thread_context_usage = lambda thread: None
+            bridge.should_recommend_archive = lambda thread, context_usage: True
+
+            def fake_run_ask_stream(prompt, relay, *, force_while_busy=False, wait=True, target_thread_id=None):
+                relay.feed_line("[final_answer]")
+                relay.feed_line("done")
+                relay.feed_line("[ready]")
+                relay.finish()
+                return 0, "[final_answer]\ndone\n\n[ready]"
+
+            bot.run_ask_stream = fake_run_ask_stream
+
+            with tempfile.TemporaryDirectory() as temp_dir:
+                log_path = Path(temp_dir) / "discord-smoke.log"
+                channel = FakeTarget(channel_id=222)
+                with EnvPatch("CODEX_DISCORD_LOG_PATH", str(log_path)):
+                    with EnvPatch("DISCORD_SESSION_MIRROR", "1"):
+                        await bot.run_prompt_and_send(
+                            channel,
+                            "please run",
+                            ack_sent=True,
+                            target_thread_id="thread-1",
+                        )
+                log_text = log_path.read_text(encoding="utf-8")
+
+            self.assertEqual(channel.messages, [("done", None)])
+            self.assertIn("session_mirror_delegate_disabled target=thread-1 reason=archive_recommended", log_text)
+            self.assertNotIn("ask_stream_delegated_to_session_mirror target=thread-1", log_text)
+        finally:
+            bot.resolve_target_ref = original_resolve_target_ref
+            bot.run_ask_stream = original_run_ask_stream
+            bot.get_mirrored_codex_thread_id = original_get_mirrored
+            bot.prime_session_mirror_cursor_for_target = original_prime_cursor
+            bridge.choose_thread = original_choose_thread
+            bridge.get_thread_context_usage = original_get_context_usage
+            bridge.should_recommend_archive = original_should_recommend_archive
 
     async def test_ask_stream_live_without_final_sends_fallback(self) -> None:
         original_resolve_target_ref = bot.resolve_target_ref
@@ -5727,7 +5991,9 @@ class DiscordBotHelperTests(unittest.IsolatedAsyncioTestCase):
         original_run_steering_prompt = bot.run_steering_prompt
         original_stream_steering = bot.stream_steering_prompt_result_to_channel
         original_should_delegate = bot.should_delegate_output_to_session_mirror
+        original_prime_cursor = bot.prime_session_mirror_cursor_for_target
         calls: list[tuple[object, object, str | None, dict[str, object]]] = []
+        order: list[tuple[str, str | None]] = []
         try:
             steering_result = bot.SteeringPromptResult(
                 0,
@@ -5738,7 +6004,12 @@ class DiscordBotHelperTests(unittest.IsolatedAsyncioTestCase):
                 start_offset=10,
             )
 
+            def fake_prime_cursor(target_thread_id: str | None) -> int:
+                order.append(("prime", target_thread_id))
+                return 0
+
             def fake_run_steering_prompt(prompt, target_thread_id):
+                order.append(("run", target_thread_id))
                 return steering_result
 
             async def fake_stream_steering(channel, result, target_thread_id, **kwargs):
@@ -5795,7 +6066,9 @@ class DiscordBotHelperTests(unittest.IsolatedAsyncioTestCase):
         original_run_steering_prompt = bot.run_steering_prompt
         original_stream_steering = bot.stream_steering_prompt_result_to_channel
         original_should_delegate = bot.should_delegate_output_to_session_mirror
+        original_prime_cursor = bot.prime_session_mirror_cursor_for_target
         calls: list[tuple[object, object, str | None, dict[str, object]]] = []
+        order: list[tuple[str, str | None]] = []
         try:
             steering_result = bot.SteeringPromptResult(
                 0,
@@ -5806,7 +6079,12 @@ class DiscordBotHelperTests(unittest.IsolatedAsyncioTestCase):
                 start_offset=10,
             )
 
+            def fake_prime_cursor(target_thread_id: str | None) -> int:
+                order.append(("prime", target_thread_id))
+                return 0
+
             def fake_run_steering_prompt(prompt, target_thread_id):
+                order.append(("run", target_thread_id))
                 return steering_result
 
             async def fake_stream_steering(channel, result, target_thread_id, **kwargs):
@@ -5818,6 +6096,7 @@ class DiscordBotHelperTests(unittest.IsolatedAsyncioTestCase):
             bot.run_steering_prompt = fake_run_steering_prompt
             bot.stream_steering_prompt_result_to_channel = fake_stream_steering
             bot.should_delegate_output_to_session_mirror = lambda channel, target_thread_id: True
+            bot.prime_session_mirror_cursor_for_target = fake_prime_cursor
 
             with tempfile.TemporaryDirectory() as temp_dir:
                 log_path = Path(temp_dir) / "discord-smoke.log"
@@ -5833,6 +6112,7 @@ class DiscordBotHelperTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(interaction.response.deferred)
             self.assertEqual(len(interaction.followup.messages), 1)
             self.assertIn("Steering sent", interaction.followup.messages[0])
+            self.assertEqual(order, [("prime", "thread-1"), ("run", "thread-1")])
             self.assertEqual(
                 calls,
                 [
@@ -5853,6 +6133,7 @@ class DiscordBotHelperTests(unittest.IsolatedAsyncioTestCase):
             bot.run_steering_prompt = original_run_steering_prompt
             bot.stream_steering_prompt_result_to_channel = original_stream_steering
             bot.should_delegate_output_to_session_mirror = original_should_delegate
+            bot.prime_session_mirror_cursor_for_target = original_prime_cursor
 
     def test_run_steering_prompt_treats_delayed_ipc_delivery_as_success(self) -> None:
         original_resolve_target_ref = bot.resolve_target_ref
@@ -7042,7 +7323,7 @@ class DiscordBotHelperTests(unittest.IsolatedAsyncioTestCase):
             ],
         )
 
-        self.assertEqual(list_default.argv, ["list", "--ui-visible"])
+        self.assertEqual(list_default.argv, ["list", "--db-root", "--limit", "0"])
         self.assertEqual(list_limited.argv, ["list", "--limit", "10"])
         self.assertEqual(status.argv, ["status", "--target", "222:abc"])
         self.assertEqual(open_abort.argv, ["open", "--abort", "taxlab:1"])
@@ -7077,9 +7358,9 @@ class DiscordBotHelperTests(unittest.IsolatedAsyncioTestCase):
         finally:
             bot.run_bridge_and_send = original_run_bridge_and_send
 
-    async def test_prefix_archive_numeric_ref_uses_ui_visible_order(self) -> None:
+    async def test_prefix_archive_numeric_ref_uses_db_root_order(self) -> None:
         original_run_bridge_and_send = bot.run_bridge_and_send
-        original_load_ui_visible_threads = bridge.load_ui_visible_threads
+        original_load_user_root_threads = bridge.load_user_root_threads
         original_resolve_thread_ref = bridge.resolve_thread_ref
         calls: list[tuple[list[str], str]] = []
 
@@ -7101,30 +7382,30 @@ class DiscordBotHelperTests(unittest.IsolatedAsyncioTestCase):
             return 0, "ok"
 
         def fail_recent_resolver(ref: str):
-            raise AssertionError(f"archive numeric ref should use UI-visible order, got {ref}")
+            raise AssertionError(f"archive numeric ref should use DB-root order, got {ref}")
 
         try:
             bot.run_bridge_and_send = fake_run_bridge_and_send
-            bridge.load_ui_visible_threads = lambda: [
-                make_thread("visible-1", 3),
-                make_thread("visible-2", 2),
-                make_thread("visible-3", 1),
+            bridge.load_user_root_threads = lambda limit=0: [
+                make_thread("root-1", 3),
+                make_thread("root-2", 2),
+                make_thread("root-3", 1),
             ]
             bridge.resolve_thread_ref = fail_recent_resolver
 
             message = FakeMessage(channel_id=333)
             await bot.handle_prefix_command(None, message, "archive 2")
 
-            self.assertEqual(calls, [(["archive", "--thread-id", "visible-2"], "Archive")])
+            self.assertEqual(calls, [(["archive", "--thread-id", "root-2"], "Archive")])
             self.assertEqual(message.channel.messages, [("ok", None)])
         finally:
             bot.run_bridge_and_send = original_run_bridge_and_send
-            bridge.load_ui_visible_threads = original_load_ui_visible_threads
+            bridge.load_user_root_threads = original_load_user_root_threads
             bridge.resolve_thread_ref = original_resolve_thread_ref
 
     async def test_prefix_archive_named_ref_keeps_thread_ref_resolver(self) -> None:
         original_run_bridge_and_send = bot.run_bridge_and_send
-        original_load_ui_visible_threads = bridge.load_ui_visible_threads
+        original_load_user_root_threads = bridge.load_user_root_threads
         original_resolve_thread_ref = bridge.resolve_thread_ref
         calls: list[tuple[list[str], str]] = []
 
@@ -7146,8 +7427,8 @@ class DiscordBotHelperTests(unittest.IsolatedAsyncioTestCase):
 
         try:
             bot.run_bridge_and_send = fake_run_bridge_and_send
-            bridge.load_ui_visible_threads = lambda: (_ for _ in ()).throw(
-                AssertionError("archive named ref should not scan UI-visible threads")
+            bridge.load_user_root_threads = lambda limit=0: (_ for _ in ()).throw(
+                AssertionError("archive named ref should not load DB-root index")
             )
             bridge.resolve_thread_ref = lambda ref: thread
 
@@ -7158,7 +7439,7 @@ class DiscordBotHelperTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(message.channel.messages, [("ok", None)])
         finally:
             bot.run_bridge_and_send = original_run_bridge_and_send
-            bridge.load_ui_visible_threads = original_load_ui_visible_threads
+            bridge.load_user_root_threads = original_load_user_root_threads
             bridge.resolve_thread_ref = original_resolve_thread_ref
 
     async def test_prefix_open_abort_routes_to_shared_bridge_action(self) -> None:
@@ -8436,7 +8717,10 @@ class DiscordBotHelperTests(unittest.IsolatedAsyncioTestCase):
             with tempfile.TemporaryDirectory() as temp_dir:
                 session_path = Path(temp_dir) / "session.jsonl"
                 session_path.write_text("", encoding="utf-8")
-                bridge.choose_thread = lambda thread_id, cwd=None: SimpleNamespace(rollout_path=str(session_path))
+                bridge.choose_thread = lambda thread_id, cwd=None: SimpleNamespace(
+                    rollout_path=str(session_path),
+                    tokens_used=0,
+                )
 
                 def fake_read_new_session_events(path, cursor):
                     return [
@@ -8495,6 +8779,76 @@ class DiscordBotHelperTests(unittest.IsolatedAsyncioTestCase):
             bot.update_session_mirror_cursor = original_update_cursor
             bot.claim_session_mirror_event = original_claim_event
             bot.resolve_target_ref = original_resolve_target_ref
+
+    async def test_mirror_session_target_skips_archive_recommended_thread_without_advancing_cursor(self) -> None:
+        original_choose_thread = bridge.choose_thread
+        original_get_context_usage = bridge.get_thread_context_usage
+        original_should_recommend_archive = bridge.should_recommend_archive
+        original_read_new_session_events = bridge.read_new_session_events
+        original_get_cursor = bot.get_or_init_session_mirror_cursor
+        original_update_cursor = bot.update_session_mirror_cursor
+        try:
+            with tempfile.TemporaryDirectory() as temp_dir:
+                session_path = Path(temp_dir) / "session.jsonl"
+                session_path.write_text("", encoding="utf-8")
+                log_path = Path(temp_dir) / "discord-smoke.log"
+
+                bridge.choose_thread = lambda thread_id, cwd=None: SimpleNamespace(
+                    rollout_path=str(session_path),
+                    tokens_used=999_999_999,
+                )
+                bridge.get_thread_context_usage = lambda thread: None
+                bridge.should_recommend_archive = lambda thread, context_usage: True
+                bridge.read_new_session_events = lambda path, cursor: (_ for _ in ()).throw(
+                    AssertionError("archive-recommended session mirror must not read session events")
+                )
+                bot.get_or_init_session_mirror_cursor = (
+                    lambda codex_thread_id, rollout_path, initial_cursor: (_ for _ in ()).throw(
+                        AssertionError("archive-recommended session mirror must not read cursor")
+                    )
+                )
+                bot.update_session_mirror_cursor = (
+                    lambda codex_thread_id, rollout_path, cursor: (_ for _ in ()).throw(
+                        AssertionError("archive-recommended session mirror must not advance cursor")
+                    )
+                )
+
+                client = bot.CodexDiscordBot(
+                    allowed_channel_ids=set(),
+                    allowed_user_ids=set(),
+                    startup_channel_id=None,
+                    guild_id=None,
+                    enable_prefix_commands=True,
+                )
+                with EnvPatch("CODEX_DISCORD_LOG_PATH", str(log_path)):
+                    await client.mirror_session_target(
+                        {
+                            "codex_thread_id": "thread-1",
+                            "discord_thread_id": 333,
+                            "discord_channel_id": 222,
+                        }
+                    )
+                    await client.mirror_session_target(
+                        {
+                            "codex_thread_id": "thread-1",
+                            "discord_thread_id": 333,
+                            "discord_channel_id": 222,
+                        }
+                    )
+                await client.close()
+
+                log_text = log_path.read_text(encoding="utf-8")
+                self.assertEqual(
+                    log_text.count("session_mirror_skipped target=thread-1 reason=archive_recommended"),
+                    1,
+                )
+        finally:
+            bridge.choose_thread = original_choose_thread
+            bridge.get_thread_context_usage = original_get_context_usage
+            bridge.should_recommend_archive = original_should_recommend_archive
+            bridge.read_new_session_events = original_read_new_session_events
+            bot.get_or_init_session_mirror_cursor = original_get_cursor
+            bot.update_session_mirror_cursor = original_update_cursor
 
 
 if __name__ == "__main__":

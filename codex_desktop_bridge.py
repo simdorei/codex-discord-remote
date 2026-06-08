@@ -1,4 +1,4 @@
-"""
+﻿"""
 Minimal bridge for talking to the current Codex Desktop thread from scripts.
 
 This script does not use the Codex CLI. It works by:
@@ -14,8 +14,6 @@ flags because the Codex Desktop UI can change.
 from __future__ import annotations
 
 import argparse
-import base64
-import binascii
 from collections import deque
 import ctypes
 import ctypes.wintypes as wt
@@ -41,9 +39,6 @@ try:
     import winreg
 except ImportError:  # pragma: no cover - Windows-only runtime
     winreg = None
-
-VISIBLE_SIDEBAR_AGE_RE = re.compile(r"(?P<value>\d+)\s*(?P<unit>초|분|시간|일)$")
-
 
 def get_env_path(name: str, default: Path) -> Path:
     value = os.environ.get(name, "").strip()
@@ -346,7 +341,6 @@ VK_BACK = 0x08
 VK_TAB = 0x09
 VK_ESCAPE = 0x1B
 VK_A = 0x41
-VK_B = 0x42
 VK_C = 0x43
 VK_J = 0x4A
 VK_L = 0x4C
@@ -829,6 +823,45 @@ def load_recent_threads(limit: int = 20) -> list[ThreadInfo]:
         SELECT id, title, cwd, updated_at, rollout_path, model, reasoning_effort, tokens_used
         FROM threads
         WHERE archived = 0
+        ORDER BY updated_at DESC
+    """
+    params: tuple[object, ...] = ()
+    if limit > 0:
+        query += "\n        LIMIT ?"
+        params = (limit,)
+    with connect_readonly(STATE_DB_PATH) as conn:
+        rows = conn.execute(query, params).fetchall()
+
+    threads = []
+    for row in rows:
+        threads.append(
+            ThreadInfo(
+                id=row[0],
+                title=row[1] or "",
+                cwd=row[2] or "",
+                updated_at=row[3] or 0,
+                rollout_path=row[4] or "",
+                model=row[5] or "",
+                reasoning_effort=row[6] or "",
+                tokens_used=row[7] or 0,
+            )
+        )
+    return threads
+
+
+def load_user_root_threads(limit: int = 0) -> list[ThreadInfo]:
+    if not STATE_DB_PATH.exists():
+        raise FileNotFoundError(
+            f"Codex state database not found: {STATE_DB_PATH}. "
+            "Set CODEX_HOME or CODEX_STATE_DB if your Codex data lives elsewhere."
+        )
+
+    query = """
+        SELECT id, title, cwd, updated_at, rollout_path, model, reasoning_effort, tokens_used
+        FROM threads
+        WHERE archived = 0
+          AND source = 'vscode'
+          AND title != ''
         ORDER BY updated_at DESC
     """
     params: tuple[object, ...] = ()
@@ -2711,6 +2744,56 @@ def stop_codex_desktop_processes(executable_path: Path) -> tuple[bool, str]:
     return (stopped, details or "-")
 
 
+def stop_codex_app_server_processes() -> tuple[bool, str]:
+    if os.name != "nt":
+        return (False, "skipped: app-server process stop is only implemented on Windows")
+
+    script = r"""
+$matches = @(Get-CimInstance Win32_Process | Where-Object {
+  $_.Name -ieq 'codex.exe' -and $_.CommandLine -match 'app-server'
+})
+if ($matches.Count -eq 0) {
+  Write-Output 'no_matching_app_servers'
+  exit 0
+}
+foreach ($process in $matches) {
+  try {
+    Stop-Process -Id $process.ProcessId -Force -ErrorAction Stop
+    Write-Output ("stopped PID={0} EXE={1}" -f $process.ProcessId, $process.ExecutablePath)
+  } catch {
+    Write-Output ("stop_failed PID={0}: {1}" -f $process.ProcessId, $_.Exception.Message)
+  }
+}
+"""
+    completed = subprocess.run(
+        ["powershell", "-NoProfile", "-Command", script],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+    )
+    details = "\n".join(part for part in [completed.stdout.strip(), completed.stderr.strip()] if part).strip()
+    stopped = "stopped PID=" in details
+    return (stopped, details or "-")
+
+
+def stop_codex_archive_lock_candidates() -> list[str]:
+    lines: list[str] = []
+    desktop_exe, desktop_source = discover_codex_desktop_executable()
+    if desktop_exe is None:
+        lines.append("codex_desktop_stop: skipped; executable not discovered")
+    else:
+        stopped, details = stop_codex_desktop_processes(desktop_exe)
+        lines.append(f"codex_desktop_stop: stopped={stopped} source={desktop_source or '-'} exe={desktop_exe}")
+        lines.append(f"codex_desktop_stop_details: {make_console_safe_text(details)}")
+
+    stopped_app_servers, app_server_details = stop_codex_app_server_processes()
+    lines.append(f"codex_app_server_stop: stopped={stopped_app_servers}")
+    lines.append(f"codex_app_server_stop_details: {make_console_safe_text(app_server_details)}")
+    return lines
+
+
 def start_codex_desktop_process(executable_path: Path) -> subprocess.Popen[str]:
     creationflags = 0
     creationflags |= getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
@@ -2888,6 +2971,48 @@ class CodexAppServerSidecar:
 
     def archive_thread(self, thread_id: str) -> dict:
         return self.request("thread/archive", {"threadId": thread_id}, timeout_sec=10.0)
+
+
+def is_windows_file_lock_error(exc: BaseException) -> bool:
+    text = str(exc)
+    lowered = text.lower()
+    return (
+        "os error 32" in lowered
+        or "being used by another process" in lowered
+        or "used by another process" in lowered
+        or "다른 프로세스가 파일을 사용 중" in text
+    )
+
+
+def archive_thread_once(thread_id: str) -> None:
+    with CodexAppServerSidecar() as client:
+        client.archive_thread(thread_id)
+
+
+def archive_thread_with_lock_retry(thread_id: str, *, kill_codex_on_lock: bool) -> None:
+    try:
+        archive_thread_once(thread_id)
+        return
+    except Exception as exc:
+        if not kill_codex_on_lock or not is_windows_file_lock_error(exc):
+            raise
+
+        original_error = str(exc)
+        print(f"archive_lock_error: {make_console_safe_text(original_error)}")
+        print("archive_lock_retry: stopping Codex processes and retrying once")
+        for line in stop_codex_archive_lock_candidates():
+            print(line)
+        time.sleep(2.0)
+
+        try:
+            archive_thread_once(thread_id)
+        except Exception as retry_exc:
+            raise RuntimeError(
+                "thread/archive failed after Codex process stop retry.\n"
+                f"original_error: {original_error}\n"
+                f"retry_error: {retry_exc}"
+            ) from retry_exc
+        print("archive_lock_retry: succeeded")
 
 
 def load_thread_record_by_id(thread_id: str) -> tuple[ThreadInfo, bool] | None:
@@ -3592,363 +3717,6 @@ def focus_window(window: WindowInfo) -> None:
     user32.SetForegroundWindow(window.hwnd)
     user32.BringWindowToTop(window.hwnd)
     time.sleep(0.2)
-
-
-def toggle_codex_sidebar() -> None:
-    window = find_codex_window()
-    focus_window(window)
-    send_hotkey(VK_CONTROL, VK_B)
-    time.sleep(0.9)
-
-
-def is_no_visible_sidebar_names_error(exc: BaseException) -> bool:
-    return "NO_VISIBLE_SIDEBAR_NAMES" in str(exc)
-
-
-def _scan_visible_sidebar_names_once() -> list[str]:
-    window = find_codex_window()
-    focus_window(window)
-    codex_window_handle = int(window.hwnd)
-    script = r"""
-[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
-$code = @'
-using System;
-using System.Runtime.InteropServices;
-public static class Native {
-  [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hWnd);
-}
-'@
-Add-Type -AssemblyName UIAutomationClient
-Add-Type -AssemblyName UIAutomationTypes
-Add-Type $code
-
-function Find-CodexAutomationWindow {
-  param([IntPtr]$Handle)
-  $cond = New-Object System.Windows.Automation.PropertyCondition(
-    [System.Windows.Automation.AutomationElement]::NativeWindowHandleProperty,
-    [int]$Handle
-  )
-  return [System.Windows.Automation.AutomationElement]::RootElement.FindFirst(
-    [System.Windows.Automation.TreeScope]::Descendants,
-    $cond
-  )
-}
-
-function Get-AllElements {
-  param($Root)
-  return $Root.FindAll(
-    [System.Windows.Automation.TreeScope]::Descendants,
-    [System.Windows.Automation.Condition]::TrueCondition
-  )
-}
-
-function Normalize-Name {
-  param([string]$Name)
-  return (($Name -replace "`r|`n", ' ') -replace '\s+', ' ').Trim()
-}
-
-function Get-SidebarRightBoundary {
-  param($WindowRect)
-  $relative = [Math]::Floor($WindowRect.Width * 0.32)
-  return [double]($WindowRect.Left + [Math]::Min(520, [Math]::Max(340, $relative)))
-}
-
-function Is-SidebarElement {
-  param($Element, $WindowRect)
-  try {
-    $rect = $Element.Current.BoundingRectangle
-    if ($rect.Width -le 1 -or $rect.Height -le 1) { return $false }
-    if ($rect.Width -gt 420) { return $false }
-    if ($rect.Top -lt ($WindowRect.Top + 40)) { return $false }
-    if ($rect.Right -gt (Get-SidebarRightBoundary $WindowRect)) { return $false }
-    if ($rect.Right -lt ($WindowRect.Left + 12)) { return $false }
-    if ($rect.Bottom -gt ($WindowRect.Bottom - 36) -and $rect.Top -gt ($WindowRect.Top + ($WindowRect.Height * 0.65))) {
-      return $false
-    }
-    return $true
-  } catch {
-    return $false
-  }
-}
-
-function Get-VisibleSidebarListItemNames {
-  param($Elements, $WindowRect)
-  $names = New-Object System.Collections.Generic.List[string]
-  $seen = @{}
-  foreach ($el in $Elements) {
-    $type = $el.Current.ControlType.ProgrammaticName
-    if ($type -ne 'ControlType.ListItem') { continue }
-    if (-not (Is-SidebarElement $el $WindowRect)) { continue }
-    $name = Normalize-Name $el.Current.Name
-    if (-not $name) { continue }
-    $rect = $el.Current.BoundingRectangle
-    $key = "{0}:{1}:{2}" -f [Math]::Round($rect.Top, 1), [Math]::Round($rect.Left, 1), $name
-    if ($seen.ContainsKey($key)) { continue }
-    $seen[$key] = $true
-    [void]$names.Add($name)
-  }
-  return $names
-}
-
-$handle = [IntPtr]__CODEX_WINDOW_HANDLE__
-if ($handle -eq [IntPtr]::Zero) { Write-Output 'NO_CODEX_WINDOW'; exit 3 }
-[void][Native]::SetForegroundWindow($handle)
-Start-Sleep -Milliseconds 180
-$win = Find-CodexAutomationWindow $handle
-if (-not $win) { Write-Output 'NO_AUTOMATION_WINDOW'; exit 4 }
-$windowRect = $win.Current.BoundingRectangle
-$all = Get-AllElements $win
-$names = @(Get-VisibleSidebarListItemNames $all $windowRect)
-if ($names.Count -eq 0) { Write-Output 'NO_VISIBLE_SIDEBAR_NAMES'; exit 5 }
-
-foreach ($name in $names) {
-  $bytes = [System.Text.Encoding]::UTF8.GetBytes([string]$name)
-  Write-Output ("VISIBLE_NAME:" + [Convert]::ToBase64String($bytes))
-}
-"""
-    script = script.replace("__CODEX_WINDOW_HANDLE__", str(codex_window_handle))
-    try:
-        result = subprocess.run(
-            ["powershell", "-NoProfile", "-Command", script],
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-            timeout=15,
-            check=False,
-        )
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        raise RuntimeError(f"Visible sidebar scan subprocess failed: {exc}") from exc
-
-    output = (result.stdout or "").strip()
-    error = (result.stderr or "").strip()
-    if result.returncode != 0:
-        detail = output or error or f"exit={result.returncode}"
-        raise RuntimeError(f"Visible sidebar scan failed: {detail}")
-
-    names: list[str] = []
-    for line in output.splitlines():
-        if not line.startswith("VISIBLE_NAME:"):
-            continue
-        raw_name = line[len("VISIBLE_NAME:") :].strip()
-        try:
-            decoded = base64.b64decode(raw_name, validate=True).decode("utf-8")
-        except (binascii.Error, UnicodeDecodeError) as exc:
-            raise RuntimeError(f"Visible sidebar scan returned invalid row: {line}") from exc
-        name = normalize_ui_match_text(decoded)
-        if name:
-            names.append(name)
-
-    if not names:
-        detail = output or error or "no VISIBLE_NAME rows"
-        raise RuntimeError(f"Visible sidebar scan returned no sidebar names: {detail}")
-    return names
-
-
-def scan_visible_sidebar_names() -> list[str]:
-    try:
-        return _scan_visible_sidebar_names_once()
-    except RuntimeError as exc:
-        if not is_no_visible_sidebar_names_error(exc):
-            raise
-        initial_error = exc
-
-    try:
-        toggle_codex_sidebar()
-        return _scan_visible_sidebar_names_once()
-    except Exception as exc:
-        raise RuntimeError(
-            "Visible sidebar scan failed after requested sidebar toggle recovery. "
-            f"initial={initial_error}; after_toggle={exc}"
-        ) from exc
-
-
-def visible_sidebar_name_matches_thread(visible_name: str, thread: ThreadInfo) -> bool:
-    normalized_visible = normalize_ui_match_text(visible_name).lower()
-    if not normalized_visible:
-        return False
-    for candidate in get_thread_ui_name_candidates(thread):
-        normalized_candidate = normalize_ui_match_text(candidate).lower()
-        if len(normalized_candidate) < 3:
-            continue
-        if normalized_candidate in normalized_visible:
-            return True
-    return False
-
-
-def get_thread_project_heading(thread: ThreadInfo) -> str:
-    return normalize_ui_match_text(get_thread_workspace_name(thread)).lower()
-
-
-def get_thread_project_identity(thread: ThreadInfo) -> str:
-    return normalize_ui_match_text(strip_windows_extended_prefix((thread.cwd or "").strip())).lower()
-
-
-def get_visible_sidebar_project_heading(
-    visible_name: str,
-    threads: list[ThreadInfo],
-) -> str | None:
-    normalized_visible = normalize_ui_match_text(visible_name).lower()
-    if not normalized_visible:
-        return None
-    matching_project_identities = {
-        get_thread_project_identity(thread)
-        for thread in threads
-        if get_thread_project_heading(thread) == normalized_visible
-    }
-    return normalized_visible if len(matching_project_identities) == 1 else None
-
-
-def is_visible_sidebar_project_heading_candidate(
-    visible_name: str,
-    threads: list[ThreadInfo],
-) -> bool:
-    normalized_visible = normalize_ui_match_text(visible_name).lower()
-    if not normalized_visible:
-        return False
-    return any(get_thread_project_heading(thread) == normalized_visible for thread in threads)
-
-
-def parse_visible_sidebar_age_bucket(visible_name: str) -> tuple[int, int] | None:
-    match = VISIBLE_SIDEBAR_AGE_RE.search(normalize_ui_match_text(visible_name))
-    if match is None:
-        return None
-    value = int(match.group("value"))
-    unit = match.group("unit")
-    seconds_by_unit = {
-        "초": 1,
-        "분": 60,
-        "시간": 3600,
-        "일": 86400,
-    }
-    unit_seconds = seconds_by_unit.get(unit)
-    if unit_seconds is None:
-        return None
-    return value, unit_seconds
-
-
-def visible_sidebar_age_matches_thread(
-    visible_name: str,
-    thread: ThreadInfo,
-    *,
-    now: float | None = None,
-) -> bool:
-    age_bucket = parse_visible_sidebar_age_bucket(visible_name)
-    if age_bucket is None or not thread.updated_at:
-        return False
-    value, unit_seconds = age_bucket
-    thread_age_seconds = max(0, int((now or time.time()) - int(thread.updated_at)))
-    displayed_age = thread_age_seconds // unit_seconds
-    return abs(displayed_age - value) <= 1
-
-
-def match_visible_sidebar_thread_entries(
-    visible_names: list[str],
-    threads: list[ThreadInfo],
-) -> tuple[list[ThreadInfo], set[int], list[str]]:
-    matched_threads: list[ThreadInfo] = []
-    used_visible_indexes: set[int] = set()
-    used_thread_ids: set[str] = set()
-    ambiguous_visible_names: list[str] = []
-    current_project_heading: str | None = None
-
-    for index, visible_name in enumerate(visible_names):
-        project_heading = get_visible_sidebar_project_heading(visible_name, threads)
-        if project_heading is not None:
-            current_project_heading = project_heading
-            continue
-        if is_visible_sidebar_project_heading_candidate(visible_name, threads):
-            ambiguous_visible_names.append(visible_name)
-            current_project_heading = None
-            continue
-
-        candidate_threads = [
-            thread
-            for thread in threads
-            if thread.id not in used_thread_ids
-            and (
-                current_project_heading is None
-                or get_thread_project_heading(thread) == current_project_heading
-            )
-            and visible_sidebar_name_matches_thread(visible_name, thread)
-        ]
-        if candidate_threads:
-            if len(candidate_threads) > 1:
-                age_matched_threads = [
-                    thread
-                    for thread in candidate_threads
-                    if visible_sidebar_age_matches_thread(visible_name, thread)
-                ]
-                if len(age_matched_threads) == 1:
-                    candidate_threads = age_matched_threads
-            if len(candidate_threads) > 1:
-                ambiguous_visible_names.append(visible_name)
-                continue
-            matched_thread = candidate_threads[0]
-            matched_threads.append(matched_thread)
-            used_thread_ids.add(matched_thread.id)
-            used_visible_indexes.add(index)
-
-    return matched_threads, used_visible_indexes, ambiguous_visible_names
-
-
-def match_visible_sidebar_threads(
-    visible_names: list[str],
-    threads: list[ThreadInfo],
-) -> list[ThreadInfo]:
-    matched_threads, _used_visible_indexes, _ambiguous_visible_names = (
-        match_visible_sidebar_thread_entries(visible_names, threads)
-    )
-    return matched_threads
-
-
-def load_ui_visible_threads() -> list[ThreadInfo]:
-    visible_names = scan_visible_sidebar_names()
-    threads = load_recent_threads(limit=0)
-    if not threads:
-        visible_preview = " | ".join(visible_names[:12])
-        raise RuntimeError(
-            "Could not map visible Codex sidebar rows because active thread state is empty. "
-            f"visible={visible_preview}"
-        )
-
-    matched_threads, used_visible_indexes, ambiguous_visible_names = (
-        match_visible_sidebar_thread_entries(visible_names, threads)
-    )
-    unmatched_visible_names = [
-        visible_name
-        for index, visible_name in enumerate(visible_names)
-        if index not in used_visible_indexes
-        and get_visible_sidebar_project_heading(visible_name, threads) is None
-    ]
-    if ambiguous_visible_names or unmatched_visible_names:
-        active_preview = " | ".join(
-            (get_thread_ui_name(thread.id, thread) or thread.title or thread.id[:8])
-            for thread in threads[:12]
-        )
-        visible_preview = " | ".join(visible_names[:12])
-        detail_parts = []
-        if unmatched_visible_names:
-            detail_parts.append(f"unmatched={' | '.join(unmatched_visible_names[:8])}")
-        if ambiguous_visible_names:
-            detail_parts.append(f"ambiguous={' | '.join(ambiguous_visible_names[:8])}")
-        raise RuntimeError(
-            "Could not map all visible Codex sidebar rows to active threads. "
-            f"{'; '.join(detail_parts)}; visible={visible_preview}; active={active_preview}"
-        )
-
-    if not matched_threads:
-        active_preview = " | ".join(
-            (get_thread_ui_name(thread.id, thread) or thread.title or thread.id[:8])
-            for thread in threads[:12]
-        )
-        visible_preview = " | ".join(visible_names[:12])
-        raise RuntimeError(
-            "Could not map visible Codex sidebar rows to active threads. "
-            f"visible={visible_preview}; active={active_preview}"
-        )
-    return matched_threads
 
 
 def focus_codex_composer() -> bool:
@@ -5683,8 +5451,8 @@ def print_archived_thread_list(threads: list[ThreadInfo]) -> None:
 
 
 def command_list(args: argparse.Namespace) -> int:
-    if args.ui_visible:
-        threads = load_ui_visible_threads()
+    if args.db_root:
+        threads = load_user_root_threads(limit=args.limit)
     else:
         threads = load_recent_threads(limit=args.limit)
     print_thread_list(threads)
@@ -5931,8 +5699,7 @@ def command_archive(args: argparse.Namespace) -> int:
     if busy_state != "idle":
         raise RuntimeError(describe_thread_busy_state(busy_state))
 
-    with CodexAppServerSidecar() as client:
-        client.archive_thread(thread.id)
+    archive_thread_with_lock_retry(thread.id, kill_codex_on_lock=not args.no_kill_codex_on_lock)
 
     archived_record = wait_for_thread_record(thread.id, archived=True, timeout_sec=args.timeout)
     if archived_record is None:
@@ -6376,7 +6143,7 @@ def build_parser() -> argparse.ArgumentParser:
         parents=[common_parser],
     )
     list_parser.add_argument("--limit", type=int, default=10)
-    list_parser.add_argument("--ui-visible", action="store_true")
+    list_parser.add_argument("--db-root", action="store_true")
     list_parser.set_defaults(func=command_list)
 
     archived_list_parser = subparsers.add_parser(
@@ -6468,6 +6235,11 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=8.0,
         help="How long to wait for the archived state to appear in local Codex state.",
+    )
+    archive_parser.add_argument(
+        "--no-kill-codex-on-lock",
+        action="store_true",
+        help="Do not stop Codex processes and retry when thread/archive reports a Windows file lock.",
     )
     archive_parser.set_defaults(func=command_archive)
 

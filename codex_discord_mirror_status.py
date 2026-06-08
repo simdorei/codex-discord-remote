@@ -9,14 +9,14 @@ from pathlib import Path
 def build_mirror_list(
     limit: int,
     *,
-    visible_thread_ids: list[str] | None = None,
+    scoped_thread_ids: list[str] | None = None,
     db_path: Path,
     init_mirror_db_func,
     bridge_module: object,
 ) -> str:
     init_mirror_db_func()
     with sqlite3.connect(db_path) as conn:
-        if visible_thread_ids is None:
+        if scoped_thread_ids is None:
             rows = conn.execute(
                 """
                 SELECT mt.thread_title, mt.codex_thread_id, mp.project_name, mt.discord_channel_id, mt.discord_thread_id
@@ -28,7 +28,7 @@ def build_mirror_list(
                 (limit,),
             ).fetchall()
         else:
-            ordered_ids = list(dict.fromkeys(str(thread_id) for thread_id in visible_thread_ids if str(thread_id)))
+            ordered_ids = list(dict.fromkeys(str(thread_id) for thread_id in scoped_thread_ids if str(thread_id)))
             if ordered_ids:
                 rows = conn.execute(
                     """
@@ -40,8 +40,8 @@ def build_mirror_list(
                     """.format(",".join("?" for _ in ordered_ids)),
                     tuple(ordered_ids),
                 ).fetchall()
-                visible_order = {thread_id: index for index, thread_id in enumerate(ordered_ids)}
-                rows.sort(key=lambda row: visible_order.get(str(row[1]), len(visible_order)))
+                scoped_order = {thread_id: index for index, thread_id in enumerate(ordered_ids)}
+                rows.sort(key=lambda row: scoped_order.get(str(row[1]), len(scoped_order)))
             else:
                 rows = []
     if not rows:

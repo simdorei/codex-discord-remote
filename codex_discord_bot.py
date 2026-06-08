@@ -133,6 +133,10 @@ STOP_MARKER_POLL_SECONDS = 1.0
 SESSION_MIRROR_TARGET_LIMIT = 100
 SESSION_MIRROR_EVENT_RETENTION_SECONDS = 7 * 86400.0
 SESSION_MIRROR_RECENT_TEXT_TTL_SECONDS = 600.0
+CONTEXT_REFRESH_DEFAULT_LIMIT = 10
+CONTEXT_REFRESH_MAX_LIMIT = 30
+CONTEXT_REFRESH_MAX_CHARS = 16000
+CONTEXT_REFRESH_ITEM_MAX_CHARS = 2000
 DISCORD_ORIGIN_PROMPT_TTL_SECONDS = 900.0
 RECENT_CODEX_APP_PROMPT_DEDUPE_SECONDS = 120.0
 RECENT_CODEX_APP_PROMPT_SCAN_BYTES = 4 * 1024 * 1024
@@ -481,11 +485,11 @@ def resolve_discord_archive_target_args(
 ) -> list[str]:
     normalized = str(ref or "").strip()
     if normalized and normalized.isdigit():
-        visible_threads = bridge.load_ui_visible_threads()
+        root_threads = bridge.load_user_root_threads()
         index = int(normalized)
-        if 1 <= index <= len(visible_threads):
-            return ["--thread-id", visible_threads[index - 1].id]
-        raise RuntimeError(f"Visible thread index out of range: {normalized}")
+        if 1 <= index <= len(root_threads):
+            return ["--thread-id", root_threads[index - 1].id]
+        raise RuntimeError(f"DB root thread index out of range: {normalized}")
     return resolve_discord_thread_target_args(discord_channel_id, ref)
 
 
@@ -606,11 +610,15 @@ def prime_session_mirror_cursor_for_target(target_thread_id: str | None) -> int 
         if not session_path.exists():
             return None
         rollout_path = str(session_path)
+        current_cursor = session_path.stat().st_size
         cursor = get_or_init_session_mirror_cursor(
             target_thread_id,
             rollout_path,
-            session_path.stat().st_size,
+            current_cursor,
         )
+        if cursor != current_cursor:
+            update_session_mirror_cursor(target_thread_id, rollout_path, current_cursor)
+            cursor = current_cursor
         log_line(f"session_mirror_cursor_primed target={target_thread_id} cursor={cursor}")
         return cursor
     except Exception:
@@ -1510,6 +1518,7 @@ class CodexDiscordBot(discord.Client):
         self._session_mirror_last_at = "-"
         self._session_mirror_seen_agent_messages: dict[str, dict[str, float]] = {}
         self._session_mirror_seen_user_messages: dict[str, dict[str, float]] = {}
+        self._session_mirror_archive_skip_logged: set[str] = set()
         self._history_poll_bootstrap_after = datetime.now(timezone.utc) - timedelta(
             seconds=self.history_poll_bootstrap_lookback_seconds
         )
@@ -1840,6 +1849,13 @@ class CodexDiscordBot(discord.Client):
                 f"error_type={type(exc).__name__}"
             )
             return
+        context_usage = await asyncio.to_thread(bridge.get_thread_context_usage, codex_thread)
+        if bridge.should_recommend_archive(codex_thread, context_usage):
+            if codex_thread_id not in self._session_mirror_archive_skip_logged:
+                self._session_mirror_archive_skip_logged.add(codex_thread_id)
+                log_line(f"session_mirror_skipped target={codex_thread_id} reason=archive_recommended")
+            return
+        self._session_mirror_archive_skip_logged.discard(codex_thread_id)
         session_path = Path(codex_thread.rollout_path)
         if not session_path.exists():
             return
@@ -2456,6 +2472,133 @@ def iter_recent_session_tail_events(
     return events
 
 
+def clamp_context_refresh_limit(value: object) -> int:
+    return discord_commands.parse_bounded_int(
+        value,
+        default=CONTEXT_REFRESH_DEFAULT_LIMIT,
+        minimum=1,
+        maximum=CONTEXT_REFRESH_MAX_LIMIT,
+    )
+
+
+def truncate_context_refresh_text(text: str, *, max_chars: int = CONTEXT_REFRESH_ITEM_MAX_CHARS) -> str:
+    clean_text = str(text or "").strip()
+    max_chars = max(100, int(max_chars))
+    if len(clean_text) <= max_chars:
+        return clean_text
+    marker = "\n[truncated]"
+    return clean_text[: max_chars - len(marker)].rstrip() + marker
+
+
+def extract_context_refresh_item(codex_thread_id: str, event: dict) -> dict[str, str] | None:
+    payload = event.get("payload") or {}
+    if not isinstance(payload, dict):
+        return None
+
+    event_type = str(event.get("type") or "")
+    payload_type = str(payload.get("type") or "")
+    if event_type == "event_msg":
+        if payload_type == "user_message":
+            text = str(payload.get("message") or "").strip()
+            if not text:
+                return None
+            return make_session_mirror_item(
+                codex_thread_id,
+                event,
+                kind="user",
+                role="user",
+                phase="input",
+                text=text,
+            )
+        if payload_type == "agent_message":
+            text = str(payload.get("message") or "").strip()
+            if not text:
+                return None
+            phase = str(payload.get("phase") or "commentary")
+            return make_session_mirror_item(
+                codex_thread_id,
+                event,
+                kind="final" if phase == "final_answer" else "commentary",
+                role="assistant",
+                phase=phase,
+                text=text,
+            )
+        return None
+
+    if event_type != "response_item":
+        return None
+    if payload_type == "function_call":
+        notice = bridge.build_interactive_notice_from_function_call(payload)
+        if not notice:
+            return None
+        return make_session_mirror_item(
+            codex_thread_id,
+            event,
+            kind="interactive",
+            role="assistant",
+            phase="interactive",
+            text=notice,
+        )
+    if payload_type != "message":
+        return None
+
+    text = bridge.extract_message_text(payload)
+    if not text:
+        return None
+    role = str(payload.get("role") or "?")
+    phase = str(payload.get("phase") or ("input" if role == "user" else ""))
+    kind = "user" if role == "user" else "final" if phase == "final_answer" else "commentary"
+    return make_session_mirror_item(
+        codex_thread_id,
+        event,
+        kind=kind,
+        role=role,
+        phase=phase,
+        text=text,
+    )
+
+
+def collect_context_refresh_items(codex_thread_id: str, events: list[dict]) -> list[dict[str, str]]:
+    items: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for event in events:
+        item = extract_context_refresh_item(codex_thread_id, event)
+        if item is None:
+            continue
+        text = str(item.get("text") or "").strip()
+        if not text:
+            continue
+        digest = make_text_digest(
+            "context-refresh",
+            item.get("kind") or "",
+            item.get("role") or "",
+            item.get("phase") or "",
+            text,
+        )
+        if digest in seen:
+            continue
+        seen.add(digest)
+        items.append(item)
+    return items
+
+
+def format_context_refresh_item(item: dict[str, str]) -> str:
+    kind = item.get("kind") or ""
+    role = item.get("role") or "?"
+    phase = item.get("phase") or ""
+    if kind == "user":
+        label = "user"
+    elif kind == "final":
+        label = "assistant final"
+    elif kind == "interactive":
+        label = "assistant interactive"
+    elif role == "assistant":
+        label = "assistant commentary"
+    else:
+        label = " ".join(part for part in [role, phase] if part).strip() or "message"
+    return f"[{label}]\n{truncate_context_refresh_text(item.get('text') or '')}"
+
+
 def has_recent_codex_app_user_prompt(
     target_thread_id: str | None,
     prompt: str,
@@ -3043,6 +3186,7 @@ async def handle_persistent_busy_choice_interaction(
                 ephemeral=True,
             )
             return True
+        delegate_to_session_mirror = await prepare_session_mirror_delegation(channel, target_thread_id)
         await send_steering_start_ack(channel, prompt, target_thread_id)
         started_at = time.monotonic()
         async with channel_typing(channel, context="persistent_steer_now"):
@@ -3110,7 +3254,6 @@ async def handle_persistent_busy_choice_interaction(
             ephemeral=True,
         )
         if exit_code == 0:
-            delegate_to_session_mirror = should_delegate_output_to_session_mirror(channel, target_thread_id)
             if delegate_to_session_mirror:
                 log_line(f"busy_choice_persistent_steer_delegated_to_session_mirror target={target_thread_id or '-'}")
             await steering_streamer(
@@ -4255,12 +4398,12 @@ def bounded_mirror_limit(limit: int) -> int:
 
 def load_mirror_scope_threads(limit: int | None = None) -> list[bridge.ThreadInfo]:
     if limit is None:
-        return bridge.load_ui_visible_threads()
+        return bridge.load_user_root_threads()
     return bridge.load_recent_threads(bounded_mirror_limit(limit))
 
 
 async def sync_codex_mirror(bot: CodexDiscordBot, *, limit: int | None = None) -> str:
-    scope = "ui-visible" if limit is None else str(bounded_mirror_limit(limit))
+    scope = "db-root" if limit is None else str(bounded_mirror_limit(limit))
     log_line(f"mirror_sync_start limit={scope}")
     guild = await get_mirror_guild(bot)
     category = await get_or_create_mirror_category(guild)
@@ -4507,16 +4650,16 @@ async def mirror_single_codex_thread(
 
 
 def build_mirror_list(limit: int | None = None) -> str:
-    visible_thread_ids = None
+    scoped_thread_ids = None
     if limit is None:
-        visible_threads = bridge.load_ui_visible_threads()
-        resolved_limit = len(visible_threads)
-        visible_thread_ids = [thread.id for thread in visible_threads]
+        scoped_threads = bridge.load_user_root_threads()
+        resolved_limit = len(scoped_threads)
+        scoped_thread_ids = [thread.id for thread in scoped_threads]
     else:
         resolved_limit = bounded_mirror_limit(limit)
     return discord_mirror_status.build_mirror_list(
         resolved_limit,
-        visible_thread_ids=visible_thread_ids,
+        scoped_thread_ids=scoped_thread_ids,
         db_path=MIRROR_DB_PATH,
         init_mirror_db_func=init_mirror_db,
         bridge_module=bridge,
@@ -4558,6 +4701,50 @@ def build_context_message(channel_id: int | None = None, *, all_threads: bool = 
         get_mirrored_codex_thread_id_func=get_mirrored_codex_thread_id,
         resolve_selected_target_func=resolve_selected_target,
     )
+
+
+def build_context_refresh_message(
+    channel_id: int | None = None,
+    *,
+    limit: int = CONTEXT_REFRESH_DEFAULT_LIMIT,
+    max_chars: int = CONTEXT_REFRESH_MAX_CHARS,
+) -> str:
+    bounded_limit = clamp_context_refresh_limit(limit)
+    target_thread_id = get_mirrored_codex_thread_id(channel_id)
+    if not target_thread_id:
+        selected_thread_id, _target_ref = resolve_selected_target()
+        target_thread_id = selected_thread_id
+    if not target_thread_id:
+        return "No Codex thread target found."
+    try:
+        thread = bridge.choose_thread(target_thread_id, None)
+    except Exception as exc:
+        return f"Context refresh unavailable.\n\nERROR: {exc}"
+
+    session_path = Path(thread.rollout_path)
+    if not session_path.exists():
+        return f"Context refresh unavailable.\n\nSession file not found: {session_path}"
+
+    events = iter_recent_session_tail_events(session_path)
+    items = collect_context_refresh_items(target_thread_id, events)[-bounded_limit:]
+    title = bridge.get_thread_ui_name(thread.id, thread) or thread.title or "-"
+    header = [
+        "Context refresh",
+        f"thread_ref: {bridge.get_thread_workspace_ref(thread, [thread])}",
+        f"title: {title}",
+        f"items: {len(items)}/{bounded_limit}",
+        "source: recent session tail",
+    ]
+    if not items:
+        output = "\n".join(header + ["", "(no recent text items found)"])
+    else:
+        output = "\n\n".join(["\n".join(header), *[format_context_refresh_item(item) for item in items]])
+
+    max_chars = max(1000, min(50000, int(max_chars)))
+    if len(output) <= max_chars:
+        return output
+    marker = "\n\n[context refresh truncated]"
+    return output[: max_chars - len(marker)].rstrip() + marker
 
 
 def get_stale_busy_steer_block_info(target_thread_id: str | None) -> tuple[str, str, float] | None:
@@ -4992,9 +5179,30 @@ def should_delegate_output_to_session_mirror(channel: object, target_thread_id: 
         return False
     channel_id = getattr(channel, "id", None)
     try:
-        return get_mirrored_codex_thread_id(channel_id) == target_thread_id
+        if get_mirrored_codex_thread_id(channel_id) != target_thread_id:
+            return False
     except Exception:
         return False
+    try:
+        codex_thread = bridge.choose_thread(target_thread_id, None)
+        context_usage = bridge.get_thread_context_usage(codex_thread)
+    except Exception as exc:
+        log_line(
+            f"session_mirror_delegate_disabled target={target_thread_id} "
+            f"reason=thread_unavailable error_type={type(exc).__name__}"
+        )
+        return False
+    if bridge.should_recommend_archive(codex_thread, context_usage):
+        log_line(f"session_mirror_delegate_disabled target={target_thread_id} reason=archive_recommended")
+        return False
+    return True
+
+
+async def prepare_session_mirror_delegation(channel: object, target_thread_id: str | None) -> bool:
+    delegate_to_session_mirror = should_delegate_output_to_session_mirror(channel, target_thread_id)
+    if delegate_to_session_mirror:
+        await asyncio.to_thread(prime_session_mirror_cursor_for_target, target_thread_id)
+    return delegate_to_session_mirror
 
 
 async def run_delayed_prompt_via_watch(
@@ -5227,9 +5435,7 @@ async def _run_prompt_and_send_unlocked(
     if not ack_sent:
         await channel.send(build_ask_start_message(prompt, queued=queued))
     target_thread_id, target_ref = resolve_target_ref(target_thread_id)
-    delegate_to_session_mirror = should_delegate_output_to_session_mirror(channel, target_thread_id)
-    if delegate_to_session_mirror:
-        await asyncio.to_thread(prime_session_mirror_cursor_for_target, target_thread_id)
+    delegate_to_session_mirror = await prepare_session_mirror_delegation(channel, target_thread_id)
     _delivery_target_thread, delivery_recent_offsets = await asyncio.to_thread(
         snapshot_ask_prompt_delivery_state,
         target_thread_id,
@@ -6011,6 +6217,10 @@ class BusyChoiceView(discord.ui.View):
                 ephemeral=True,
             )
             return
+        delegate_to_session_mirror = await prepare_session_mirror_delegation(
+            self.message.channel,
+            self.target_thread_id,
+        )
         await send_steering_start_ack(self.message.channel, self.prompt, self.target_thread_id)
         started_at = time.monotonic()
         async with channel_typing(self.message.channel, context="steer_now"):
@@ -6082,10 +6292,6 @@ class BusyChoiceView(discord.ui.View):
         )
         log_line(f"steer_now_sent exit={exit_code} target={self.target_thread_id or '-'}")
         if exit_code == 0:
-            delegate_to_session_mirror = should_delegate_output_to_session_mirror(
-                self.message.channel,
-                self.target_thread_id,
-            )
             if delegate_to_session_mirror:
                 log_line(f"steer_now_delegated_to_session_mirror target={self.target_thread_id or '-'}")
             await stream_steering_prompt_result_to_channel(
@@ -6267,6 +6473,7 @@ async def handle_prefix_command(bot: CodexDiscordBot, message: discord.Message, 
             f"prefix_steer channel={message.channel.id} user={message.author.id} "
             f"target={target_thread_id} prompt_len={format_log_text_len(arg)}"
         )
+        delegate_to_session_mirror = await prepare_session_mirror_delegation(message.channel, target_thread_id)
         started_at = time.monotonic()
         async with channel_typing(message.channel, context="prefix_steer"):
             steering_result = await asyncio.to_thread(run_steering_prompt, arg, target_thread_id)
@@ -6280,7 +6487,6 @@ async def handle_prefix_command(bot: CodexDiscordBot, message: discord.Message, 
         title = "Steering sent" if exit_code == 0 else f"Steering failed (exit {exit_code})"
         await send_chunks(message.channel, f"{title}\n\n{output or '(no output)'}")
         if exit_code == 0:
-            delegate_to_session_mirror = should_delegate_output_to_session_mirror(message.channel, target_thread_id)
             if delegate_to_session_mirror:
                 log_line(f"prefix_steer_delegated_to_session_mirror target={target_thread_id}")
             await stream_steering_prompt_result_to_channel(
@@ -6313,7 +6519,17 @@ async def handle_prefix_command(bot: CodexDiscordBot, message: discord.Message, 
         await send_chunks(message.channel, build_where_message(message.channel.id))
         return
     if command in {"context", "ctx"}:
-        if arg.lower().strip() in {"all", "*"}:
+        context_args = arg.lower().strip().split()
+        if context_args and context_args[0] in {"refresh", "recent"}:
+            limit_arg = context_args[1] if len(context_args) > 1 else ""
+            await send_chunks(
+                message.channel,
+                build_context_refresh_message(
+                    message.channel.id,
+                    limit=clamp_context_refresh_limit(limit_arg),
+                ),
+            )
+        elif arg.lower().strip() in {"all", "*"}:
             await send_chunks(message.channel, build_context_message(message.channel.id, all_threads=True, limit=20))
         else:
             await send_chunks(message.channel, build_context_message(message.channel.id))
@@ -6534,12 +6750,23 @@ def register_commands(bot: CodexDiscordBot) -> None:
         )
 
     @bot.tree.command(name="context", description="Show context usage for this Codex thread.")
-    async def slash_context(interaction: discord.Interaction, all_threads: bool = False) -> None:
+    async def slash_context(
+        interaction: discord.Interaction,
+        all_threads: bool = False,
+        refresh: bool = False,
+        limit: int = CONTEXT_REFRESH_DEFAULT_LIMIT,
+    ) -> None:
         if not check_interaction_allowed(bot, interaction):
             await interaction.response.send_message("This channel/user is not allowed.", ephemeral=True)
             return
         await interaction.response.defer(thinking=True)
-        output = build_context_message(interaction.channel_id, all_threads=all_threads, limit=20)
+        if refresh:
+            output = build_context_refresh_message(
+                interaction.channel_id,
+                limit=clamp_context_refresh_limit(limit),
+            )
+        else:
+            output = build_context_message(interaction.channel_id, all_threads=all_threads, limit=20)
         await send_interaction_chunks(interaction, output, title="Context")
 
     @bot.tree.command(name="usage", description="Show local Codex usage estimate.")

@@ -35,7 +35,7 @@ def build_help(*, qa_commands_enabled: bool) -> str:
         "!restart_codex",
         "!chatid",
         "!where",
-        "!context [all]",
+        "!context [all|refresh [limit]]",
         "!usage [days]",
         "!runners",
         "!bridge sync [limit]",
