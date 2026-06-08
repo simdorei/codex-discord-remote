@@ -50,6 +50,38 @@ To preview what the installer would do:
 .\install.ps1 -DryRun
 ```
 
+## Install The Codex Plugin
+
+The repository includes a local Codex plugin marketplace at `.agents\plugins\marketplace.json`.
+Install it from the repository root:
+
+```powershell
+codex plugin marketplace add .
+codex plugin add codex-discord-harness@codex-discord-harness
+```
+
+Confirm that Codex can see the marketplace and plugin:
+
+```powershell
+codex plugin marketplace list
+codex plugin list
+```
+
+Expected entries include:
+
+- marketplace: `codex-discord-harness`
+- plugin: `codex-discord-harness@codex-discord-harness`
+
+Restart Codex after installing the plugin so the bundled skills are loaded into new sessions.
+
+Useful plugin-backed scripts can also be run directly from the repository:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\plugins\codex-discord-harness\scripts\status.ps1
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\plugins\codex-discord-harness\scripts\restart.ps1
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\plugins\codex-discord-harness\scripts\qa-smoke.ps1 -SkipUnitTests
+```
+
 ## Configure
 
 Edit `.env`:
