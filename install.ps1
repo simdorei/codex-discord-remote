@@ -13,7 +13,6 @@ $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $RequirementsPath = Join-Path $ScriptDir 'requirements.txt'
 $EnvExamplePath = Join-Path $ScriptDir '.env.example'
 $EnvPath = Join-Path $ScriptDir '.env'
-$SteeringConfigScript = Join-Path $ScriptDir 'configure-codex-desktop-steering.ps1'
 
 function Resolve-PythonCommand {
     if (-not [string]::IsNullOrWhiteSpace($PythonExe)) {
@@ -74,16 +73,8 @@ if (-not $SkipEnvFile) {
     }
 }
 
-if (-not $SkipSteeringConfig) {
-    if (-not (Test-Path -LiteralPath $SteeringConfigScript)) {
-        throw "Steering config script was not found: $SteeringConfigScript"
-    }
-    Write-Output "Configuring Codex Desktop follow-up mode: steer"
-    if ($DryRun) {
-        & $SteeringConfigScript -DryRun
-    } else {
-        & $SteeringConfigScript
-    }
+if ($SkipSteeringConfig) {
+    Write-Output 'Skipping steering config: installer no longer changes Codex Desktop follow-up mode.'
 }
 
 Write-Output 'Install complete.'

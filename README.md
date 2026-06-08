@@ -43,14 +43,6 @@ The installer:
 
 - installs Python dependencies from `requirements.txt`
 - creates `.env` from `.env.example` when `.env` is missing
-- configures Codex Desktop to prefer steering for busy follow-ups
-
-The steering setting is written to `$CODEX_HOME\config.toml` or `%USERPROFILE%\.codex\config.toml`:
-
-```toml
-[desktop]
-followUpQueueMode = "steer"
-```
 
 To preview what the installer would do:
 
@@ -189,7 +181,7 @@ Steering is handled by Codex Desktop, not by a Discord-side global busy gate.
 - If Codex Desktop exposes approval/input/follow-up choices, Discord mirrors those choices.
 - Same-thread follow-ups can still reach Codex Desktop for steering.
 - Different target threads wait for the active Codex app turn before starting, because the current desktop transport is single-active-turn in practice.
-- The default install configures `followUpQueueMode = "steer"` for Codex Desktop.
+- The installer does not change Codex Desktop follow-up mode.
 
 ## Validation
 
