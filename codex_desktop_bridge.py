@@ -2642,7 +2642,7 @@ def detect_running_codex_app_server_executable() -> tuple[Path | None, str]:
             "| Select-Object -First 1 -ExpandProperty ExecutablePath"
         )
     )
-    if process_path is not None:
+    if process_path is not None and not is_windowsapps_path(process_path):
         return (process_path, "powershell:running-app-server")
     return (None, "")
 

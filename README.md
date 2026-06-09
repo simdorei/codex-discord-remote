@@ -160,7 +160,7 @@ py -3 .\send_discord_attachment.py --channel-id 123456789012345678 --content-fil
 
 Registered Discord slash commands:
 
-- /help, /list, /archived_list, /use, /status, /doctor, /where, /context, /usage, /runners, /retract, /mirror_check, /bridge_sync, /new, /ask, /ask_ipc
+- /help, /list, /archived_list, /use, /status, /doctor, /where, /context, /usage, /runners, /retract, /mirror_check, /bridge_sync, /new, /ask (legacy alias: /ask_ipc)
 
 Common `!` commands:
 

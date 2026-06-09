@@ -97,17 +97,6 @@ THREAD_RUNNERS_LOCK = discord_runner.THREAD_RUNNERS_LOCK
 THREAD_RUNNERS = discord_runner.THREAD_RUNNERS
 RUNTIME_STATE = discord_runtime.DiscordRuntimeState()
 SESSION_MIRROR_STATE = discord_session_mirror.SessionMirrorState()
-STEERING_HANDOFFS = RUNTIME_STATE.steering_handoffs
-ACTIVE_DISCORD_RELAY_GENERATIONS = RUNTIME_STATE.active_discord_relay_generations
-RECENT_DISCORD_ORIGIN_PROMPTS = RUNTIME_STATE.recent_discord_origin_prompts
-ACTIVE_SESSION_MIRROR_OUTPUT_TARGETS = SESSION_MIRROR_STATE.active_output_targets
-PENDING_SESSION_MIRROR_CURSOR_TARGETS = SESSION_MIRROR_STATE.pending_cursor_targets
-CODEX_APP_TURN_CONDITION = RUNTIME_STATE.codex_app_turn_condition
-CODEX_APP_ACTIVE_TARGET_KEY = RUNTIME_STATE.codex_app_active_target_key
-CODEX_APP_ACTIVE_TARGET_COUNT = RUNTIME_STATE.codex_app_active_target_count
-ASK_DELIVERY_LOCKS = RUNTIME_STATE.ask_delivery_locks
-ACTIVE_DIRECT_ASK_LOCK = RUNTIME_STATE.active_direct_ask_lock
-ACTIVE_DIRECT_ASK_TARGET_KEYS = RUNTIME_STATE.active_direct_ask_target_keys
 UI_FALLBACK_LOCK = threading.Lock()
 STREAM_REDIRECT_LOCK = threading.RLock()
 INTERACTIVE_INPUT_TAG = "[choice_required]"
@@ -189,32 +178,11 @@ app_server_transport.DEFAULT_CLIENT.log_func = log_line
 
 
 def get_session_mirror_state() -> discord_session_mirror.SessionMirrorState:
-    SESSION_MIRROR_STATE.active_output_targets = ACTIVE_SESSION_MIRROR_OUTPUT_TARGETS
-    SESSION_MIRROR_STATE.pending_cursor_targets = PENDING_SESSION_MIRROR_CURSOR_TARGETS
     return SESSION_MIRROR_STATE
 
 
 def get_runtime_state() -> discord_runtime.DiscordRuntimeState:
-    RUNTIME_STATE.steering_handoffs = STEERING_HANDOFFS
-    RUNTIME_STATE.active_discord_relay_generations = ACTIVE_DISCORD_RELAY_GENERATIONS
-    RUNTIME_STATE.recent_discord_origin_prompts = RECENT_DISCORD_ORIGIN_PROMPTS
-    RUNTIME_STATE.ask_delivery_locks = ASK_DELIVERY_LOCKS
-    RUNTIME_STATE.active_direct_ask_lock = ACTIVE_DIRECT_ASK_LOCK
-    RUNTIME_STATE.active_direct_ask_target_keys = ACTIVE_DIRECT_ASK_TARGET_KEYS
-    RUNTIME_STATE.codex_app_turn_condition = CODEX_APP_TURN_CONDITION
-    RUNTIME_STATE.codex_app_active_target_key = CODEX_APP_ACTIVE_TARGET_KEY
-    RUNTIME_STATE.codex_app_active_target_count = CODEX_APP_ACTIVE_TARGET_COUNT
     return RUNTIME_STATE
-
-
-def sync_runtime_state_to_compat_globals() -> None:
-    global CODEX_APP_TURN_CONDITION
-    global CODEX_APP_ACTIVE_TARGET_KEY
-    global CODEX_APP_ACTIVE_TARGET_COUNT
-
-    CODEX_APP_TURN_CONDITION = RUNTIME_STATE.codex_app_turn_condition
-    CODEX_APP_ACTIVE_TARGET_KEY = RUNTIME_STATE.codex_app_active_target_key
-    CODEX_APP_ACTIVE_TARGET_COUNT = RUNTIME_STATE.codex_app_active_target_count
 
 
 def load_local_env(path: Path) -> None:
@@ -1233,7 +1201,7 @@ def run_legacy_ipc_prompt_no_wait(prompt: str, target_thread_id: str | None) -> 
     return run_bridge_command(argv)
 
 
-def run_ipc_prompt_no_wait(prompt: str, target_thread_id: str | None) -> tuple[int, str]:
+def run_transport_prompt_no_wait(prompt: str, target_thread_id: str | None) -> tuple[int, str]:
     if not app_server_transport_enabled():
         return run_legacy_ipc_prompt_no_wait(prompt, target_thread_id)
     try:
@@ -1405,15 +1373,15 @@ def make_steering_prompt_result(
     )
 
 
-def is_ipc_delivery_confirmation_timeout(output: str) -> bool:
+def is_delivery_confirmation_timeout(output: str) -> bool:
     return discord_steering.is_ipc_delivery_confirmation_timeout(output)
 
 
-def format_pending_ipc_delivery_output(output: str) -> str:
+def format_pending_delivery_output(output: str) -> str:
     return discord_steering.format_pending_ipc_delivery_output(output)
 
 
-def format_pending_ipc_ask_output(output: str) -> str:
+def format_pending_ask_delivery_output(output: str) -> str:
     metadata_lines = [
         line
         for line in (output or "").splitlines()
@@ -1425,7 +1393,7 @@ def format_pending_ipc_ask_output(output: str) -> str:
     return "\n".join(
         part
         for part in [
-            "[delivery_pending] Codex IPC accepted the ask, but local session recording is delayed.",
+            "[delivery_pending] Codex transport accepted the ask, but local session recording is delayed.",
             "Your message may already be running in Codex. Do not resend it yet.",
             discord_steering.format_ipc_delivery_issue_detail(output),
             "\n".join(metadata_lines),
@@ -5416,7 +5384,6 @@ def get_codex_app_turn_condition() -> asyncio.Condition:
     state = get_runtime_state()
     if state.codex_app_turn_condition is None:
         state.codex_app_turn_condition = asyncio.Condition()
-        sync_runtime_state_to_compat_globals()
     return state.codex_app_turn_condition
 
 
@@ -5440,7 +5407,6 @@ async def codex_app_turn_slot(target_thread_id: str | None):
             state.codex_app_active_target_count = 1
         else:
             state.codex_app_active_target_count += 1
-        sync_runtime_state_to_compat_globals()
         if waited:
             log_line(
                 f"codex_app_turn_wait_done target={target_thread_id or '-'} "
@@ -5456,7 +5422,6 @@ async def codex_app_turn_slot(target_thread_id: str | None):
                 if state.codex_app_active_target_count == 0:
                     state.codex_app_active_target_key = None
                     condition.notify_all()
-                sync_runtime_state_to_compat_globals()
             else:
                 log_line(
                     f"codex_app_turn_slot_mismatch target={target_thread_id or '-'} "
@@ -5877,20 +5842,20 @@ async def _run_prompt_and_send_unlocked(
         await channel.send(build_ask_start_message(prompt, queued=queued))
     target_thread_id, target_ref = resolve_target_ref(target_thread_id)
     if await prepare_mapped_session_mirror_output(channel, target_thread_id):
-        async with channel_typing(channel, context="ask_ipc_no_wait"):
+        async with channel_typing(channel, context="ask_transport_no_wait"):
             exit_code, output = await asyncio.to_thread(
-                run_ipc_prompt_no_wait,
+                run_transport_prompt_no_wait,
                 prompt,
                 target_thread_id,
             )
         log_line(
-            f"ask_ipc_no_wait_done exit={exit_code} target={target_thread_id or '-'} "
+            f"ask_transport_no_wait_done exit={exit_code} target={target_thread_id or '-'} "
             f"output_len={format_log_text_len(output)}"
         )
         if exit_code == 0:
             return
-        if is_ipc_delivery_confirmation_timeout(output):
-            await send_chunks(channel, format_pending_ipc_ask_output(output))
+        if is_delivery_confirmation_timeout(output):
+            await send_chunks(channel, format_pending_ask_delivery_output(output))
             return
         deactivate_session_mirror_output_target(target_thread_id)
         if is_selected_thread_busy_error(exit_code, output):
@@ -5898,10 +5863,10 @@ async def _run_prompt_and_send_unlocked(
                 channel,
                 target_thread_id,
                 output,
-                reason="ask_ipc_no_wait_busy",
+                reason="ask_transport_no_wait_busy",
             ):
                 return
-        await send_chunks(channel, f"Ask failed (IPC exit {exit_code})\n\n{output or '(no output)'}")
+        await send_chunks(channel, f"Ask failed (transport exit {exit_code})\n\n{output or '(no output)'}")
         return
     delegate_to_session_mirror = await prepare_session_mirror_delegation(channel, target_thread_id)
     _delivery_target_thread, delivery_recent_offsets = await asyncio.to_thread(
@@ -5942,12 +5907,12 @@ async def _run_prompt_and_send_unlocked(
                 f"sent_live={relay.sent_live} output_len={format_log_text_len(output)}"
             )
         return
-    if is_ipc_delivery_confirmation_timeout(output):
+    if is_delivery_confirmation_timeout(output):
         log_line(
-            f"ask_stream_ipc_delivery_pending exit={exit_code} target={target_thread_id or '-'} "
+            f"ask_stream_delivery_pending exit={exit_code} target={target_thread_id or '-'} "
             f"sent_live={relay.sent_live} output_len={format_log_text_len(output)}"
         )
-        await send_chunks(channel, format_pending_ipc_ask_output(output))
+        await send_chunks(channel, format_pending_ask_delivery_output(output))
         return
     if is_selected_thread_busy_error(exit_code, output):
         log_line(
@@ -6030,8 +5995,8 @@ async def _run_prompt_and_send_unlocked(
                         f"sent_live={relay.sent_live} output_len={format_log_text_len(output)}"
                     )
                 return
-            if is_ipc_delivery_confirmation_timeout(output):
-                await send_chunks(channel, format_pending_ipc_ask_output(output))
+            if is_delivery_confirmation_timeout(output):
+                await send_chunks(channel, format_pending_ask_delivery_output(output))
                 return
             if not is_selected_thread_busy_error(exit_code, output):
                 break
@@ -7303,7 +7268,7 @@ def register_commands(bot: CodexDiscordBot) -> None:
         await interaction.response.defer(thinking=True)
         await handle_slash_ask(interaction, prompt)
 
-    @bot.tree.command(name="ask_ipc", description="Alias of /ask.")
+    @bot.tree.command(name="ask_ipc", description="Legacy alias of /ask.")
     async def slash_ask_ipc(interaction: discord.Interaction, prompt: str) -> None:
         if not check_interaction_allowed(bot, interaction):
             await interaction.response.send_message("This channel/user is not allowed.", ephemeral=True)
