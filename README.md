@@ -101,7 +101,9 @@ DISCORD_ENABLE_MESSAGE_CONTENT=1
 DISCORD_PLAIN_ASK_MENTION_USER_IDS=your_bridge_bot_user_id
 DISCORD_PLAIN_ASK_CONTEXT_FALLBACK=0
 DISCORD_STREAM_COMMENTARY=1
+DISCORD_CHUNK_MARKERS=1
 DISCORD_SESSION_MIRROR=1
+DISCORD_SESSION_MIRROR_ARCHIVE_BACKLOG_MAX_EVENTS=200
 DISCORD_ENABLE_ATTACHMENTS=1
 ```
 
@@ -113,7 +115,9 @@ Notes:
 - In mapped mirror threads, plain messages route to that mapped Codex thread.
 - Messages authored by other bots are ignored unless they explicitly mention the Codex bridge user.
 - `DISCORD_STREAM_COMMENTARY=1` mirrors Codex in-progress commentary to Discord. Set it to `0` if you only want final answers.
+- `DISCORD_CHUNK_MARKERS=1` prefixes multi-part Discord messages with `[1/N]`, `[2/N]`, etc. so long Codex output can be audited for missing chunks.
 - `DISCORD_SESSION_MIRROR=1` tails mapped Codex session files and mirrors new app-side user text, commentary, final answers, aborts, and approval/input prompts into the mapped Discord thread.
+- `DISCORD_SESSION_MIRROR_ARCHIVE_BACKLOG_MAX_EVENTS=200` limits archive-recommended catch-up reads per poll. Set `0` for unlimited catch-up.
 - `DISCORD_ENABLE_ATTACHMENTS=1` saves Discord attachments under `discord_attachments\` and includes the local paths in the Codex prompt. Small text-like attachments are also inlined as previews.
 
 ## Run
@@ -156,7 +160,7 @@ py -3 .\send_discord_attachment.py --channel-id 123456789012345678 --content-fil
 
 Registered Discord slash commands:
 
-- /help, /list, /archived_list, /use, /status, /doctor, /where, /context, /usage, /runners, /mirror_check, /bridge_sync, /new, /ask, /ask_ipc
+- /help, /list, /archived_list, /use, /status, /doctor, /where, /context, /usage, /runners, /retract, /mirror_check, /bridge_sync, /new, /ask, /ask_ipc
 
 Common `!` commands:
 
@@ -177,6 +181,7 @@ Common `!` commands:
 | `!context [all]` | Shows context usage for the current thread, or mapped threads with `all`. |
 | `!usage [days]` | Shows local Codex usage estimates. |
 | `!runners` | Shows Discord runner queues. |
+| `!retract [ref]` | Removes your latest queued ask for the mapped/current Codex thread or supplied ref. Active asks are not interrupted. |
 | `!bridge sync [limit]` | Refreshes local bridge state and Discord mirror state. Without a limit, it uses DB-root user threads. |
 | `!mirror sync [limit]` | Syncs Discord mirror project/thread channels. Without a limit, it uses DB-root user threads. |
 | `!mirror list [limit]` | Lists mirror mappings. Without a limit, it uses DB-root user threads. |
@@ -212,14 +217,24 @@ Steering is handled by Codex Desktop, not by a Discord-side global busy gate.
 - Discord does not preflight idle/busy state and does not auto-queue ordinary asks.
 - If Codex Desktop exposes approval/input/follow-up choices, Discord mirrors those choices.
 - Same-thread follow-ups can still reach Codex Desktop for steering.
+- When a mapped thread is busy, Discord shows `Steer now`, `Queue next`, and `Ignore` controls. `Steer now` injects the prompt into the active turn; `Queue next` waits for the next full turn; `!retract [ref]` removes your latest queued ask before it starts.
 - Different target threads wait for the active Codex app turn before starting, because the current desktop transport is single-active-turn in practice.
 - The installer does not change Codex Desktop follow-up mode.
+
+## Transport Policy
+
+- Discord ask and steering delivery use a resident `codex app-server` client by default. The bot starts one app-server connection at startup and reuses it for `turn/start`, `turn/steer`, and `turn/interrupt`-style control instead of launching a bridge subprocess for each message.
+- App-server approval and request-user-input prompts are cached as server requests. Discord approval/input replies answer the same app-server JSON-RPC request id first, then fall back to the legacy IPC approval path only when no resident request is pending.
+- Mapped ask output is mirrored from the local Codex session file after cursor priming, so Discord does not also stream a second copy of the answer.
+- Background session mirroring still tails archive-recommended threads. Backlog is not dropped; it is caught up in bounded event batches so a stale cursor does not flood Discord in one poll. Active mapped Discord asks can still temporarily allow mirrored output for that target.
+- Legacy IPC/UI/subprocess delivery is disabled for ask/steer by default. Set `CODEX_DISCORD_APP_SERVER_TRANSPORT=0` to force legacy behavior, or `CODEX_DISCORD_APP_SERVER_LEGACY_FALLBACK=1` to allow fallback after resident app-server delivery failure.
+- Sidecar transport remains available for non-ask helper operations that still need it, such as archive and local maintenance commands.
 
 ## Validation
 
 ```powershell
 py -3 -m unittest tests.test_codex_discord_bot
-py -3 -m py_compile codex_desktop_bridge.py codex_windows_harness.py codex_discord_bot.py tests\test_codex_discord_bot.py
+py -3 -m py_compile codex_app_server_transport.py codex_desktop_bridge.py codex_windows_harness.py codex_discord_bot.py tests\test_codex_discord_bot.py
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\codex-discord-watchdog.ps1 -DryRun
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\codex-discord-tray.ps1 -Once
 git diff --check
@@ -232,10 +247,13 @@ Live Discord QA should verify:
 - role mentions do not satisfy the user mention gate
 - `!` commands and slash commands are unaffected by mention gating
 - ordinary asks are submitted without idle/busy preflight or auto-queueing
+- ask/steer logs show resident `app_server_transport_started` and `transport: resident-app-server` delivery rather than per-message bridge subprocess delivery
 - Codex in-progress commentary appears in Discord before the final answer
 - app-side Codex text is mirrored into the mapped Discord thread without replaying old history on startup
 - Discord image/text attachments are saved locally and referenced in the Codex prompt
-- app-exposed approval/input menus are mirrored when they appear after delivery
+- app-server approval/input requests can be answered from Discord controls
+- busy mapped-thread prompts expose explicit steer/queue/ignore controls, and `!retract` removes a still-queued ask without interrupting the active turn
+- long Discord sends include `[part/total]` markers and delivery log lines for each chunk
 - different mapped target threads route to the correct Codex threads
 - cross-target Discord asks wait for the active Codex app turn so they do not abort each other
 - other bot messages are ignored unless they mention the Codex bridge
@@ -245,3 +263,7 @@ Live Discord QA should verify:
 ## Project Position
 
 This repository is a Windows-local operator harness. It is useful for personal or team-operated machines, but it is not a hosted multi-user service and should not be described as a mobile Codex replacement.
+
+## Acknowledgements
+
+The resident app-server transport direction was informed by [NathanZane/codex-mobile](https://github.com/NathanZane/codex-mobile), which explores Discord-based Codex Desktop mirroring, approvals, queueing, and steering workflows.

@@ -19,9 +19,13 @@ try {
     powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 -DryRun -SkipDependencies -SkipEnvFile
 
     & py -3 -m py_compile `
+        codex_app_server_transport.py `
         codex_desktop_bridge.py `
         codex_discord_bot.py `
+        codex_discord_help.py `
+        codex_discord_runner.py `
         codex_discord_steering.py `
+        codex_discord_store.py `
         tests\test_codex_discord_bot.py `
         tests\test_mirror_sync_cleanup.py
 
@@ -31,4 +35,3 @@ try {
 } finally {
     Pop-Location
 }
-

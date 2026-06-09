@@ -22,6 +22,7 @@ from types import SimpleNamespace
 import discord
 from discord import app_commands
 
+import codex_app_server_transport as app_server_transport
 import codex_desktop_bridge as bridge
 import codex_discord_bridge_process as bridge_process
 import codex_discord_busy as discord_busy
@@ -95,6 +96,8 @@ THREAD_RUNNERS = discord_runner.THREAD_RUNNERS
 STEERING_HANDOFFS: dict[str, float] = {}
 ACTIVE_DISCORD_RELAY_GENERATIONS: dict[str, int] = {}
 RECENT_DISCORD_ORIGIN_PROMPTS: dict[str, float] = {}
+ACTIVE_SESSION_MIRROR_OUTPUT_TARGETS: dict[str, float] = {}
+PENDING_SESSION_MIRROR_CURSOR_TARGETS: set[str] = set()
 CODEX_APP_TURN_CONDITION: asyncio.Condition | None = None
 CODEX_APP_ACTIVE_TARGET_KEY: str | None = None
 CODEX_APP_ACTIVE_TARGET_COUNT = 0
@@ -122,6 +125,8 @@ HISTORY_POLL_BOOTSTRAP_LOOKBACK_DEFAULT_SECONDS = 120.0
 PROCESSED_MESSAGE_ID_LIMIT = 2000
 PROCESSED_MESSAGE_RETENTION_SECONDS = 86400.0
 SOCKET_EVENT_LOG_ID_LIMIT = 2000
+DISCORD_SEND_RETRY_DELAYS_SECONDS = (0.75, 2.0)
+DISCORD_CHUNK_MARKERS_ENABLED = env_flag("DISCORD_CHUNK_MARKERS", True)
 QUIET_PROGRESS_NOTICE_DELAY_SECONDS = -1.0
 STEERING_DELIVERY_CONFIRM_TIMEOUT_SECONDS = 25.0
 STEERING_PENDING_WATCH_TIMEOUT_SECONDS = 600.0
@@ -133,6 +138,9 @@ STOP_MARKER_POLL_SECONDS = 1.0
 SESSION_MIRROR_TARGET_LIMIT = 100
 SESSION_MIRROR_EVENT_RETENTION_SECONDS = 7 * 86400.0
 SESSION_MIRROR_RECENT_TEXT_TTL_SECONDS = 600.0
+SESSION_MIRROR_ACTIVE_OUTPUT_TTL_SECONDS = 6 * 3600.0
+SESSION_MIRROR_CURSOR_PRIME_PRESERVE_SECONDS = 10 * 60.0
+SESSION_MIRROR_ARCHIVE_BACKLOG_MAX_EVENTS_DEFAULT = 200
 CONTEXT_REFRESH_DEFAULT_LIMIT = 10
 CONTEXT_REFRESH_MAX_LIMIT = 30
 CONTEXT_REFRESH_MAX_CHARS = 16000
@@ -172,6 +180,8 @@ DEFAULT_PLAIN_ASK_CONTEXT_KEYWORDS = (
     "message,메시지,메세지,채팅,thread,스레드,queue,큐,steer,스티어,"
     "patch,패치,qa,하네스,harness,잘아타스"
 )
+
+app_server_transport.DEFAULT_CLIENT.log_func = log_line
 
 
 def load_local_env(path: Path) -> None:
@@ -256,6 +266,15 @@ def get_discord_session_mirror_poll_seconds() -> float:
         default=SESSION_MIRROR_POLL_DEFAULT_SECONDS,
         minimum=0.25,
         maximum=60.0,
+    )
+
+
+def get_session_mirror_archive_backlog_max_events() -> int:
+    return parse_bounded_int_arg(
+        os.environ.get("DISCORD_SESSION_MIRROR_ARCHIVE_BACKLOG_MAX_EVENTS", ""),
+        default=SESSION_MIRROR_ARCHIVE_BACKLOG_MAX_EVENTS_DEFAULT,
+        minimum=0,
+        maximum=10000,
     )
 
 
@@ -592,6 +611,10 @@ def get_or_init_session_mirror_cursor(
     )
 
 
+def get_session_mirror_offset(codex_thread_id: str) -> tuple[str, int, float] | None:
+    return discord_store.get_session_mirror_offset(MIRROR_DB_PATH, codex_thread_id)
+
+
 def update_session_mirror_cursor(codex_thread_id: str, rollout_path: str, cursor: int) -> None:
     discord_store.update_session_mirror_cursor(
         MIRROR_DB_PATH,
@@ -611,14 +634,33 @@ def prime_session_mirror_cursor_for_target(target_thread_id: str | None) -> int 
             return None
         rollout_path = str(session_path)
         current_cursor = session_path.stat().st_size
+        offset = get_session_mirror_offset(target_thread_id)
+        offset_updated_at = 0.0
+        if offset and offset[0] == rollout_path:
+            offset_updated_at = offset[2]
         cursor = get_or_init_session_mirror_cursor(
             target_thread_id,
             rollout_path,
             current_cursor,
         )
         if cursor != current_cursor:
-            update_session_mirror_cursor(target_thread_id, rollout_path, current_cursor)
-            cursor = current_cursor
+            preserve_reason = ""
+            if cursor < current_cursor and is_active_session_mirror_output_target(target_thread_id):
+                preserve_reason = "active_output"
+            elif (
+                cursor < current_cursor
+                and offset_updated_at
+                and time.time() - offset_updated_at <= SESSION_MIRROR_CURSOR_PRIME_PRESERVE_SECONDS
+            ):
+                preserve_reason = "recent_cursor"
+            if preserve_reason:
+                log_line(
+                    f"session_mirror_cursor_prime_preserved target={target_thread_id} "
+                    f"cursor={cursor} current={current_cursor} reason={preserve_reason}"
+                )
+            else:
+                update_session_mirror_cursor(target_thread_id, rollout_path, current_cursor)
+                cursor = current_cursor
         log_line(f"session_mirror_cursor_primed target={target_thread_id} cursor={cursor}")
         return cursor
     except Exception:
@@ -629,8 +671,87 @@ def prime_session_mirror_cursor_for_target(target_thread_id: str | None) -> int 
         return None
 
 
+def cleanup_active_session_mirror_output_targets(now: float | None = None) -> None:
+    current = time.monotonic() if now is None else now
+    expired = [
+        target
+        for target, activated_at in ACTIVE_SESSION_MIRROR_OUTPUT_TARGETS.items()
+        if current - activated_at > SESSION_MIRROR_ACTIVE_OUTPUT_TTL_SECONDS
+    ]
+    for target in expired:
+        ACTIVE_SESSION_MIRROR_OUTPUT_TARGETS.pop(target, None)
+        PENDING_SESSION_MIRROR_CURSOR_TARGETS.discard(target)
+
+
+def activate_session_mirror_output_target(target_thread_id: str | None) -> None:
+    if not target_thread_id:
+        return
+    key = normalize_runner_key(target_thread_id)
+    cleanup_active_session_mirror_output_targets()
+    ACTIVE_SESSION_MIRROR_OUTPUT_TARGETS[key] = time.monotonic()
+    PENDING_SESSION_MIRROR_CURSOR_TARGETS.discard(key)
+
+
+def activate_pending_session_mirror_output_target(target_thread_id: str | None) -> None:
+    if not target_thread_id:
+        return
+    key = normalize_runner_key(target_thread_id)
+    activate_session_mirror_output_target(target_thread_id)
+    PENDING_SESSION_MIRROR_CURSOR_TARGETS.add(key)
+
+
+def deactivate_session_mirror_output_target(target_thread_id: str | None) -> None:
+    if not target_thread_id:
+        return
+    key = normalize_runner_key(target_thread_id)
+    ACTIVE_SESSION_MIRROR_OUTPUT_TARGETS.pop(key, None)
+    PENDING_SESSION_MIRROR_CURSOR_TARGETS.discard(key)
+
+
+def is_active_session_mirror_output_target(target_thread_id: str | None) -> bool:
+    if not target_thread_id:
+        return False
+    cleanup_active_session_mirror_output_targets()
+    return normalize_runner_key(target_thread_id) in ACTIVE_SESSION_MIRROR_OUTPUT_TARGETS
+
+
+def is_pending_session_mirror_cursor_target(target_thread_id: str | None) -> bool:
+    if not target_thread_id:
+        return False
+    cleanup_active_session_mirror_output_targets()
+    return normalize_runner_key(target_thread_id) in PENDING_SESSION_MIRROR_CURSOR_TARGETS
+
+
+def clear_pending_session_mirror_cursor_target(target_thread_id: str | None) -> None:
+    if not target_thread_id:
+        return
+    PENDING_SESSION_MIRROR_CURSOR_TARGETS.discard(normalize_runner_key(target_thread_id))
+
+
+def session_mirror_rollout_path_missing(target_thread_id: str | None) -> bool:
+    if not target_thread_id:
+        return False
+    try:
+        codex_thread = bridge.choose_thread(target_thread_id, None)
+        return not Path(codex_thread.rollout_path).exists()
+    except Exception as exc:
+        log_line(
+            f"session_mirror_output_prepare_failed target={target_thread_id} "
+            f"reason=thread_unavailable error_type={type(exc).__name__}"
+        )
+        return False
+
+
 def claim_session_mirror_event(event_digest: str, codex_thread_id: str) -> bool:
     return discord_store.claim_session_mirror_event(
+        MIRROR_DB_PATH,
+        event_digest,
+        codex_thread_id,
+    )
+
+
+def has_session_mirror_event(event_digest: str, codex_thread_id: str) -> bool:
+    return discord_store.has_session_mirror_event(
         MIRROR_DB_PATH,
         event_digest,
         codex_thread_id,
@@ -1033,6 +1154,100 @@ def run_ask(
     return exit_code, output
 
 
+def app_server_transport_enabled() -> bool:
+    return env_flag("CODEX_DISCORD_APP_SERVER_TRANSPORT", True)
+
+
+def app_server_legacy_fallback_enabled() -> bool:
+    return env_flag("CODEX_DISCORD_APP_SERVER_LEGACY_FALLBACK", False)
+
+
+def run_app_server_prompt_no_wait(prompt: str, target_thread_id: str | None) -> tuple[int, str]:
+    result = app_server_transport.start_turn_no_wait(
+        app_server_transport.DEFAULT_CLIENT,
+        prompt,
+        target_thread_id,
+        bridge_module=bridge,
+        confirm_timeout_sec=6.0,
+    )
+    return result.exit_code, result.output
+
+
+def run_legacy_ipc_prompt_no_wait(prompt: str, target_thread_id: str | None) -> tuple[int, str]:
+    argv = [
+        "ask",
+        "--ipc",
+        "--foreground",
+        "--no-fallback",
+        "--timeout",
+        "0",
+        "--no-wait",
+    ]
+    if target_thread_id:
+        argv.extend(["--thread-id", target_thread_id])
+    argv.append(prompt)
+    return run_bridge_command(argv)
+
+
+def run_ipc_prompt_no_wait(prompt: str, target_thread_id: str | None) -> tuple[int, str]:
+    if not app_server_transport_enabled():
+        return run_legacy_ipc_prompt_no_wait(prompt, target_thread_id)
+    try:
+        return run_app_server_prompt_no_wait(prompt, target_thread_id)
+    except Exception as exc:
+        log_line(
+            f"app_server_prompt_failed target={target_thread_id or '-'} "
+            f"fallback={app_server_legacy_fallback_enabled()} error={str(exc)[:300]}"
+        )
+        if app_server_legacy_fallback_enabled():
+            return run_legacy_ipc_prompt_no_wait(prompt, target_thread_id)
+        return 1, f"ERROR: resident app-server transport failed: {exc}"
+
+
+def run_app_server_steering_prompt(prompt: str, target_thread_id: str | None) -> SteeringPromptResult:
+    target_thread_id, _target_ref = resolve_target_ref(target_thread_id)
+    try:
+        result = app_server_transport.steer_or_start_no_wait(
+            app_server_transport.DEFAULT_CLIENT,
+            prompt,
+            target_thread_id,
+            bridge_module=bridge,
+            confirm_timeout_sec=get_steering_delivery_confirm_timeout(),
+        )
+    except Exception as exc:
+        log_line(
+            f"app_server_steering_failed target={target_thread_id or '-'} "
+            f"fallback={app_server_legacy_fallback_enabled()} error={str(exc)[:300]}"
+        )
+        if app_server_legacy_fallback_enabled():
+            return discord_steering.run_steering_prompt(
+                prompt,
+                target_thread_id,
+                bridge_module=bridge,
+                resolve_target_ref_func=resolve_target_ref,
+                run_ask_func=run_ask,
+                get_steering_delivery_confirm_timeout_func=get_steering_delivery_confirm_timeout,
+                log_func=log_line,
+                format_log_text_len_func=format_log_text_len,
+            )
+        return SteeringPromptResult(
+            1,
+            f"ERROR: resident app-server transport failed: {exc}",
+            target_thread_id=target_thread_id,
+            target_ref=_target_ref or "-",
+        )
+    return SteeringPromptResult(
+        result.exit_code,
+        result.output,
+        target_thread_id=result.thread_id,
+        target_ref=result.target_ref,
+        session_path=result.session_path,
+        start_offset=result.start_offset,
+        delivery_pending=result.delivery_pending,
+    )
+
+
+
 def should_retry_ask_with_ui(exit_code: int, output: str) -> bool:
     if exit_code == 0:
         return False
@@ -1072,11 +1287,62 @@ def build_ui_ask_argv(
     return argv
 
 
+def submit_app_server_approval_reply(target_thread_id: str, answer: str) -> tuple[int, str] | None:
+    if not app_server_transport_enabled():
+        return None
+    pending_request = app_server_transport.DEFAULT_CLIENT.get_latest_pending_approval_request(
+        target_thread_id
+    )
+    if pending_request is None:
+        return None
+    try:
+        result = app_server_transport.DEFAULT_CLIENT.reply_to_pending_approval(
+            target_thread_id,
+            answer,
+        )
+    except Exception as exc:
+        return 1, f"ERROR: resident app-server approval writeback failed: {exc}"
+    lines = [
+        f"thread_id: {target_thread_id}",
+        f"decision_action: {result.get('decision_action') or '-'}",
+        f"request_kind: {result.get('request_kind') or '-'}",
+        f"request_id: {result.get('request_id') or '-'}",
+        "transport: resident-app-server approval",
+    ]
+    return 0, "\n".join(lines)
+
+
 def submit_approval_reply(target_thread_id: str, answer: str) -> tuple[int, str]:
+    app_server_result = submit_app_server_approval_reply(target_thread_id, answer)
+    if app_server_result is not None:
+        return app_server_result
     return run_bridge_command(["approval_reply", answer, target_thread_id])
 
 
 def submit_input_reply(target_thread_id: str, answer: str) -> tuple[int, str]:
+    if app_server_transport_enabled():
+        pending_input = app_server_transport.DEFAULT_CLIENT.get_latest_pending_input_request(
+            target_thread_id
+        )
+        if pending_input is not None:
+            try:
+                result = app_server_transport.DEFAULT_CLIENT.reply_to_pending_input(
+                    target_thread_id,
+                    answer,
+                )
+            except Exception as exc:
+                return 1, f"ERROR: resident app-server input writeback failed: {exc}"
+            lines = [
+                f"thread_id: {target_thread_id}",
+                f"request_id: {result.get('request_id') or '-'}",
+                "transport: resident-app-server input",
+            ]
+            answers_by_question = result.get("answers_by_question") or {}
+            if isinstance(answers_by_question, dict):
+                for question_id, values in answers_by_question.items():
+                    if isinstance(values, list):
+                        lines.append(f"{question_id}: {' | '.join(str(value) for value in values)}")
+            return 0, "\n".join(lines)
     try:
         thread = bridge.choose_thread(target_thread_id, None)
         result = bridge.reply_to_pending_user_input(thread, answer, timeout_sec=8.0)
@@ -1146,6 +1412,8 @@ def format_pending_ipc_ask_output(output: str) -> str:
 
 
 def run_steering_prompt(prompt: str, target_thread_id: str | None) -> SteeringPromptResult:
+    if app_server_transport_enabled():
+        return run_app_server_steering_prompt(prompt, target_thread_id)
     return discord_steering.run_steering_prompt(
         prompt,
         target_thread_id,
@@ -1202,13 +1470,64 @@ def run_ask_stream(
     wait: bool = True,
     target_thread_id: str | None = None,
 ) -> tuple[int, str]:
+    if app_server_transport_enabled():
+        try:
+            result = app_server_transport.start_turn_no_wait(
+                app_server_transport.DEFAULT_CLIENT,
+                prompt,
+                target_thread_id,
+                bridge_module=bridge,
+                confirm_timeout_sec=6.0,
+            )
+        except Exception as exc:
+            log_line(
+                f"app_server_stream_prompt_failed target={target_thread_id or '-'} "
+                f"fallback={app_server_legacy_fallback_enabled()} error={str(exc)[:300]}"
+            )
+            if not app_server_legacy_fallback_enabled():
+                relay.finish()
+                return 1, f"ERROR: resident app-server transport failed: {exc}"
+            return discord_stream.run_ask_stream(
+                prompt,
+                relay,
+                force_while_busy=force_while_busy,
+                wait=wait,
+                target_thread_id=target_thread_id,
+                use_sidecar=False,
+                no_fallback=True,
+                allow_ui_fallback=False,
+                run_bridge_command_stream_func=run_bridge_command_stream,
+                should_retry_ask_with_ui_func=should_retry_ask_with_ui,
+                build_ui_ask_argv_func=build_ui_ask_argv,
+                ui_fallback_lock=UI_FALLBACK_LOCK,
+            )
+        if (
+            result.exit_code == 0
+            and wait
+            and result.session_path
+            and result.start_offset is not None
+        ):
+            watch_result = SteeringPromptResult(
+                result.exit_code,
+                result.output,
+                target_thread_id=result.thread_id,
+                target_ref=result.target_ref,
+                session_path=result.session_path,
+                start_offset=result.start_offset,
+                delivery_pending=result.delivery_pending,
+            )
+            return run_steering_watch_stream(watch_result, relay)
+        relay.finish()
+        return result.exit_code, result.output
     return discord_stream.run_ask_stream(
         prompt,
         relay,
         force_while_busy=force_while_busy,
         wait=wait,
         target_thread_id=target_thread_id,
-        use_sidecar=target_thread_id is not None,
+        use_sidecar=False,
+        no_fallback=True,
+        allow_ui_fallback=False,
         run_bridge_command_stream_func=run_bridge_command_stream,
         should_retry_ask_with_ui_func=should_retry_ask_with_ui,
         build_ui_ask_argv_func=build_ui_ask_argv,
@@ -1551,6 +1870,12 @@ class CodexDiscordBot(discord.Client):
 
     async def setup_hook(self) -> None:
         log_line("setup_hook_start")
+        if app_server_transport_enabled():
+            try:
+                await asyncio.to_thread(app_server_transport.DEFAULT_CLIENT.start)
+                log_line("setup_hook_app_server_transport_ready")
+            except Exception as exc:
+                log_line(f"setup_hook_app_server_transport_failed error={str(exc)[:300]}")
         register_commands(self)
         try:
             if self.guild_id:
@@ -1828,7 +2153,11 @@ class CodexDiscordBot(discord.Client):
                     options,
                 )
                 return
-        await send_chunks(channel, format_session_mirror_text(item))
+        await send_chunks(
+            channel,
+            format_session_mirror_text(item),
+            context=f"session_mirror:{kind or 'unknown'}:{target_thread_id}",
+        )
 
     async def mirror_session_target(self, target: dict[str, object]) -> None:
         codex_thread_id = str(target.get("codex_thread_id") or "")
@@ -1850,25 +2179,55 @@ class CodexDiscordBot(discord.Client):
             )
             return
         context_usage = await asyncio.to_thread(bridge.get_thread_context_usage, codex_thread)
-        if bridge.should_recommend_archive(codex_thread, context_usage):
+        active_output_target = is_active_session_mirror_output_target(codex_thread_id)
+        archive_recommended = bridge.should_recommend_archive(codex_thread, context_usage)
+        if archive_recommended and not active_output_target:
             if codex_thread_id not in self._session_mirror_archive_skip_logged:
                 self._session_mirror_archive_skip_logged.add(codex_thread_id)
-                log_line(f"session_mirror_skipped target={codex_thread_id} reason=archive_recommended")
-            return
-        self._session_mirror_archive_skip_logged.discard(codex_thread_id)
+                log_line(f"session_mirror_archive_tail_only target={codex_thread_id} reason=archive_recommended")
+        if active_output_target and codex_thread_id in self._session_mirror_archive_skip_logged:
+            log_line(f"session_mirror_archive_skip_overridden target={codex_thread_id} reason=active_ask")
+        if active_output_target or not archive_recommended:
+            self._session_mirror_archive_skip_logged.discard(codex_thread_id)
         session_path = Path(codex_thread.rollout_path)
         if not session_path.exists():
             return
 
         rollout_path = str(session_path)
-        initial_cursor = session_path.stat().st_size
-        cursor = await asyncio.to_thread(
-            get_or_init_session_mirror_cursor,
-            codex_thread_id,
-            rollout_path,
-            initial_cursor,
-        )
-        events, next_cursor = await asyncio.to_thread(bridge.read_new_session_events, session_path, cursor)
+        pending_cursor = is_pending_session_mirror_cursor_target(codex_thread_id)
+        initial_cursor = 0 if active_output_target and pending_cursor else session_path.stat().st_size
+        if active_output_target and pending_cursor:
+            await asyncio.to_thread(update_session_mirror_cursor, codex_thread_id, rollout_path, initial_cursor)
+            cursor = initial_cursor
+        else:
+            cursor = await asyncio.to_thread(
+                get_or_init_session_mirror_cursor,
+                codex_thread_id,
+                rollout_path,
+                initial_cursor,
+            )
+        if pending_cursor:
+            clear_pending_session_mirror_cursor_target(codex_thread_id)
+            log_line(
+                f"session_mirror_pending_cursor_initialized target={codex_thread_id} "
+                f"cursor={initial_cursor}"
+            )
+        archive_tail_only = archive_recommended and not active_output_target
+        if archive_tail_only:
+            max_events = get_session_mirror_archive_backlog_max_events()
+            events, next_cursor = await asyncio.to_thread(
+                bridge.read_new_session_events,
+                session_path,
+                cursor,
+                max_events=max_events or None,
+            )
+            if events:
+                log_line(
+                    f"session_mirror_archive_backlog_batch target={codex_thread_id} "
+                    f"events={len(events)} max_events={max_events or 'unlimited'}"
+                )
+        else:
+            events, next_cursor = await asyncio.to_thread(bridge.read_new_session_events, session_path, cursor)
         if not events:
             return
 
@@ -1887,9 +2246,11 @@ class CodexDiscordBot(discord.Client):
             return
         _resolved_thread_id, target_ref = resolve_target_ref(codex_thread_id)
         sent_count = 0
+        terminal_sent = False
         for item in items:
             digest = item.get("digest") or ""
-            if digest and not await asyncio.to_thread(claim_session_mirror_event, digest, codex_thread_id):
+            terminal_item = item.get("kind") in {"final", "aborted"}
+            if digest and await asyncio.to_thread(has_session_mirror_event, digest, codex_thread_id):
                 continue
             await self.send_session_mirror_item(
                 channel,  # type: ignore[arg-type]
@@ -1897,7 +2258,13 @@ class CodexDiscordBot(discord.Client):
                 target_thread_id=codex_thread_id,
                 target_ref=target_ref or codex_thread_id,
             )
+            if digest:
+                await asyncio.to_thread(claim_session_mirror_event, digest, codex_thread_id)
             sent_count += 1
+            if terminal_item:
+                terminal_sent = True
+        if terminal_sent:
+            deactivate_session_mirror_output_target(codex_thread_id)
         await asyncio.to_thread(update_session_mirror_cursor, codex_thread_id, rollout_path, next_cursor)
         if sent_count:
             log_line(
@@ -2105,6 +2472,17 @@ class CodexDiscordBot(discord.Client):
             content = (message.content or "").strip()
             target_thread_id = get_mirrored_codex_thread_id(message.channel.id)
             has_attachments = bool(getattr(message, "attachments", None))
+            if bot_bridge_mention and content.startswith("!"):
+                stripped_content, matched_bridge_mention = strip_required_plain_ask_mentions(
+                    content,
+                    get_bridge_mention_user_ids(self),
+                )
+                if matched_bridge_mention and stripped_content:
+                    content = stripped_content
+                    log_line(
+                        f"bot_bridge_prefix_mention_stripped chat={message.channel.id} "
+                        f"user={message.author.id}"
+                    )
             if not content and has_attachments:
                 content = "Please inspect the attached Discord file(s)."
             if not content:
@@ -2194,9 +2572,68 @@ class CodexDiscordBot(discord.Client):
                 log_line("on_message_error_report_failed\n" + traceback.format_exc())
 
 
-async def send_chunks(target: discord.abc.Messageable, text: str) -> None:
-    for chunk in split_message(text):
-        await target.send(chunk)
+def get_messageable_id(target: object) -> str:
+    value = getattr(target, "id", None)
+    return str(value) if value is not None else "-"
+
+
+def build_delivery_id(text: str) -> str:
+    return hashlib.blake2s(str(text or "").encode("utf-8", errors="replace"), digest_size=4).hexdigest()
+
+
+def split_delivery_chunks(text: str) -> list[str]:
+    text = str(text or "")
+    if not DISCORD_CHUNK_MARKERS_ENABLED:
+        return split_message(text)
+    marker_budget = 32
+    chunks = split_message(text, limit=max(1, DISCORD_MAX_LEN - marker_budget))
+    if len(chunks) <= 1:
+        return chunks
+    total = len(chunks)
+    return [f"[{index}/{total}]\n{chunk}" for index, chunk in enumerate(chunks, start=1)]
+
+
+async def send_chunks(target: discord.abc.Messageable, text: str, *, context: str = "send_chunks") -> int:
+    chunks = split_delivery_chunks(text)
+    delivery_id = build_delivery_id(text)
+    target_id = get_messageable_id(target)
+    safe_context = format_discord_command_label(context, limit=120)
+    log_line(
+        f"discord_delivery_start id={delivery_id} context={safe_context} "
+        f"target={target_id} chunks={len(chunks)} text_len={format_log_text_len(text)}"
+    )
+    for index, chunk in enumerate(chunks, start=1):
+        sent_message = None
+        attempts = len(DISCORD_SEND_RETRY_DELAYS_SECONDS) + 1
+        for attempt in range(1, attempts + 1):
+            try:
+                sent_message = await target.send(chunk)
+                break
+            except Exception as exc:
+                if attempt >= attempts:
+                    log_line(
+                        f"discord_delivery_failed id={delivery_id} context={safe_context} "
+                        f"target={target_id} part={index}/{len(chunks)} attempt={attempt} "
+                        f"chunk_len={format_log_text_len(chunk)} error_type={type(exc).__name__}"
+                    )
+                    raise
+                log_line(
+                    f"discord_delivery_retry id={delivery_id} context={safe_context} "
+                    f"target={target_id} part={index}/{len(chunks)} attempt={attempt} "
+                    f"chunk_len={format_log_text_len(chunk)} error_type={type(exc).__name__}"
+                )
+                await asyncio.sleep(DISCORD_SEND_RETRY_DELAYS_SECONDS[attempt - 1])
+        log_line(
+            f"discord_delivery_chunk_sent id={delivery_id} context={safe_context} "
+            f"target={target_id} part={index}/{len(chunks)} "
+            f"message={getattr(sent_message, 'id', '-') or '-'} "
+            f"chunk_len={format_log_text_len(chunk)}"
+        )
+    log_line(
+        f"discord_delivery_sent id={delivery_id} context={safe_context} "
+        f"target={target_id} chunks={len(chunks)}"
+    )
+    return len(chunks)
 
 
 @asynccontextmanager
@@ -2719,10 +3156,23 @@ def collect_session_mirror_items(
         if event_type == "event_msg":
             if payload_type == "agent_message":
                 phase = str(payload.get("phase") or "commentary")
-                if phase == "final_answer":
-                    continue
                 text = str(payload.get("message") or "").strip()
                 if not text:
+                    continue
+                if phase == "final_answer":
+                    if has_recent_session_text(seen_agent_messages, text):
+                        continue
+                    remember_recent_session_text(seen_agent_messages, text)
+                    items.append(
+                        make_session_mirror_item(
+                            codex_thread_id,
+                            event,
+                            kind="final",
+                            role="assistant",
+                            phase=phase,
+                            text=text,
+                        )
+                    )
                     continue
                 remember_recent_session_text(seen_agent_messages, text)
                 items.append(
@@ -2827,6 +3277,9 @@ def collect_session_mirror_items(
             )
             continue
         if role == "assistant" and phase == "final_answer":
+            if has_recent_session_text(seen_agent_messages, text):
+                continue
+            remember_recent_session_text(seen_agent_messages, text)
             items.append(
                 make_session_mirror_item(
                     codex_thread_id,
@@ -3186,7 +3639,12 @@ async def handle_persistent_busy_choice_interaction(
                 ephemeral=True,
             )
             return True
-        delegate_to_session_mirror = await prepare_session_mirror_delegation(channel, target_thread_id)
+        delegate_to_session_mirror = await prepare_mapped_session_mirror_output(
+            channel,
+            target_thread_id,
+        )
+        if not delegate_to_session_mirror:
+            delegate_to_session_mirror = await prepare_session_mirror_delegation(channel, target_thread_id)
         await send_steering_start_ack(channel, prompt, target_thread_id)
         started_at = time.monotonic()
         async with channel_typing(channel, context="persistent_steer_now"):
@@ -3350,14 +3808,19 @@ async def run_bridge_and_send(
 ) -> tuple[int, str]:
     exit_code, output = await asyncio.to_thread(run_bridge_command, argv)
     prefix = title if exit_code == 0 else f"{failure_title or title} failed (exit {exit_code})"
-    chunks = split_message(f"{prefix}\n\n{output or '(no output)'}")
+    text = f"{prefix}\n\n{output or '(no output)'}"
+    chunks = split_delivery_chunks(text)
     log_line(
         f"bridge_command_done title={title!r} exit={exit_code} "
         f"chunks={len(chunks)} argv={format_log_argv(argv)}"
     )
-    for chunk in chunks:
-        await target.send(chunk)
+    sent_chunks = await send_chunks(target, text, context=f"bridge_command:{title}")
     log_line(f"bridge_command_sent title={title!r} exit={exit_code} chunks={len(chunks)}")
+    if sent_chunks != len(chunks):
+        log_line(
+            f"bridge_command_chunk_count_changed title={title!r} "
+            f"planned={len(chunks)} sent={sent_chunks}"
+        )
     return exit_code, output
 
 
@@ -4963,6 +5426,54 @@ async def build_runners_message() -> str:
     )
 
 
+def resolve_queue_command_target(channel_id: int | None, ref: str | None) -> tuple[str | None, str]:
+    normalized = str(ref or "").strip()
+    if normalized:
+        if normalized.lower() in {"selected", "current"}:
+            return None, "selected"
+        thread = bridge.resolve_thread_ref(normalized)
+        _resolved_thread_id, target_ref = resolve_target_ref(thread.id)
+        return thread.id, target_ref or normalized
+    target_thread_id = get_mirrored_codex_thread_id(channel_id)
+    if target_thread_id:
+        _resolved_thread_id, target_ref = resolve_target_ref(target_thread_id)
+        return target_thread_id, target_ref or target_thread_id
+    return None, "selected"
+
+
+def build_retract_message(result: dict[str, object], target_ref: str) -> str:
+    removed = int(result.get("removed") or 0)
+    remaining = int(result.get("remaining") or 0)
+    active = bool(result.get("active"))
+    if removed:
+        return f"Retracted your latest queued ask for `{target_ref}`. remaining_queued: {remaining}"
+    if active:
+        return f"No queued ask from you for `{target_ref}`. The active ask cannot be retracted from Discord."
+    return f"No queued ask from you for `{target_ref}`."
+
+
+async def retract_queued_ask_for_request(
+    *,
+    channel_id: int | None,
+    user_id: int | None,
+    ref: str | None,
+) -> tuple[str, dict[str, object]]:
+    target_thread_id, target_ref = resolve_queue_command_target(channel_id, ref)
+    result = await retract_thread_ask(
+        target_thread_id,
+        channel_id=channel_id,
+        owner_user_id=user_id,
+    )
+    log_line(
+        f"queue_retract user={user_id or '-'} target={target_thread_id or '-'} "
+        f"target_ref={format_discord_command_label(target_ref, limit=80)} "
+        f"removed={int(result.get('removed') or 0)} "
+        f"remaining={int(result.get('remaining') or 0)} "
+        f"active={bool(result.get('active'))}"
+    )
+    return build_retract_message(result, target_ref), result
+
+
 def resolve_target_ref(target_thread_id: str | None) -> tuple[str | None, str]:
     return discord_thread_state.resolve_target_ref(
         target_thread_id,
@@ -4972,7 +5483,7 @@ def resolve_target_ref(target_thread_id: str | None) -> tuple[str | None, str]:
 
 
 def get_interactive_state_for_thread(target_thread_id: str | None) -> tuple[str, str | None, str]:
-    return discord_thread_state.get_interactive_state_for_thread(
+    state, resolved_thread_id, target_ref = discord_thread_state.get_interactive_state_for_thread(
         target_thread_id,
         bridge_module=bridge,
         resolve_target_ref_func=resolve_target_ref,
@@ -4981,15 +5492,41 @@ def get_interactive_state_for_thread(target_thread_id: str | None) -> tuple[str,
         state_input=INTERACTIVE_STATE_INPUT,
         state_approval=INTERACTIVE_STATE_APPROVAL,
     )
+    if state == INTERACTIVE_STATE_NONE and app_server_transport_enabled():
+        app_server_target_id = resolved_thread_id or target_thread_id
+        if app_server_target_id:
+            try:
+                pending_request = app_server_transport.DEFAULT_CLIENT.get_latest_pending_approval_request(
+                    app_server_target_id
+                )
+            except Exception:
+                pending_request = None
+            if pending_request is not None:
+                _resolved, resolved_ref = resolve_target_ref(app_server_target_id)
+                return INTERACTIVE_STATE_APPROVAL, app_server_target_id, resolved_ref or target_ref
+            try:
+                pending_input = app_server_transport.DEFAULT_CLIENT.get_latest_pending_input_request(
+                    app_server_target_id
+                )
+            except Exception:
+                pending_input = None
+            if pending_input is not None:
+                _resolved, resolved_ref = resolve_target_ref(app_server_target_id)
+                return INTERACTIVE_STATE_INPUT, app_server_target_id, resolved_ref or target_ref
+    return state, resolved_thread_id, target_ref
 
 
 def get_busy_state_for_thread(target_thread_id: str | None) -> tuple[str, str | None, str]:
-    return discord_thread_state.get_busy_state_for_thread(
+    state, resolved_thread_id, target_ref = discord_thread_state.get_busy_state_for_thread(
         target_thread_id,
         bridge_module=bridge,
         resolve_target_ref_func=resolve_target_ref,
         log_func=log_line,
     )
+    active_target_id = resolved_thread_id or target_thread_id
+    if state == "idle" and is_active_session_mirror_output_target(active_target_id):
+        return "busy", active_target_id, target_ref
+    return state, resolved_thread_id, target_ref
 
 
 def normalize_runner_key(target_thread_id: str | None) -> str:
@@ -5085,6 +5622,8 @@ async def get_thread_runner(target_thread_id: str | None) -> dict[str, object]:
 
 async def is_thread_runner_busy(target_thread_id: str | None) -> bool:
     key = normalize_runner_key(target_thread_id)
+    if is_active_session_mirror_output_target(target_thread_id):
+        return True
     async with ACTIVE_DIRECT_ASK_LOCK:
         if key in ACTIVE_DIRECT_ASK_TARGET_KEYS:
             return True
@@ -5151,6 +5690,22 @@ async def enqueue_thread_ask(
     )
 
 
+async def retract_thread_ask(
+    target_thread_id: str | None,
+    *,
+    channel_id: int | None = None,
+    owner_user_id: int | None = None,
+) -> dict[str, object]:
+    return await discord_runner.retract_thread_ask(
+        target_thread_id,
+        channel_id=channel_id,
+        owner_user_id=owner_user_id,
+        runners=THREAD_RUNNERS,
+        runners_lock=THREAD_RUNNERS_LOCK,
+        normalize_runner_key_func=normalize_runner_key,
+    )
+
+
 async def report_thread_runner_job_failed(job: object, target_thread_id: str | None) -> None:
     await discord_runner.report_thread_runner_job_failed(
         job,
@@ -5203,6 +5758,35 @@ async def prepare_session_mirror_delegation(channel: object, target_thread_id: s
     if delegate_to_session_mirror:
         await asyncio.to_thread(prime_session_mirror_cursor_for_target, target_thread_id)
     return delegate_to_session_mirror
+
+
+async def prepare_mapped_session_mirror_output(channel: object, target_thread_id: str | None) -> bool:
+    if not discord_session_mirror_enabled() or not target_thread_id:
+        return False
+    channel_id = getattr(channel, "id", None)
+    try:
+        if get_mirrored_codex_thread_id(channel_id) != target_thread_id:
+            log_line(
+                f"session_mirror_output_prepare_skipped target={target_thread_id} "
+                f"reason=channel_not_mapped channel={channel_id or '-'}"
+            )
+            return False
+    except Exception as exc:
+        log_line(
+            f"session_mirror_output_prepare_failed target={target_thread_id} "
+            f"reason=mapping_unavailable channel={channel_id or '-'} error_type={type(exc).__name__}"
+        )
+        return False
+    cursor = await asyncio.to_thread(prime_session_mirror_cursor_for_target, target_thread_id)
+    if cursor is None:
+        if await asyncio.to_thread(session_mirror_rollout_path_missing, target_thread_id):
+            activate_pending_session_mirror_output_target(target_thread_id)
+            log_line(f"session_mirror_output_pending target={target_thread_id} reason=session_missing")
+            return True
+        log_line(f"session_mirror_output_prepare_failed target={target_thread_id} reason=cursor_unavailable")
+        return False
+    activate_session_mirror_output_target(target_thread_id)
+    return True
 
 
 async def run_delayed_prompt_via_watch(
@@ -5435,6 +6019,33 @@ async def _run_prompt_and_send_unlocked(
     if not ack_sent:
         await channel.send(build_ask_start_message(prompt, queued=queued))
     target_thread_id, target_ref = resolve_target_ref(target_thread_id)
+    if await prepare_mapped_session_mirror_output(channel, target_thread_id):
+        async with channel_typing(channel, context="ask_ipc_no_wait"):
+            exit_code, output = await asyncio.to_thread(
+                run_ipc_prompt_no_wait,
+                prompt,
+                target_thread_id,
+            )
+        log_line(
+            f"ask_ipc_no_wait_done exit={exit_code} target={target_thread_id or '-'} "
+            f"output_len={format_log_text_len(output)}"
+        )
+        if exit_code == 0:
+            return
+        if is_ipc_delivery_confirmation_timeout(output):
+            await send_chunks(channel, format_pending_ipc_ask_output(output))
+            return
+        deactivate_session_mirror_output_target(target_thread_id)
+        if is_selected_thread_busy_error(exit_code, output):
+            if await send_codex_app_menu_if_available(
+                channel,
+                target_thread_id,
+                output,
+                reason="ask_ipc_no_wait_busy",
+            ):
+                return
+        await send_chunks(channel, f"Ask failed (IPC exit {exit_code})\n\n{output or '(no output)'}")
+        return
     delegate_to_session_mirror = await prepare_session_mirror_delegation(channel, target_thread_id)
     _delivery_target_thread, delivery_recent_offsets = await asyncio.to_thread(
         snapshot_ask_prompt_delivery_state,
@@ -6217,10 +6828,15 @@ class BusyChoiceView(discord.ui.View):
                 ephemeral=True,
             )
             return
-        delegate_to_session_mirror = await prepare_session_mirror_delegation(
+        delegate_to_session_mirror = await prepare_mapped_session_mirror_output(
             self.message.channel,
             self.target_thread_id,
         )
+        if not delegate_to_session_mirror:
+            delegate_to_session_mirror = await prepare_session_mirror_delegation(
+                self.message.channel,
+                self.target_thread_id,
+            )
         await send_steering_start_ack(self.message.channel, self.prompt, self.target_thread_id)
         started_at = time.monotonic()
         async with channel_typing(self.message.channel, context="steer_now"):
@@ -6473,7 +7089,9 @@ async def handle_prefix_command(bot: CodexDiscordBot, message: discord.Message, 
             f"prefix_steer channel={message.channel.id} user={message.author.id} "
             f"target={target_thread_id} prompt_len={format_log_text_len(arg)}"
         )
-        delegate_to_session_mirror = await prepare_session_mirror_delegation(message.channel, target_thread_id)
+        delegate_to_session_mirror = await prepare_mapped_session_mirror_output(message.channel, target_thread_id)
+        if not delegate_to_session_mirror:
+            delegate_to_session_mirror = await prepare_session_mirror_delegation(message.channel, target_thread_id)
         started_at = time.monotonic()
         async with channel_typing(message.channel, context="prefix_steer"):
             steering_result = await asyncio.to_thread(run_steering_prompt, arg, target_thread_id)
@@ -6544,6 +7162,19 @@ async def handle_prefix_command(bot: CodexDiscordBot, message: discord.Message, 
         return
     if command in {"runners", "queues"}:
         await send_chunks(message.channel, await build_runners_message())
+        return
+    if command in {"retract", "unqueue"}:
+        try:
+            response, _result = await retract_queued_ask_for_request(
+                channel_id=message.channel.id,
+                user_id=message.author.id,
+                ref=arg or None,
+            )
+        except Exception as exc:
+            log_line("queue_retract_failed\n" + traceback.format_exc())
+            await send_chunks(message.channel, f"Queue retract failed\n\nERROR: {exc}")
+            return
+        await send_chunks(message.channel, response)
         return
     if command in {"bridge_sync", "resync", "sync"} or command == "bridge":
         bridge_sync_action = discord_commands.parse_bridge_sync_limit(command, arg)
@@ -6786,6 +7417,19 @@ def register_commands(bot: CodexDiscordBot) -> None:
         await interaction.response.defer(thinking=True)
         await send_interaction_chunks(interaction, await build_runners_message(), title="Runners")
 
+    @bot.tree.command(name="retract", description="Remove your latest queued ask for this Codex thread.")
+    async def slash_retract(interaction: discord.Interaction, ref: str = "") -> None:
+        if not check_interaction_allowed(bot, interaction):
+            await interaction.response.send_message("This channel/user is not allowed.", ephemeral=True)
+            return
+        await interaction.response.defer(thinking=True)
+        response, _result = await retract_queued_ask_for_request(
+            channel_id=interaction.channel_id,
+            user_id=interaction.user.id,
+            ref=ref or None,
+        )
+        await send_interaction_chunks(interaction, response, title="Retract")
+
     @bot.tree.command(name="new", description="Create a new Codex thread with the first prompt.")
     async def slash_new(interaction: discord.Interaction, prompt: str) -> None:
         if not check_interaction_allowed(bot, interaction):
@@ -6933,7 +7577,10 @@ def main() -> int:
             f"plain_ask_context_fallback={plain_ask_context_fallback_enabled()} "
             f"qa_commands={discord_qa_commands_enabled()}"
         )
-        bot.run(token, log_handler=None)
+        try:
+            bot.run(token, log_handler=None)
+        finally:
+            app_server_transport.DEFAULT_CLIENT.close()
     return 0
 
 

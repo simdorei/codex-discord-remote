@@ -487,6 +487,25 @@ def get_or_init_session_mirror_cursor(
     return int(initial_cursor)
 
 
+def get_session_mirror_offset(
+    db_path: Path,
+    codex_thread_id: str,
+) -> tuple[str, int, float] | None:
+    init_mirror_db(db_path)
+    with sqlite3.connect(db_path) as conn:
+        row = conn.execute(
+            """
+            SELECT rollout_path, cursor, updated_at
+            FROM codex_session_mirror_offsets
+            WHERE codex_thread_id = ?
+            """,
+            (str(codex_thread_id),),
+        ).fetchone()
+    if not row:
+        return None
+    return str(row[0] or ""), int(row[1] or 0), float(row[2] or 0.0)
+
+
 def update_session_mirror_cursor(
     db_path: Path,
     codex_thread_id: str,
@@ -529,6 +548,24 @@ def claim_session_mirror_event(
             (str(event_digest), str(codex_thread_id), current),
         )
         return result.rowcount == 1
+
+
+def has_session_mirror_event(
+    db_path: Path,
+    event_digest: str,
+    codex_thread_id: str,
+) -> bool:
+    init_mirror_db(db_path)
+    with sqlite3.connect(db_path) as conn:
+        row = conn.execute(
+            """
+            SELECT 1
+            FROM codex_session_mirror_events
+            WHERE event_digest = ? AND codex_thread_id = ?
+            """,
+            (str(event_digest), str(codex_thread_id)),
+        ).fetchone()
+    return row is not None
 
 
 def cleanup_session_mirror_events(

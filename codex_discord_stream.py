@@ -240,6 +240,8 @@ def build_stream_ask_argv(
     wait: bool = True,
     target_thread_id: str | None = None,
     use_sidecar: bool = False,
+    ipc_recover_ui: bool = False,
+    no_fallback: bool = False,
 ) -> list[str]:
     argv = [
         "ask",
@@ -250,8 +252,10 @@ def build_stream_ask_argv(
         "--timeout",
         "0",
     ]
-    if not use_sidecar:
+    if not use_sidecar and ipc_recover_ui:
         argv.insert(2, "--ipc-recover-ui")
+    if not use_sidecar and no_fallback:
+        argv.append("--no-fallback")
     if target_thread_id:
         argv.extend(["--thread-id", target_thread_id])
     if force_while_busy:
@@ -279,6 +283,9 @@ def run_ask_stream(
     wait: bool = True,
     target_thread_id: str | None = None,
     use_sidecar: bool = False,
+    ipc_recover_ui: bool = False,
+    no_fallback: bool = False,
+    allow_ui_fallback: bool = False,
     run_bridge_command_stream_func,
     should_retry_ask_with_ui_func,
     build_ui_ask_argv_func,
@@ -290,9 +297,11 @@ def run_ask_stream(
         wait=wait,
         target_thread_id=target_thread_id,
         use_sidecar=use_sidecar,
+        ipc_recover_ui=ipc_recover_ui,
+        no_fallback=no_fallback,
     )
     exit_code, output = run_bridge_command_stream_func(argv, relay.feed_line)
-    if not use_sidecar and should_retry_ask_with_ui_func(exit_code, output):
+    if allow_ui_fallback and not use_sidecar and should_retry_ask_with_ui_func(exit_code, output):
         relay.feed_line("[commentary]")
         relay.feed_line("IPC attach failed for this Codex thread. Retrying through the Codex UI.")
         relay.feed_line("[ready]")

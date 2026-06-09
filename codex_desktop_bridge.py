@@ -1639,11 +1639,17 @@ def describe_thread_busy_state(state: str) -> str:
     )
 
 
-def read_new_session_events(session_path: Path, start_offset: int) -> tuple[list[dict], int]:
+def read_new_session_events(
+    session_path: Path,
+    start_offset: int,
+    *,
+    max_events: int | None = None,
+) -> tuple[list[dict], int]:
     events = []
     if not session_path.exists():
         return events, start_offset
 
+    event_limit = max(0, int(max_events or 0))
     with session_path.open("r", encoding="utf-8") as handle:
         handle.seek(start_offset)
         while True:
@@ -1661,6 +1667,8 @@ def read_new_session_events(session_path: Path, start_offset: int) -> tuple[list
             except json.JSONDecodeError:
                 handle.seek(pos)
                 return events, pos
+            if event_limit and len(events) >= event_limit:
+                return events, handle.tell()
 
 
 def _get_last_win_error_message() -> str:
@@ -4021,14 +4029,21 @@ if (-not $target) {
   exit 6
 }
 
-$buttonCondition = New-Object System.Windows.Automation.PropertyCondition(
-  [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
-  [System.Windows.Automation.ControlType]::Button
-)
-$clickTarget = $target.FindFirst([System.Windows.Automation.TreeScope]::Descendants, $buttonCondition)
-if (-not $clickTarget) { $clickTarget = $target }
+$clickTarget = $target
+$activated = Invoke-Or-Click $clickTarget
+if (-not $activated) {
+  $buttonCondition = New-Object System.Windows.Automation.PropertyCondition(
+    [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
+    [System.Windows.Automation.ControlType]::Button
+  )
+  $buttonTarget = $target.FindFirst([System.Windows.Automation.TreeScope]::Descendants, $buttonCondition)
+  if ($buttonTarget) {
+    $clickTarget = $buttonTarget
+    $activated = Invoke-Or-Click $clickTarget
+  }
+}
 
-if (-not (Invoke-Or-Click $clickTarget)) {
+if (-not $activated) {
   Write-Output "ACTIVATE_FAILED:$targetThread"
   exit 7
 }
@@ -4245,6 +4260,45 @@ function Get-VisibleSidebarNames {
   return ($names -join ' | ')
 }
 
+function Find-SidebarToggleButton {
+  param($Elements, $WindowRect)
+  foreach ($el in $Elements) {
+    if ($el.Current.ControlType.ProgrammaticName -ne 'ControlType.Button') { continue }
+    $name = Normalize-Name $el.Current.Name
+    if (-not $name) { continue }
+    if (-not ($name -match '(?i)sidebar|사이드바')) { continue }
+    try {
+      $rect = $el.Current.BoundingRectangle
+      if ($rect.Left -gt ($WindowRect.Left + 72)) { continue }
+      if ($rect.Top -gt ($WindowRect.Top + 48)) { continue }
+      if ($rect.Width -le 1 -or $rect.Height -le 1) { continue }
+      return $el
+    } catch {}
+  }
+  return $null
+}
+
+function SidebarToggleLooksClosed {
+  param([string]$Name)
+  if (-not $Name) { return $false }
+  if ($Name -match '(?i)(show|open).{0,24}sidebar|sidebar.{0,24}(show|open)') { return $true }
+  if ($Name -match '사이드바\s*(보기|열기)') { return $true }
+  return $false
+}
+
+function Ensure-SidebarOpen {
+  param($Window, $Elements, $WindowRect)
+  $toggle = Find-SidebarToggleButton $Elements $WindowRect
+  if (-not $toggle) { return $Elements }
+  $name = Normalize-Name $toggle.Current.Name
+  if (-not (SidebarToggleLooksClosed $name)) { return $Elements }
+  if (Invoke-Or-Click $toggle) {
+    Start-Sleep -Milliseconds 420
+    return Refresh-AllElements $Window
+  }
+  return $Elements
+}
+
 function Has-TerminalTabs {
   param($Elements)
   foreach ($el in $Elements) {
@@ -4314,12 +4368,14 @@ function Stabilize-Ui {
     Start-Sleep -Milliseconds 120
   }
   $Elements = Refresh-AllElements $Window
+  $Elements = Ensure-SidebarOpen $Window $Elements $WindowRect
   $sidebarNames = Get-VisibleSidebarNames $Elements $WindowRect
 
   if ((-not $sidebarNames) -and (Has-TerminalTabs $Elements)) {
     Send-Hotkey @(0x11, 0x4A)
     Start-Sleep -Milliseconds 350
     $Elements = Refresh-AllElements $Window
+    $Elements = Ensure-SidebarOpen $Window $Elements $WindowRect
     $sidebarNames = Get-VisibleSidebarNames $Elements $WindowRect
   }
 
@@ -4327,6 +4383,7 @@ function Stabilize-Ui {
     Send-Hotkey @(0x11, 0x42)
     Start-Sleep -Milliseconds 350
     $Elements = Refresh-AllElements $Window
+    $Elements = Ensure-SidebarOpen $Window $Elements $WindowRect
   }
 
   return $Elements
@@ -4585,6 +4642,27 @@ exit 5
     return None
 
 
+def wait_for_thread_activation(thread: ThreadInfo, thread_name: str, timeout_sec: float = 5.0) -> str | None:
+    deadline = time.time() + max(0.25, timeout_sec)
+    attempt = 0
+    while True:
+        header_verified = verify_active_thread_by_header(thread_name)
+        if header_verified:
+            return header_verified
+
+        verified_by = verify_active_thread(thread.id)
+        if verified_by:
+            return verified_by
+
+        now = time.time()
+        if now >= deadline:
+            return None
+
+        sleep_for = min(0.75, 0.2 + (attempt * 0.15), max(0.05, deadline - now))
+        time.sleep(sleep_for)
+        attempt += 1
+
+
 def activate_thread_in_ui(thread: ThreadInfo) -> str:
     ui_name_candidates = get_thread_ui_name_candidates(thread)
     for thread_name in ui_name_candidates:
@@ -4607,17 +4685,12 @@ def activate_thread_in_ui(thread: ThreadInfo) -> str:
             last_error = str(exc)
             continue
 
-        time.sleep(0.35)
-        header_verified = verify_active_thread_by_header(thread_name)
-        if header_verified:
-            return f"sidebar:{matched_label} [{header_verified}]"
-
-        verified_by = verify_active_thread(thread.id)
+        verified_by = wait_for_thread_activation(thread, thread_name, timeout_sec=5.0)
         if verified_by:
             return f"sidebar:{matched_label} [{verified_by}]"
 
         last_error = (
-            "Clicked the sidebar thread item, but the main Codex conversation header did not switch."
+            "Clicked the sidebar thread item, but the Codex UI did not confirm the active thread."
         )
 
     if ui_name_candidates:
@@ -5988,7 +6061,10 @@ def command_ask(args: argparse.Namespace) -> int:
                     allow_ui_recovery=args.ipc_recover_ui,
                 )
             except RuntimeError as exc:
-                if "IPC owner client for the selected thread was not discovered" not in str(exc):
+                if (
+                    getattr(args, "no_fallback", False)
+                    or "IPC owner client for the selected thread was not discovered" not in str(exc)
+                ):
                     raise
                 ipc_result = start_turn_via_sidecar(
                     thread,
@@ -6357,6 +6433,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="If background IPC cannot find the target thread owner, reactivate the thread in the Codex UI and retry.",
     )
     ask_parser.add_argument(
+        "--no-fallback",
+        action="store_true",
+        help="Do not fall back to sidecar or UI delivery after IPC transport failure.",
+    )
+    ask_parser.add_argument(
         "--switch-thread",
         dest="switch_thread",
         action="store_true",
@@ -6375,6 +6456,7 @@ def build_parser() -> argparse.ArgumentParser:
         ipc=True,
         sidecar=False,
         ipc_recover_ui=False,
+        no_fallback=False,
         switch_thread=False,
         stream=False,
         include_commentary=False,

@@ -105,6 +105,72 @@ async def enqueue_thread_ask(
     return queue.qsize()
 
 
+async def retract_thread_ask(
+    target_thread_id: str | None,
+    *,
+    channel_id: int | None = None,
+    owner_user_id: int | None = None,
+    runners: dict[str, dict[str, object]] = THREAD_RUNNERS,
+    runners_lock: object = THREAD_RUNNERS_LOCK,
+    normalize_runner_key_func=normalize_runner_key,
+) -> dict[str, object]:
+    key = normalize_runner_key_func(target_thread_id)
+
+    def matches(job: object) -> bool:
+        if not isinstance(job, dict):
+            return False
+        if channel_id is not None:
+            channel = job.get("channel")
+            if int(getattr(channel, "id", 0) or 0) != int(channel_id):
+                return False
+        if owner_user_id is not None:
+            source_message = job.get("source_message")
+            author = getattr(source_message, "author", None)
+            if int(getattr(author, "id", 0) or 0) != int(owner_user_id):
+                return False
+        return True
+
+    async with runners_lock:
+        runner = runners.get(key)
+        if runner is None:
+            return {"removed": 0, "remaining": 0, "active": False, "target_key": key}
+        queue = runner.get("queue")
+        if not isinstance(queue, asyncio.Queue):
+            return {
+                "removed": 0,
+                "remaining": 0,
+                "active": bool(runner.get("active")),
+                "target_key": key,
+            }
+
+        drained: list[object] = []
+        while True:
+            try:
+                drained.append(queue.get_nowait())
+            except asyncio.QueueEmpty:
+                break
+
+        remove_index = -1
+        for index, job in enumerate(drained):
+            if matches(job):
+                remove_index = index
+
+        removed = 0
+        for index, job in enumerate(drained):
+            queue.task_done()
+            if index == remove_index:
+                removed += 1
+                continue
+            queue.put_nowait(job)
+
+        return {
+            "removed": removed,
+            "remaining": queue.qsize(),
+            "active": bool(runner.get("active")),
+            "target_key": key,
+        }
+
+
 async def report_thread_runner_job_failed(
     job: object,
     target_thread_id: str | None,
