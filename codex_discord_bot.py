@@ -22,6 +22,7 @@ from types import SimpleNamespace
 import discord
 from discord import app_commands
 
+import codex_discord_app_server as discord_app_server
 import codex_app_server_transport as app_server_transport
 import codex_desktop_bridge as bridge
 import codex_discord_bridge_process as bridge_process
@@ -35,6 +36,7 @@ import codex_discord_mirror_status as discord_mirror_status
 import codex_discord_projects as discord_projects
 import codex_discord_runner as discord_runner
 import codex_discord_runtime as discord_runtime
+import codex_discord_session_mirror as discord_session_mirror
 import codex_discord_steering as discord_steering
 import codex_discord_store as discord_store
 import codex_discord_stream as discord_stream
@@ -93,17 +95,19 @@ MIRROR_DB_PATH = SCRIPT_DIR / "discord_mirror.sqlite"
 ATTACHMENT_DOWNLOAD_DIR = SCRIPT_DIR / "discord_attachments"
 THREAD_RUNNERS_LOCK = discord_runner.THREAD_RUNNERS_LOCK
 THREAD_RUNNERS = discord_runner.THREAD_RUNNERS
-STEERING_HANDOFFS: dict[str, float] = {}
-ACTIVE_DISCORD_RELAY_GENERATIONS: dict[str, int] = {}
-RECENT_DISCORD_ORIGIN_PROMPTS: dict[str, float] = {}
-ACTIVE_SESSION_MIRROR_OUTPUT_TARGETS: dict[str, float] = {}
-PENDING_SESSION_MIRROR_CURSOR_TARGETS: set[str] = set()
-CODEX_APP_TURN_CONDITION: asyncio.Condition | None = None
-CODEX_APP_ACTIVE_TARGET_KEY: str | None = None
-CODEX_APP_ACTIVE_TARGET_COUNT = 0
-ASK_DELIVERY_LOCKS: dict[str, asyncio.Lock] = {}
-ACTIVE_DIRECT_ASK_LOCK = asyncio.Lock()
-ACTIVE_DIRECT_ASK_TARGET_KEYS: set[str] = set()
+RUNTIME_STATE = discord_runtime.DiscordRuntimeState()
+SESSION_MIRROR_STATE = discord_session_mirror.SessionMirrorState()
+STEERING_HANDOFFS = RUNTIME_STATE.steering_handoffs
+ACTIVE_DISCORD_RELAY_GENERATIONS = RUNTIME_STATE.active_discord_relay_generations
+RECENT_DISCORD_ORIGIN_PROMPTS = RUNTIME_STATE.recent_discord_origin_prompts
+ACTIVE_SESSION_MIRROR_OUTPUT_TARGETS = SESSION_MIRROR_STATE.active_output_targets
+PENDING_SESSION_MIRROR_CURSOR_TARGETS = SESSION_MIRROR_STATE.pending_cursor_targets
+CODEX_APP_TURN_CONDITION = RUNTIME_STATE.codex_app_turn_condition
+CODEX_APP_ACTIVE_TARGET_KEY = RUNTIME_STATE.codex_app_active_target_key
+CODEX_APP_ACTIVE_TARGET_COUNT = RUNTIME_STATE.codex_app_active_target_count
+ASK_DELIVERY_LOCKS = RUNTIME_STATE.ask_delivery_locks
+ACTIVE_DIRECT_ASK_LOCK = RUNTIME_STATE.active_direct_ask_lock
+ACTIVE_DIRECT_ASK_TARGET_KEYS = RUNTIME_STATE.active_direct_ask_target_keys
 UI_FALLBACK_LOCK = threading.Lock()
 STREAM_REDIRECT_LOCK = threading.RLock()
 INTERACTIVE_INPUT_TAG = "[choice_required]"
@@ -182,6 +186,35 @@ DEFAULT_PLAIN_ASK_CONTEXT_KEYWORDS = (
 )
 
 app_server_transport.DEFAULT_CLIENT.log_func = log_line
+
+
+def get_session_mirror_state() -> discord_session_mirror.SessionMirrorState:
+    SESSION_MIRROR_STATE.active_output_targets = ACTIVE_SESSION_MIRROR_OUTPUT_TARGETS
+    SESSION_MIRROR_STATE.pending_cursor_targets = PENDING_SESSION_MIRROR_CURSOR_TARGETS
+    return SESSION_MIRROR_STATE
+
+
+def get_runtime_state() -> discord_runtime.DiscordRuntimeState:
+    RUNTIME_STATE.steering_handoffs = STEERING_HANDOFFS
+    RUNTIME_STATE.active_discord_relay_generations = ACTIVE_DISCORD_RELAY_GENERATIONS
+    RUNTIME_STATE.recent_discord_origin_prompts = RECENT_DISCORD_ORIGIN_PROMPTS
+    RUNTIME_STATE.ask_delivery_locks = ASK_DELIVERY_LOCKS
+    RUNTIME_STATE.active_direct_ask_lock = ACTIVE_DIRECT_ASK_LOCK
+    RUNTIME_STATE.active_direct_ask_target_keys = ACTIVE_DIRECT_ASK_TARGET_KEYS
+    RUNTIME_STATE.codex_app_turn_condition = CODEX_APP_TURN_CONDITION
+    RUNTIME_STATE.codex_app_active_target_key = CODEX_APP_ACTIVE_TARGET_KEY
+    RUNTIME_STATE.codex_app_active_target_count = CODEX_APP_ACTIVE_TARGET_COUNT
+    return RUNTIME_STATE
+
+
+def sync_runtime_state_to_compat_globals() -> None:
+    global CODEX_APP_TURN_CONDITION
+    global CODEX_APP_ACTIVE_TARGET_KEY
+    global CODEX_APP_ACTIVE_TARGET_COUNT
+
+    CODEX_APP_TURN_CONDITION = RUNTIME_STATE.codex_app_turn_condition
+    CODEX_APP_ACTIVE_TARGET_KEY = RUNTIME_STATE.codex_app_active_target_key
+    CODEX_APP_ACTIVE_TARGET_COUNT = RUNTIME_STATE.codex_app_active_target_count
 
 
 def load_local_env(path: Path) -> None:
@@ -672,60 +705,67 @@ def prime_session_mirror_cursor_for_target(target_thread_id: str | None) -> int 
 
 
 def cleanup_active_session_mirror_output_targets(now: float | None = None) -> None:
+    state = get_session_mirror_state()
     current = time.monotonic() if now is None else now
     expired = [
         target
-        for target, activated_at in ACTIVE_SESSION_MIRROR_OUTPUT_TARGETS.items()
+        for target, activated_at in state.active_output_targets.items()
         if current - activated_at > SESSION_MIRROR_ACTIVE_OUTPUT_TTL_SECONDS
     ]
     for target in expired:
-        ACTIVE_SESSION_MIRROR_OUTPUT_TARGETS.pop(target, None)
-        PENDING_SESSION_MIRROR_CURSOR_TARGETS.discard(target)
+        state.active_output_targets.pop(target, None)
+        state.pending_cursor_targets.discard(target)
 
 
 def activate_session_mirror_output_target(target_thread_id: str | None) -> None:
     if not target_thread_id:
         return
+    state = get_session_mirror_state()
     key = normalize_runner_key(target_thread_id)
     cleanup_active_session_mirror_output_targets()
-    ACTIVE_SESSION_MIRROR_OUTPUT_TARGETS[key] = time.monotonic()
-    PENDING_SESSION_MIRROR_CURSOR_TARGETS.discard(key)
+    state.active_output_targets[key] = time.monotonic()
+    state.pending_cursor_targets.discard(key)
 
 
 def activate_pending_session_mirror_output_target(target_thread_id: str | None) -> None:
     if not target_thread_id:
         return
+    state = get_session_mirror_state()
     key = normalize_runner_key(target_thread_id)
     activate_session_mirror_output_target(target_thread_id)
-    PENDING_SESSION_MIRROR_CURSOR_TARGETS.add(key)
+    state.pending_cursor_targets.add(key)
 
 
 def deactivate_session_mirror_output_target(target_thread_id: str | None) -> None:
     if not target_thread_id:
         return
+    state = get_session_mirror_state()
     key = normalize_runner_key(target_thread_id)
-    ACTIVE_SESSION_MIRROR_OUTPUT_TARGETS.pop(key, None)
-    PENDING_SESSION_MIRROR_CURSOR_TARGETS.discard(key)
+    state.active_output_targets.pop(key, None)
+    state.pending_cursor_targets.discard(key)
 
 
 def is_active_session_mirror_output_target(target_thread_id: str | None) -> bool:
     if not target_thread_id:
         return False
     cleanup_active_session_mirror_output_targets()
-    return normalize_runner_key(target_thread_id) in ACTIVE_SESSION_MIRROR_OUTPUT_TARGETS
+    state = get_session_mirror_state()
+    return normalize_runner_key(target_thread_id) in state.active_output_targets
 
 
 def is_pending_session_mirror_cursor_target(target_thread_id: str | None) -> bool:
     if not target_thread_id:
         return False
     cleanup_active_session_mirror_output_targets()
-    return normalize_runner_key(target_thread_id) in PENDING_SESSION_MIRROR_CURSOR_TARGETS
+    state = get_session_mirror_state()
+    return normalize_runner_key(target_thread_id) in state.pending_cursor_targets
 
 
 def clear_pending_session_mirror_cursor_target(target_thread_id: str | None) -> None:
     if not target_thread_id:
         return
-    PENDING_SESSION_MIRROR_CURSOR_TARGETS.discard(normalize_runner_key(target_thread_id))
+    state = get_session_mirror_state()
+    state.pending_cursor_targets.discard(normalize_runner_key(target_thread_id))
 
 
 def session_mirror_rollout_path_missing(target_thread_id: str | None) -> bool:
@@ -1162,15 +1202,19 @@ def app_server_legacy_fallback_enabled() -> bool:
     return env_flag("CODEX_DISCORD_APP_SERVER_LEGACY_FALLBACK", False)
 
 
-def run_app_server_prompt_no_wait(prompt: str, target_thread_id: str | None) -> tuple[int, str]:
-    result = app_server_transport.start_turn_no_wait(
-        app_server_transport.DEFAULT_CLIENT,
+def run_resident_app_server_prompt_no_wait(prompt: str, target_thread_id: str | None) -> tuple[int, str]:
+    return discord_app_server.run_prompt_no_wait(
         prompt,
         target_thread_id,
+        transport_module=app_server_transport,
         bridge_module=bridge,
+        client=app_server_transport.DEFAULT_CLIENT,
         confirm_timeout_sec=6.0,
     )
-    return result.exit_code, result.output
+
+
+def run_app_server_prompt_no_wait(prompt: str, target_thread_id: str | None) -> tuple[int, str]:
+    return run_resident_app_server_prompt_no_wait(prompt, target_thread_id)
 
 
 def run_legacy_ipc_prompt_no_wait(prompt: str, target_thread_id: str | None) -> tuple[int, str]:
@@ -1204,14 +1248,15 @@ def run_ipc_prompt_no_wait(prompt: str, target_thread_id: str | None) -> tuple[i
         return 1, f"ERROR: resident app-server transport failed: {exc}"
 
 
-def run_app_server_steering_prompt(prompt: str, target_thread_id: str | None) -> SteeringPromptResult:
+def run_resident_app_server_steering_prompt(prompt: str, target_thread_id: str | None) -> SteeringPromptResult:
     target_thread_id, _target_ref = resolve_target_ref(target_thread_id)
     try:
-        result = app_server_transport.steer_or_start_no_wait(
-            app_server_transport.DEFAULT_CLIENT,
+        result = discord_app_server.run_steering_no_wait(
             prompt,
             target_thread_id,
+            transport_module=app_server_transport,
             bridge_module=bridge,
+            client=app_server_transport.DEFAULT_CLIENT,
             confirm_timeout_sec=get_steering_delivery_confirm_timeout(),
         )
     except Exception as exc:
@@ -1245,6 +1290,10 @@ def run_app_server_steering_prompt(prompt: str, target_thread_id: str | None) ->
         start_offset=result.start_offset,
         delivery_pending=result.delivery_pending,
     )
+
+
+def run_app_server_steering_prompt(prompt: str, target_thread_id: str | None) -> SteeringPromptResult:
+    return run_resident_app_server_steering_prompt(prompt, target_thread_id)
 
 
 
@@ -1287,29 +1336,18 @@ def build_ui_ask_argv(
     return argv
 
 
-def submit_app_server_approval_reply(target_thread_id: str, answer: str) -> tuple[int, str] | None:
+def submit_resident_app_server_approval_reply(target_thread_id: str, answer: str) -> tuple[int, str] | None:
     if not app_server_transport_enabled():
         return None
-    pending_request = app_server_transport.DEFAULT_CLIENT.get_latest_pending_approval_request(
-        target_thread_id
+    return discord_app_server.submit_approval_reply(
+        target_thread_id,
+        answer,
+        client=app_server_transport.DEFAULT_CLIENT,
     )
-    if pending_request is None:
-        return None
-    try:
-        result = app_server_transport.DEFAULT_CLIENT.reply_to_pending_approval(
-            target_thread_id,
-            answer,
-        )
-    except Exception as exc:
-        return 1, f"ERROR: resident app-server approval writeback failed: {exc}"
-    lines = [
-        f"thread_id: {target_thread_id}",
-        f"decision_action: {result.get('decision_action') or '-'}",
-        f"request_kind: {result.get('request_kind') or '-'}",
-        f"request_id: {result.get('request_id') or '-'}",
-        "transport: resident-app-server approval",
-    ]
-    return 0, "\n".join(lines)
+
+
+def submit_app_server_approval_reply(target_thread_id: str, answer: str) -> tuple[int, str] | None:
+    return submit_resident_app_server_approval_reply(target_thread_id, answer)
 
 
 def submit_approval_reply(target_thread_id: str, answer: str) -> tuple[int, str]:
@@ -1321,28 +1359,13 @@ def submit_approval_reply(target_thread_id: str, answer: str) -> tuple[int, str]
 
 def submit_input_reply(target_thread_id: str, answer: str) -> tuple[int, str]:
     if app_server_transport_enabled():
-        pending_input = app_server_transport.DEFAULT_CLIENT.get_latest_pending_input_request(
-            target_thread_id
+        app_server_result = discord_app_server.submit_input_reply(
+            target_thread_id,
+            answer,
+            client=app_server_transport.DEFAULT_CLIENT,
         )
-        if pending_input is not None:
-            try:
-                result = app_server_transport.DEFAULT_CLIENT.reply_to_pending_input(
-                    target_thread_id,
-                    answer,
-                )
-            except Exception as exc:
-                return 1, f"ERROR: resident app-server input writeback failed: {exc}"
-            lines = [
-                f"thread_id: {target_thread_id}",
-                f"request_id: {result.get('request_id') or '-'}",
-                "transport: resident-app-server input",
-            ]
-            answers_by_question = result.get("answers_by_question") or {}
-            if isinstance(answers_by_question, dict):
-                for question_id, values in answers_by_question.items():
-                    if isinstance(values, list):
-                        lines.append(f"{question_id}: {' | '.join(str(value) for value in values)}")
-            return 0, "\n".join(lines)
+        if app_server_result is not None:
+            return app_server_result
     try:
         thread = bridge.choose_thread(target_thread_id, None)
         result = bridge.reply_to_pending_user_input(thread, answer, timeout_sec=8.0)
@@ -2833,27 +2856,30 @@ def make_discord_origin_prompt_digest(target_thread_id: str | None, prompt: str)
 
 
 def cleanup_recent_discord_origin_prompts(now: float | None = None) -> None:
+    state = get_runtime_state()
     current = time.monotonic() if now is None else now
     expired = [
         digest
-        for digest, seen_at in RECENT_DISCORD_ORIGIN_PROMPTS.items()
+        for digest, seen_at in state.recent_discord_origin_prompts.items()
         if current - seen_at > DISCORD_ORIGIN_PROMPT_TTL_SECONDS
     ]
     for digest in expired:
-        RECENT_DISCORD_ORIGIN_PROMPTS.pop(digest, None)
+        state.recent_discord_origin_prompts.pop(digest, None)
 
 
 def mark_recent_discord_origin_prompt(target_thread_id: str | None, prompt: str) -> None:
     cleanup_recent_discord_origin_prompts()
-    RECENT_DISCORD_ORIGIN_PROMPTS[make_discord_origin_prompt_digest(target_thread_id, prompt)] = time.monotonic()
+    state = get_runtime_state()
+    state.recent_discord_origin_prompts[make_discord_origin_prompt_digest(target_thread_id, prompt)] = time.monotonic()
 
 
 def should_skip_discord_origin_prompt(target_thread_id: str | None, text: str) -> bool:
     cleanup_recent_discord_origin_prompts()
+    state = get_runtime_state()
     digest = make_discord_origin_prompt_digest(target_thread_id, text)
-    if digest not in RECENT_DISCORD_ORIGIN_PROMPTS:
+    if digest not in state.recent_discord_origin_prompts:
         return False
-    RECENT_DISCORD_ORIGIN_PROMPTS.pop(digest, None)
+    state.recent_discord_origin_prompts.pop(digest, None)
     return True
 
 
@@ -3073,27 +3099,21 @@ def has_recent_codex_app_user_prompt(
 
 
 def remember_recent_session_text(seen: dict[str, float], text: str) -> None:
-    current = time.monotonic()
-    expired = [
-        digest
-        for digest, seen_at in seen.items()
-        if current - seen_at > SESSION_MIRROR_RECENT_TEXT_TTL_SECONDS
-    ]
-    for digest in expired:
-        seen.pop(digest, None)
-    seen[make_text_digest(text.strip())] = current
+    discord_session_mirror.remember_recent_session_text(
+        seen,
+        text,
+        ttl_seconds=SESSION_MIRROR_RECENT_TEXT_TTL_SECONDS,
+        make_text_digest_func=make_text_digest,
+    )
 
 
 def has_recent_session_text(seen: dict[str, float], text: str) -> bool:
-    current = time.monotonic()
-    digest = make_text_digest(text.strip())
-    seen_at = seen.get(digest)
-    if seen_at is None:
-        return False
-    if current - seen_at > SESSION_MIRROR_RECENT_TEXT_TTL_SECONDS:
-        seen.pop(digest, None)
-        return False
-    return True
+    return discord_session_mirror.has_recent_session_text(
+        seen,
+        text,
+        ttl_seconds=SESSION_MIRROR_RECENT_TEXT_TTL_SECONDS,
+        make_text_digest_func=make_text_digest,
+    )
 
 
 def make_session_mirror_event_digest(
@@ -3104,18 +3124,14 @@ def make_session_mirror_event_digest(
     phase: str,
     text: str,
 ) -> str:
-    payload = event.get("payload") or {}
-    payload_type = payload.get("type") if isinstance(payload, dict) else ""
-    return make_text_digest(
-        "session-mirror",
+    return discord_session_mirror.make_session_mirror_event_digest(
         codex_thread_id,
-        event.get("timestamp") or "",
-        event.get("type") or "",
-        payload_type or "",
+        event,
         kind,
         role,
         phase,
         text,
+        make_text_digest_func=make_text_digest,
     )
 
 
@@ -3128,14 +3144,15 @@ def make_session_mirror_item(
     phase: str,
     text: str,
 ) -> dict[str, str]:
-    clean_text = str(text or "").strip()
-    return {
-        "digest": make_session_mirror_event_digest(codex_thread_id, event, kind, role, phase, clean_text),
-        "kind": kind,
-        "role": role,
-        "phase": phase,
-        "text": clean_text,
-    }
+    return discord_session_mirror.make_session_mirror_item(
+        codex_thread_id,
+        event,
+        kind=kind,
+        role=role,
+        phase=phase,
+        text=text,
+        make_text_digest_func=make_text_digest,
+    )
 
 
 def collect_session_mirror_items(
@@ -3145,182 +3162,21 @@ def collect_session_mirror_items(
     seen_agent_messages: dict[str, float],
     seen_user_messages: dict[str, float],
 ) -> list[dict[str, str]]:
-    items: list[dict[str, str]] = []
-    for event in events:
-        payload = event.get("payload") or {}
-        if not isinstance(payload, dict):
-            continue
-
-        event_type = str(event.get("type") or "")
-        payload_type = str(payload.get("type") or "")
-        if event_type == "event_msg":
-            if payload_type == "agent_message":
-                phase = str(payload.get("phase") or "commentary")
-                text = str(payload.get("message") or "").strip()
-                if not text:
-                    continue
-                if phase == "final_answer":
-                    if has_recent_session_text(seen_agent_messages, text):
-                        continue
-                    remember_recent_session_text(seen_agent_messages, text)
-                    items.append(
-                        make_session_mirror_item(
-                            codex_thread_id,
-                            event,
-                            kind="final",
-                            role="assistant",
-                            phase=phase,
-                            text=text,
-                        )
-                    )
-                    continue
-                remember_recent_session_text(seen_agent_messages, text)
-                items.append(
-                    make_session_mirror_item(
-                        codex_thread_id,
-                        event,
-                        kind="commentary",
-                        role="assistant",
-                        phase=phase,
-                        text=text,
-                    )
-                )
-                continue
-            if payload_type == "user_message":
-                text = str(payload.get("message") or "").strip()
-                if not text:
-                    continue
-                if should_skip_discord_origin_prompt(codex_thread_id, text):
-                    remember_recent_session_text(seen_user_messages, text)
-                    continue
-                if has_recent_session_text(seen_user_messages, text):
-                    continue
-                remember_recent_session_text(seen_user_messages, text)
-                items.append(
-                    make_session_mirror_item(
-                        codex_thread_id,
-                        event,
-                        kind="user",
-                        role="user",
-                        phase="input",
-                        text=text,
-                    )
-                )
-                continue
-            if payload_type in {"turn_aborted", "task_aborted", "task_cancelled"}:
-                items.append(
-                    make_session_mirror_item(
-                        codex_thread_id,
-                        event,
-                        kind="aborted",
-                        role="assistant",
-                        phase=payload_type,
-                        text="Aborted.",
-                    )
-                )
-                continue
-            continue
-
-        if event_type != "response_item":
-            continue
-
-        if payload_type == "function_call":
-            notice = bridge.build_interactive_notice_from_function_call(payload)
-            if notice:
-                items.append(
-                    make_session_mirror_item(
-                        codex_thread_id,
-                        event,
-                        kind="interactive",
-                        role="assistant",
-                        phase="interactive",
-                        text=notice,
-                    )
-                )
-            continue
-
-        if payload_type == "function_call_output":
-            output_text = str(payload.get("output") or "").strip()
-            if output_text and "rejected by user" in output_text.lower():
-                items.append(
-                    make_session_mirror_item(
-                        codex_thread_id,
-                        event,
-                        kind="commentary",
-                        role="assistant",
-                        phase="approval_rejected",
-                        text="[approval_rejected]\nCommand approval was rejected by user.",
-                    )
-                )
-            continue
-
-        if payload_type != "message":
-            continue
-        text = bridge.extract_message_text(payload)
-        if not text:
-            continue
-        role = str(payload.get("role") or "?")
-        phase = str(payload.get("phase") or "")
-        if role == "assistant" and phase == "commentary":
-            if has_recent_session_text(seen_agent_messages, text):
-                continue
-            remember_recent_session_text(seen_agent_messages, text)
-            items.append(
-                make_session_mirror_item(
-                    codex_thread_id,
-                    event,
-                    kind="commentary",
-                    role=role,
-                    phase=phase,
-                    text=text,
-                )
-            )
-            continue
-        if role == "assistant" and phase == "final_answer":
-            if has_recent_session_text(seen_agent_messages, text):
-                continue
-            remember_recent_session_text(seen_agent_messages, text)
-            items.append(
-                make_session_mirror_item(
-                    codex_thread_id,
-                    event,
-                    kind="final",
-                    role=role,
-                    phase=phase,
-                    text=text,
-                )
-            )
-            continue
-        if role == "user":
-            if should_skip_discord_origin_prompt(codex_thread_id, text):
-                remember_recent_session_text(seen_user_messages, text)
-                continue
-            if has_recent_session_text(seen_user_messages, text):
-                continue
-            remember_recent_session_text(seen_user_messages, text)
-            items.append(
-                make_session_mirror_item(
-                    codex_thread_id,
-                    event,
-                    kind="user",
-                    role=role,
-                    phase=phase or "input",
-                    text=text,
-                )
-            )
-    return items
+    return discord_session_mirror.collect_session_mirror_items(
+        codex_thread_id,
+        events,
+        seen_agent_messages=seen_agent_messages,
+        seen_user_messages=seen_user_messages,
+        should_skip_discord_origin_prompt_func=should_skip_discord_origin_prompt,
+        build_interactive_notice_func=bridge.build_interactive_notice_from_function_call,
+        extract_message_text_func=bridge.extract_message_text,
+        recent_text_ttl_seconds=SESSION_MIRROR_RECENT_TEXT_TTL_SECONDS,
+        make_text_digest_func=make_text_digest,
+    )
 
 
 def format_session_mirror_text(item: dict[str, str]) -> str:
-    kind = item.get("kind") or ""
-    text = item.get("text") or ""
-    if kind == "commentary":
-        return f"In progress\n\n{text}"
-    if kind == "user":
-        return f"Codex app user\n\n{text}"
-    if kind == "aborted":
-        return "Aborted."
-    return text
+    return discord_session_mirror.format_session_mirror_text(item)
 
 
 def should_send_empty_content_notice(channel_id: int | None, *, now: float | None = None) -> bool:
@@ -5495,22 +5351,14 @@ def get_interactive_state_for_thread(target_thread_id: str | None) -> tuple[str,
     if state == INTERACTIVE_STATE_NONE and app_server_transport_enabled():
         app_server_target_id = resolved_thread_id or target_thread_id
         if app_server_target_id:
-            try:
-                pending_request = app_server_transport.DEFAULT_CLIENT.get_latest_pending_approval_request(
-                    app_server_target_id
-                )
-            except Exception:
-                pending_request = None
-            if pending_request is not None:
+            pending_state = discord_app_server.get_pending_interactive_state(
+                app_server_target_id,
+                client=app_server_transport.DEFAULT_CLIENT,
+            )
+            if pending_state == "approval":
                 _resolved, resolved_ref = resolve_target_ref(app_server_target_id)
                 return INTERACTIVE_STATE_APPROVAL, app_server_target_id, resolved_ref or target_ref
-            try:
-                pending_input = app_server_transport.DEFAULT_CLIENT.get_latest_pending_input_request(
-                    app_server_target_id
-                )
-            except Exception:
-                pending_input = None
-            if pending_input is not None:
+            if pending_state == "input":
                 _resolved, resolved_ref = resolve_target_ref(app_server_target_id)
                 return INTERACTIVE_STATE_INPUT, app_server_target_id, resolved_ref or target_ref
     return state, resolved_thread_id, target_ref
@@ -5534,80 +5382,85 @@ def normalize_runner_key(target_thread_id: str | None) -> str:
 
 
 def mark_steering_handoff(target_thread_id: str | None) -> float:
-    return discord_runtime.mark_steering_handoff(STEERING_HANDOFFS, target_thread_id)
+    state = get_runtime_state()
+    return discord_runtime.mark_steering_handoff(state.steering_handoffs, target_thread_id)
 
 
 def had_steering_handoff_since(target_thread_id: str | None, started_at: float) -> bool:
+    state = get_runtime_state()
     return discord_runtime.had_steering_handoff_since(
-        STEERING_HANDOFFS,
+        state.steering_handoffs,
         target_thread_id,
         started_at,
     )
 
 
 def register_discord_relay(target_thread_id: str | None) -> int:
+    state = get_runtime_state()
     return discord_runtime.register_discord_relay(
-        ACTIVE_DISCORD_RELAY_GENERATIONS,
+        state.active_discord_relay_generations,
         target_thread_id,
     )
 
 
 def is_discord_relay_stale(target_thread_id: str | None, generation: int) -> bool:
+    state = get_runtime_state()
     return discord_runtime.is_discord_relay_stale(
-        ACTIVE_DISCORD_RELAY_GENERATIONS,
+        state.active_discord_relay_generations,
         target_thread_id,
         generation,
     )
 
 
 def get_codex_app_turn_condition() -> asyncio.Condition:
-    global CODEX_APP_TURN_CONDITION
-    if CODEX_APP_TURN_CONDITION is None:
-        CODEX_APP_TURN_CONDITION = asyncio.Condition()
-    return CODEX_APP_TURN_CONDITION
+    state = get_runtime_state()
+    if state.codex_app_turn_condition is None:
+        state.codex_app_turn_condition = asyncio.Condition()
+        sync_runtime_state_to_compat_globals()
+    return state.codex_app_turn_condition
 
 
 @asynccontextmanager
 async def codex_app_turn_slot(target_thread_id: str | None):
-    global CODEX_APP_ACTIVE_TARGET_COUNT
-    global CODEX_APP_ACTIVE_TARGET_KEY
-
+    state = get_runtime_state()
     key = normalize_runner_key(target_thread_id)
     condition = get_codex_app_turn_condition()
     waited = False
     async with condition:
-        while CODEX_APP_ACTIVE_TARGET_KEY not in {None, key}:
+        while state.codex_app_active_target_key not in {None, key}:
             if not waited:
                 log_line(
                     f"codex_app_turn_wait target={target_thread_id or '-'} "
-                    f"active={CODEX_APP_ACTIVE_TARGET_KEY or '-'}"
+                    f"active={state.codex_app_active_target_key or '-'}"
                 )
                 waited = True
             await condition.wait()
-        if CODEX_APP_ACTIVE_TARGET_KEY is None:
-            CODEX_APP_ACTIVE_TARGET_KEY = key
-            CODEX_APP_ACTIVE_TARGET_COUNT = 1
+        if state.codex_app_active_target_key is None:
+            state.codex_app_active_target_key = key
+            state.codex_app_active_target_count = 1
         else:
-            CODEX_APP_ACTIVE_TARGET_COUNT += 1
+            state.codex_app_active_target_count += 1
+        sync_runtime_state_to_compat_globals()
         if waited:
             log_line(
                 f"codex_app_turn_wait_done target={target_thread_id or '-'} "
-                f"count={CODEX_APP_ACTIVE_TARGET_COUNT}"
+                f"count={state.codex_app_active_target_count}"
             )
 
     try:
         yield waited
     finally:
         async with condition:
-            if CODEX_APP_ACTIVE_TARGET_KEY == key:
-                CODEX_APP_ACTIVE_TARGET_COUNT = max(0, CODEX_APP_ACTIVE_TARGET_COUNT - 1)
-                if CODEX_APP_ACTIVE_TARGET_COUNT == 0:
-                    CODEX_APP_ACTIVE_TARGET_KEY = None
+            if state.codex_app_active_target_key == key:
+                state.codex_app_active_target_count = max(0, state.codex_app_active_target_count - 1)
+                if state.codex_app_active_target_count == 0:
+                    state.codex_app_active_target_key = None
                     condition.notify_all()
+                sync_runtime_state_to_compat_globals()
             else:
                 log_line(
                     f"codex_app_turn_slot_mismatch target={target_thread_id or '-'} "
-                    f"active={CODEX_APP_ACTIVE_TARGET_KEY or '-'}"
+                    f"active={state.codex_app_active_target_key or '-'}"
                 )
 
 
@@ -5621,13 +5474,14 @@ async def get_thread_runner(target_thread_id: str | None) -> dict[str, object]:
 
 
 async def is_thread_runner_busy(target_thread_id: str | None) -> bool:
+    state = get_runtime_state()
     key = normalize_runner_key(target_thread_id)
     if is_active_session_mirror_output_target(target_thread_id):
         return True
-    async with ACTIVE_DIRECT_ASK_LOCK:
-        if key in ACTIVE_DIRECT_ASK_TARGET_KEYS:
+    async with state.active_direct_ask_lock:
+        if key in state.active_direct_ask_target_keys:
             return True
-    delivery_lock = ASK_DELIVERY_LOCKS.get(key)
+    delivery_lock = state.ask_delivery_locks.get(key)
     if delivery_lock is not None and delivery_lock.locked():
         return True
     async with THREAD_RUNNERS_LOCK:
@@ -5641,18 +5495,20 @@ async def is_thread_runner_busy(target_thread_id: str | None) -> bool:
 
 
 async def claim_direct_ask_target(target_thread_id: str | None) -> bool:
+    state = get_runtime_state()
     key = normalize_runner_key(target_thread_id)
-    async with ACTIVE_DIRECT_ASK_LOCK:
-        if key in ACTIVE_DIRECT_ASK_TARGET_KEYS:
+    async with state.active_direct_ask_lock:
+        if key in state.active_direct_ask_target_keys:
             return False
-        ACTIVE_DIRECT_ASK_TARGET_KEYS.add(key)
+        state.active_direct_ask_target_keys.add(key)
         return True
 
 
 async def release_direct_ask_target(target_thread_id: str | None) -> None:
+    state = get_runtime_state()
     key = normalize_runner_key(target_thread_id)
-    async with ACTIVE_DIRECT_ASK_LOCK:
-        ACTIVE_DIRECT_ASK_TARGET_KEYS.discard(key)
+    async with state.active_direct_ask_lock:
+        state.active_direct_ask_target_keys.discard(key)
 
 
 async def wait_for_codex_thread_idle(
@@ -5972,11 +5828,12 @@ async def wait_for_mirrored_busy_delegation_settle(
 
 
 def get_ask_delivery_lock(target_thread_id: str | None) -> asyncio.Lock:
+    state = get_runtime_state()
     key = normalize_runner_key(target_thread_id)
-    lock = ASK_DELIVERY_LOCKS.get(key)
+    lock = state.ask_delivery_locks.get(key)
     if lock is None:
         lock = asyncio.Lock()
-        ASK_DELIVERY_LOCKS[key] = lock
+        state.ask_delivery_locks[key] = lock
     return lock
 
 

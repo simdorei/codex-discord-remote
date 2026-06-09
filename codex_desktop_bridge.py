@@ -2652,6 +2652,11 @@ def iter_codex_app_server_bin_candidates() -> Iterator[tuple[str, Path]]:
     local_app_data = os.environ.get("LOCALAPPDATA", "").strip()
     if local_app_data:
         roots.append(Path(local_app_data) / "OpenAI" / "Codex" / "bin")
+    if os.name == "nt":
+        home_local_app_data = Path.home() / "AppData" / "Local"
+        fallback_root = home_local_app_data / "OpenAI" / "Codex" / "bin"
+        if all(str(fallback_root).lower() != str(root).lower() for root in roots):
+            roots.append(fallback_root)
 
     seen: set[str] = set()
     candidates: list[Path] = []
@@ -2659,6 +2664,10 @@ def iter_codex_app_server_bin_candidates() -> Iterator[tuple[str, Path]]:
     for root in roots:
         if not root.exists():
             continue
+        root_candidate = root / executable_name
+        if root_candidate.exists() and root_candidate.is_file():
+            candidates.append(root_candidate)
+            seen.add(str(root_candidate).lower())
         for candidate in root.glob(f"*/{executable_name}"):
             normalized = str(candidate).lower()
             if normalized in seen:
@@ -2698,7 +2707,10 @@ def resolve_codex_app_server_executable() -> str:
             return resolved
 
     if windowsapps_candidate:
-        return windowsapps_candidate
+        raise RuntimeError(
+            "Codex app-server executable resolved only to a WindowsApps alias. "
+            f"Set {CODEX_APP_SERVER_EXE_ENV} in .env to the real Codex CLI executable."
+        )
 
     return bundled_name
 

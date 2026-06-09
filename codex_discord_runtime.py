@@ -3,7 +3,21 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import dataclass, field
 import time
+
+
+@dataclass
+class DiscordRuntimeState:
+    steering_handoffs: dict[str, float] = field(default_factory=dict)
+    active_discord_relay_generations: dict[str, int] = field(default_factory=dict)
+    recent_discord_origin_prompts: dict[str, float] = field(default_factory=dict)
+    ask_delivery_locks: dict[str, asyncio.Lock] = field(default_factory=dict)
+    active_direct_ask_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    active_direct_ask_target_keys: set[str] = field(default_factory=set)
+    codex_app_turn_condition: asyncio.Condition | None = None
+    codex_app_active_target_key: str | None = None
+    codex_app_active_target_count: int = 0
 
 
 def normalize_runner_key(target_thread_id: str | None) -> str:
