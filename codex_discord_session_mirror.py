@@ -13,6 +13,8 @@ SkipDiscordOriginPromptFunc = Callable[[str | None, str], bool]
 BuildInteractiveNoticeFunc = Callable[[dict], str | None]
 ExtractMessageTextFunc = Callable[[dict], str]
 
+ABORTED_PAYLOAD_TYPES = {"turn_aborted", "task_aborted", "task_cancelled"}
+
 
 @dataclass
 class SessionMirrorState:
@@ -117,6 +119,34 @@ def make_session_mirror_item(
         "phase": phase,
         "text": clean_text,
     }
+
+
+def format_aborted_event_text(payload: dict) -> str:
+    payload_type = str(payload.get("type") or "aborted").strip()
+    if payload_type == "task_cancelled":
+        headline = "Codex task cancelled."
+    elif payload_type == "task_aborted":
+        headline = "Codex task aborted."
+    else:
+        headline = "Codex turn aborted."
+
+    details: list[str] = []
+    reason = str(payload.get("reason") or "").strip()
+    if reason:
+        details.append(f"reason={reason}")
+    turn_id = str(payload.get("turn_id") or "").strip()
+    if turn_id:
+        details.append(f"turn_id={turn_id}")
+    task_id = str(payload.get("task_id") or "").strip()
+    if task_id:
+        details.append(f"task_id={task_id}")
+    duration_ms = payload.get("duration_ms")
+    if duration_ms is not None:
+        details.append(f"duration_ms={duration_ms}")
+
+    if not details:
+        return headline
+    return f"{headline}\nDetails: {', '.join(details)}"
 
 
 def collect_session_mirror_items(
@@ -226,7 +256,7 @@ def collect_session_mirror_items(
                     )
                 )
                 continue
-            if payload_type in {"turn_aborted", "task_aborted", "task_cancelled"}:
+            if payload_type in ABORTED_PAYLOAD_TYPES:
                 items.append(
                     make_session_mirror_item(
                         codex_thread_id,
@@ -234,7 +264,7 @@ def collect_session_mirror_items(
                         kind="aborted",
                         role="assistant",
                         phase=payload_type,
-                        text="Aborted.",
+                        text=format_aborted_event_text(payload),
                         make_text_digest_func=make_text_digest_func,
                     )
                 )
@@ -379,5 +409,5 @@ def format_session_mirror_text(item: dict[str, str]) -> str:
     if kind == "user":
         return f"Codex app user\n\n{text}"
     if kind == "aborted":
-        return "Aborted."
+        return text or "Codex turn aborted."
     return text

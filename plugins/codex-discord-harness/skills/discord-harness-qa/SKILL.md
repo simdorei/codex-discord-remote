@@ -32,5 +32,5 @@ The smoke script covers:
 - Long Discord sends should show `[part/total]` markers and `discord_delivery_*` log lines for every chunk.
 - Busy mapped-thread prompts should expose explicit `Steer now`, `Queue next`, and `Ignore` controls. `!retract`/`/retract` should remove only still-queued asks and never interrupt the active turn.
 - Old ask output after a steering handoff should be suppressed when a newer steering relay already sent the final answer.
-- Ask and steer delivery should use the resident `codex app-server` transport by default; IPC/UI/subprocess fallback should be opt-in.
-- App-server approval and request-user-input server requests should be answered through the resident JSON-RPC request id before legacy IPC fallback is attempted.
+- Ask and steer delivery should use the resident `codex app-server` transport by default; IPC/UI/subprocess fallback should not be used silently.
+- App-server approval and request-user-input server requests should be answered through the resident JSON-RPC request id. If that fails, surface the failure instead of substituting a legacy path.

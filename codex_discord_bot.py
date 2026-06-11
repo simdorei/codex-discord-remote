@@ -104,6 +104,51 @@ INTERACTIVE_APPROVAL_TAG = "[approval_required]"
 INTERACTIVE_STATE_NONE = ""
 INTERACTIVE_STATE_INPUT = "waiting-input"
 INTERACTIVE_STATE_APPROVAL = "waiting-approval"
+DEEP_INTERVIEW_PROMPT_HEADER = """Run a Gajae-style deep interview before implementation.
+
+Follow the packaged deep-interview skill when it is available. If it is not loaded, manually run this Codex port of the Gajae Code workflow.
+
+Codex port rules:
+- Do not edit files, run mutation commands, produce implementation code, commit, push, open PRs, or delegate execution yet.
+- Preserve the user's language in every user-facing question, option, progress report, and summary.
+- Emit the threshold marker first: `Deep Interview threshold: 0.05 (source: default)` unless the user explicitly gave another threshold.
+- Round 0: enumerate 1-6 top-level components or outcomes from the request and ask exactly one work-structure confirmation question before ambiguity scoring.
+- If the user is writing Korean, say "작업 구조" instead of "토폴로지" in user-facing text.
+- Detect greenfield vs brownfield. For brownfield work, inspect relevant code first and cite files, symbols, or patterns before asking the user about existing-system context.
+- Then ask one question at a time, targeting the weakest active component and weakest clarity dimension: goal, constraints, success criteria, and existing-system context for brownfield work.
+- Each question must include: Round, Component, Targeting, Ambiguity, Why now, Current understanding, Blocked decision, Recommended answer, Question.
+- Do not silently fill missing requirements. Turn unknowns into questions. If a required read/tool fails, surface the actual failure instead of substituting another path.
+- After each answer, show clarity scores from 0.0 to 1.0 and calculate ambiguity.
+- Use greenfield ambiguity = 1 - (goal * 0.40 + constraints * 0.30 + criteria * 0.30).
+- Use brownfield ambiguity = 1 - (goal * 0.35 + constraints * 0.25 + criteria * 0.25 + context * 0.15).
+- Track key entities and ontology stability after each round: new, changed, stable, removed, and stability ratio.
+- Activate challenge modes when useful: contrarian after round 4, simplifier after round 6, ontologist after round 8 if ambiguity is still above 0.30.
+- Continue until goal, work structure, included scope, excluded scope, constraints, acceptance criteria, key entities, technical context, and remaining open questions are explicit.
+- When enough detail is gathered, summarize a pending-approval ticket with Metadata, Clarity Breakdown, Work structure, Goal, Included scope, Excluded scope, Constraints, Acceptance criteria, Assumptions exposed and resolved, Technical context, Key entities, Ontology convergence, Risks/open questions, and Proposed next step.
+- Stop after the pending-approval ticket and wait for explicit user approval before coding or planning execution.
+
+User request:
+"""
+GITHUB_TRIAGE_PROMPT_HEADER = """Run the packaged Codex skill `$codex-discord-harness:github-project-triage`.
+
+Rules:
+- Do not run deep-interview for this request.
+- Use the vendored upstream `github-project-triage` workflow.
+- If the named skill is not available in this Codex session, report that exact skill-loading failure and stop.
+- Respect the upstream authorization boundaries. Triage does not authorize implementation, push, merge, close, release, or delegated execution unless the user explicitly asks for that action.
+
+User request:
+"""
+MAINTAINER_ORCHESTRATOR_PROMPT_HEADER = """Run the packaged Codex skill `$codex-discord-harness:maintainer-orchestrator`.
+
+Rules:
+- Do not run deep-interview for this request.
+- Use the vendored upstream `maintainer-orchestrator` workflow.
+- If the named skill is not available in this Codex session, report that exact skill-loading failure and stop.
+- Respect the upstream authorization boundaries. Monitoring, delegation, implementation, push, merge, close, release, and worker-thread changes each require explicit user authorization from the current conversation.
+
+User request:
+"""
 CODEX_PROJECTLESS_CHAT_KEY = "codex:chats"
 BUSY_CHOICE_CUSTOM_ID_PREFIX = "codex_busy"
 APPROVAL_CUSTOM_ID_PREFIX = "codex_approval"
@@ -112,6 +157,19 @@ BUSY_CHOICE_TTL_SECONDS = 1800
 BUSY_CHOICE_COMPONENT_CLEANUP_HISTORY_LIMIT = 50
 EMPTY_CONTENT_NOTICE_COOLDOWN_SECONDS = 300
 EMPTY_CONTENT_NOTICE_LAST_SENT: dict[int, float] = {}
+ACTIVE_DISCORD_DELIVERIES: set[str] = set()
+DISCORD_DELIVERY_STOPPING = False
+DISCORD_RESTARTING_ERROR = "Discord bot is restarting; refusing new Discord delivery."
+DISCORD_RESTARTING_NOTICE = (
+    "Discord bot is restarting; this request was not accepted.\n"
+    "Retry after the bot is online again."
+)
+
+
+class DiscordDeliveryRejected(RuntimeError):
+    pass
+
+
 HISTORY_POLL_DEFAULT_SECONDS = 15.0
 HISTORY_POLL_HISTORY_LIMIT = 10
 HISTORY_POLL_BOOTSTRAP_LOOKBACK_DEFAULT_SECONDS = 120.0
@@ -128,6 +186,7 @@ ASK_BUSY_RETRY_ATTEMPTS = 0.0
 ASK_BUSY_RETRY_DELAY_SECONDS = 8.0
 SESSION_MIRROR_POLL_DEFAULT_SECONDS = 1.0
 STOP_MARKER_POLL_SECONDS = 1.0
+STOP_MARKER_DRAIN_TIMEOUT_SECONDS = 20.0
 SESSION_MIRROR_TARGET_LIMIT = 100
 SESSION_MIRROR_EVENT_RETENTION_SECONDS = 7 * 86400.0
 SESSION_MIRROR_RECENT_TEXT_TTL_SECONDS = 600.0
@@ -887,6 +946,14 @@ def get_project_key(thread: bridge.ThreadInfo) -> str:
     )
 
 
+def normalize_project_key(project_key: str | None) -> str:
+    return discord_projects.normalize_project_key(
+        project_key,
+        bridge_module=bridge,
+        projectless_chat_key=CODEX_PROJECTLESS_CHAT_KEY,
+    )
+
+
 def get_project_name(thread: bridge.ThreadInfo) -> str:
     return discord_projects.get_project_name(thread, bridge_module=bridge)
 
@@ -1128,8 +1195,8 @@ def run_ask(
     argv = [
         "ask",
         "--ipc",
-        "--ipc-recover-ui",
         "--foreground",
+        "--no-fallback",
         "--timeout",
         timeout_value,
     ]
@@ -1140,34 +1207,11 @@ def run_ask(
     if not wait:
         argv.append("--no-wait")
     argv.append(prompt)
-    exit_code, output = run_bridge_command(argv)
-    if should_retry_ask_with_ui(exit_code, output):
-        ui_argv = build_ui_ask_argv(
-            prompt,
-            target_thread_id=target_thread_id,
-            force_while_busy=force_while_busy,
-            wait=wait,
-            timeout_sec=timeout_sec,
-        )
-        with UI_FALLBACK_LOCK:
-            ui_exit_code, ui_output = run_bridge_command(ui_argv)
-        return ui_exit_code, "\n\n".join(
-            part
-            for part in [
-                "Retried with Codex UI fallback after IPC attach failed.",
-                ui_output,
-            ]
-            if part
-        )
-    return exit_code, output
+    return run_bridge_command(argv)
 
 
 def app_server_transport_enabled() -> bool:
     return env_flag("CODEX_DISCORD_APP_SERVER_TRANSPORT", True)
-
-
-def app_server_legacy_fallback_enabled() -> bool:
-    return env_flag("CODEX_DISCORD_APP_SERVER_LEGACY_FALLBACK", False)
 
 
 def run_resident_app_server_prompt_no_wait(prompt: str, target_thread_id: str | None) -> tuple[int, str]:
@@ -1209,10 +1253,8 @@ def run_transport_prompt_no_wait(prompt: str, target_thread_id: str | None) -> t
     except Exception as exc:
         log_line(
             f"app_server_prompt_failed target={target_thread_id or '-'} "
-            f"fallback={app_server_legacy_fallback_enabled()} error={str(exc)[:300]}"
+            f"error_type={type(exc).__name__} error={str(exc)[:300]}"
         )
-        if app_server_legacy_fallback_enabled():
-            return run_legacy_ipc_prompt_no_wait(prompt, target_thread_id)
         return 1, f"ERROR: resident app-server transport failed: {exc}"
 
 
@@ -1230,19 +1272,8 @@ def run_resident_app_server_steering_prompt(prompt: str, target_thread_id: str |
     except Exception as exc:
         log_line(
             f"app_server_steering_failed target={target_thread_id or '-'} "
-            f"fallback={app_server_legacy_fallback_enabled()} error={str(exc)[:300]}"
+            f"error_type={type(exc).__name__} error={str(exc)[:300]}"
         )
-        if app_server_legacy_fallback_enabled():
-            return discord_steering.run_steering_prompt(
-                prompt,
-                target_thread_id,
-                bridge_module=bridge,
-                resolve_target_ref_func=resolve_target_ref,
-                run_ask_func=run_ask,
-                get_steering_delivery_confirm_timeout_func=get_steering_delivery_confirm_timeout,
-                log_func=log_line,
-                format_log_text_len_func=format_log_text_len,
-            )
         return SteeringPromptResult(
             1,
             f"ERROR: resident app-server transport failed: {exc}",
@@ -1473,25 +1504,10 @@ def run_ask_stream(
         except Exception as exc:
             log_line(
                 f"app_server_stream_prompt_failed target={target_thread_id or '-'} "
-                f"fallback={app_server_legacy_fallback_enabled()} error={str(exc)[:300]}"
+                f"error_type={type(exc).__name__} error={str(exc)[:300]}"
             )
-            if not app_server_legacy_fallback_enabled():
-                relay.finish()
-                return 1, f"ERROR: resident app-server transport failed: {exc}"
-            return discord_stream.run_ask_stream(
-                prompt,
-                relay,
-                force_while_busy=force_while_busy,
-                wait=wait,
-                target_thread_id=target_thread_id,
-                use_sidecar=False,
-                no_fallback=True,
-                allow_ui_fallback=False,
-                run_bridge_command_stream_func=run_bridge_command_stream,
-                should_retry_ask_with_ui_func=should_retry_ask_with_ui,
-                build_ui_ask_argv_func=build_ui_ask_argv,
-                ui_fallback_lock=UI_FALLBACK_LOCK,
-            )
+            relay.finish()
+            return 1, f"ERROR: resident app-server transport failed: {exc}"
         if (
             result.exit_code == 0
             and wait
@@ -1775,12 +1791,31 @@ class LoggingCommandTree(app_commands.CommandTree):
             f"error={type(error).__name__}: {error}"
         )
         try:
-            message = "Discord slash command error. Check codex_discord_bot.log."
+            root_error = getattr(error, "original", error)
+            restarting = isinstance(root_error, DiscordDeliveryRejected)
+            message = (
+                DISCORD_RESTARTING_NOTICE
+                if restarting
+                else "Discord slash command error. Check codex_discord_bot.log."
+            )
             if interaction.response.is_done():
-                await interaction.followup.send(message, ephemeral=True)
+                await send_direct_followup(
+                    interaction,
+                    message,
+                    ephemeral=True,
+                    log_prefix="slash_command_error",
+                    context="error_followup",
+                    allow_during_stop=restarting,
+                )
                 log_line(f"slash_command_error_sent command={command_name} response=followup")
             else:
-                await interaction.response.send_message(message, ephemeral=True)
+                await send_interaction_response_tracked(
+                    interaction,
+                    message,
+                    ephemeral=True,
+                    context="slash_command_error",
+                    allow_during_stop=restarting,
+                )
                 log_line(f"slash_command_error_sent command={command_name} response=initial")
         except Exception:
             log_line("slash_command_error_report_failed\n" + traceback.format_exc())
@@ -2013,6 +2048,11 @@ class CodexDiscordBot(discord.Client):
                         f"stop_marker_remove_failed path={STOP_REQUEST_PATH} "
                         f"error_type={type(exc).__name__}"
                     )
+                set_discord_delivery_stopping("stop_marker")
+                await wait_for_discord_delivery_drain(
+                    timeout_seconds=STOP_MARKER_DRAIN_TIMEOUT_SECONDS,
+                    reason="stop_marker",
+                )
                 await self.close()
                 return
             await asyncio.sleep(STOP_MARKER_POLL_SECONDS)
@@ -2311,7 +2351,7 @@ class CodexDiscordBot(discord.Client):
                     return
             if isinstance(channel, discord.abc.Messageable):
                 try:
-                    await send_chunks(channel, "Codex Discord bot online. Try `!list` or `/list`.")
+                    await send_chunks(channel, build_startup_notice(), context="startup_notify")
                     log_line(f"startup_notify_sent channel={self.startup_channel_id}")
                 except Exception:
                     log_line("startup_notify_failed\n" + traceback.format_exc())
@@ -2460,6 +2500,13 @@ class CodexDiscordBot(discord.Client):
             if not bot_bridge_mention and not self.is_allowed_user(message.author.id):
                 log_line(f"ignored_message reason=user_not_allowed user={message.author.id}")
                 return
+            if is_discord_delivery_stopping():
+                log_line(
+                    f"message_rejected reason=bot_stopping chat={message.channel.id} "
+                    f"user={message.author.id}"
+                )
+                await send_discord_restarting_notice(message.channel)
+                return
             content = (message.content or "").strip()
             target_thread_id = get_mirrored_codex_thread_id(message.channel.id)
             has_attachments = bool(getattr(message, "attachments", None))
@@ -2555,10 +2602,12 @@ class CodexDiscordBot(discord.Client):
                     await send_chunks(message.channel, project_message)
                     return
             await handle_plain_ask(message, content, target_thread_id=target_thread_id)
+        except DiscordDeliveryRejected:
+            log_line("on_message_delivery_rejected\n" + traceback.format_exc())
         except Exception:
             log_line("on_message_error\n" + traceback.format_exc())
             try:
-                await message.channel.send("Discord bot error. Check codex_discord_bot.log.")
+                await send_chunks(message.channel, "Discord bot error. Check codex_discord_bot.log.")
             except Exception:
                 log_line("on_message_error_report_failed\n" + traceback.format_exc())
 
@@ -2570,6 +2619,53 @@ def get_messageable_id(target: object) -> str:
 
 def build_delivery_id(text: str) -> str:
     return hashlib.blake2s(str(text or "").encode("utf-8", errors="replace"), digest_size=4).hexdigest()
+
+
+def set_discord_delivery_stopping(reason: str) -> None:
+    global DISCORD_DELIVERY_STOPPING
+    if DISCORD_DELIVERY_STOPPING:
+        return
+    DISCORD_DELIVERY_STOPPING = True
+    log_line(
+        f"discord_delivery_stopping reason={format_discord_command_label(reason, limit=80) or '-'}"
+    )
+
+
+def clear_discord_delivery_stopping() -> None:
+    global DISCORD_DELIVERY_STOPPING
+    DISCORD_DELIVERY_STOPPING = False
+
+
+def is_discord_delivery_stopping() -> bool:
+    return DISCORD_DELIVERY_STOPPING
+
+
+def begin_discord_delivery(label: str, *, allow_during_stop: bool = False) -> str:
+    if DISCORD_DELIVERY_STOPPING and not allow_during_stop:
+        safe_label = format_discord_command_label(label, limit=120)
+        log_line(f"discord_delivery_rejected context={safe_label or '-'} reason=stopping")
+        raise DiscordDeliveryRejected(DISCORD_RESTARTING_ERROR)
+    token = f"{label}:{time.monotonic_ns()}"
+    ACTIVE_DISCORD_DELIVERIES.add(token)
+    return token
+
+
+def end_discord_delivery(token: str) -> None:
+    ACTIVE_DISCORD_DELIVERIES.discard(token)
+
+
+async def wait_for_discord_delivery_drain(*, timeout_seconds: float, reason: str) -> bool:
+    deadline = time.monotonic() + max(0.0, timeout_seconds)
+    while ACTIVE_DISCORD_DELIVERIES:
+        if time.monotonic() >= deadline:
+            log_line(
+                f"discord_delivery_drain_timeout reason={reason} "
+                f"active={len(ACTIVE_DISCORD_DELIVERIES)}"
+            )
+            return False
+        await asyncio.sleep(0.1)
+    log_line(f"discord_delivery_drain_done reason={reason}")
+    return True
 
 
 def split_delivery_chunks(text: str) -> list[str]:
@@ -2584,47 +2680,164 @@ def split_delivery_chunks(text: str) -> list[str]:
     return [f"[{index}/{total}]\n{chunk}" for index, chunk in enumerate(chunks, start=1)]
 
 
-async def send_chunks(target: discord.abc.Messageable, text: str, *, context: str = "send_chunks") -> int:
+async def send_chunks(
+    target: discord.abc.Messageable,
+    text: str,
+    *,
+    context: str = "send_chunks",
+    allow_during_stop: bool = False,
+) -> int:
     chunks = split_delivery_chunks(text)
     delivery_id = build_delivery_id(text)
     target_id = get_messageable_id(target)
     safe_context = format_discord_command_label(context, limit=120)
-    log_line(
-        f"discord_delivery_start id={delivery_id} context={safe_context} "
-        f"target={target_id} chunks={len(chunks)} text_len={format_log_text_len(text)}"
+    delivery_token = begin_discord_delivery(
+        f"chunks:{delivery_id}:{target_id}:{safe_context}",
+        allow_during_stop=allow_during_stop,
     )
-    for index, chunk in enumerate(chunks, start=1):
-        sent_message = None
-        attempts = len(DISCORD_SEND_RETRY_DELAYS_SECONDS) + 1
-        for attempt in range(1, attempts + 1):
-            try:
-                sent_message = await target.send(chunk)
-                break
-            except Exception as exc:
-                if attempt >= attempts:
+    try:
+        log_line(
+            f"discord_delivery_start id={delivery_id} context={safe_context} "
+            f"target={target_id} chunks={len(chunks)} text_len={format_log_text_len(text)}"
+        )
+        for index, chunk in enumerate(chunks, start=1):
+            sent_message = None
+            attempts = len(DISCORD_SEND_RETRY_DELAYS_SECONDS) + 1
+            for attempt in range(1, attempts + 1):
+                try:
+                    sent_message = await target.send(chunk)
+                    break
+                except Exception as exc:
+                    if attempt >= attempts:
+                        log_line(
+                            f"discord_delivery_failed id={delivery_id} context={safe_context} "
+                            f"target={target_id} part={index}/{len(chunks)} attempt={attempt} "
+                            f"chunk_len={format_log_text_len(chunk)} error_type={type(exc).__name__}"
+                        )
+                        raise
                     log_line(
-                        f"discord_delivery_failed id={delivery_id} context={safe_context} "
+                        f"discord_delivery_retry id={delivery_id} context={safe_context} "
                         f"target={target_id} part={index}/{len(chunks)} attempt={attempt} "
                         f"chunk_len={format_log_text_len(chunk)} error_type={type(exc).__name__}"
                     )
-                    raise
-                log_line(
-                    f"discord_delivery_retry id={delivery_id} context={safe_context} "
-                    f"target={target_id} part={index}/{len(chunks)} attempt={attempt} "
-                    f"chunk_len={format_log_text_len(chunk)} error_type={type(exc).__name__}"
-                )
-                await asyncio.sleep(DISCORD_SEND_RETRY_DELAYS_SECONDS[attempt - 1])
+                    await asyncio.sleep(DISCORD_SEND_RETRY_DELAYS_SECONDS[attempt - 1])
+            log_line(
+                f"discord_delivery_chunk_sent id={delivery_id} context={safe_context} "
+                f"target={target_id} part={index}/{len(chunks)} "
+                f"message={getattr(sent_message, 'id', '-') or '-'} "
+                f"chunk_len={format_log_text_len(chunk)}"
+            )
         log_line(
-            f"discord_delivery_chunk_sent id={delivery_id} context={safe_context} "
-            f"target={target_id} part={index}/{len(chunks)} "
-            f"message={getattr(sent_message, 'id', '-') or '-'} "
-            f"chunk_len={format_log_text_len(chunk)}"
+            f"discord_delivery_sent id={delivery_id} context={safe_context} "
+            f"target={target_id} chunks={len(chunks)}"
         )
-    log_line(
-        f"discord_delivery_sent id={delivery_id} context={safe_context} "
-        f"target={target_id} chunks={len(chunks)}"
+        return len(chunks)
+    finally:
+        end_discord_delivery(delivery_token)
+
+
+async def send_discord_restarting_notice(target: discord.abc.Messageable) -> None:
+    await send_chunks(
+        target,
+        DISCORD_RESTARTING_NOTICE,
+        context="restart_notice",
+        allow_during_stop=True,
     )
-    return len(chunks)
+
+
+def build_startup_notice() -> str:
+    return "\n".join(
+        [
+            "Codex Discord bot online.",
+            "status: ready; restart/startup completed.",
+            "requests: new Discord messages and slash commands are accepted.",
+            "mapping: use `!where` or `/where` to check this channel's Codex target.",
+            "help: `!help` or `/help`.",
+        ]
+    )
+
+
+async def send_message_tracked(
+    target: discord.abc.Messageable,
+    content: str,
+    *,
+    view=None,
+    context: str = "send_message",
+    allow_during_stop: bool = False,
+):
+    target_id = get_messageable_id(target)
+    safe_context = format_discord_command_label(context, limit=120)
+    delivery_id = build_delivery_id(f"{safe_context}:{content}")
+    has_view = view is not None
+    delivery_token = begin_discord_delivery(
+        f"message:{delivery_id}:{target_id}:{safe_context}",
+        allow_during_stop=allow_during_stop,
+    )
+    try:
+        log_line(
+            f"discord_message_send_start id={delivery_id} context={safe_context or '-'} "
+            f"target={target_id} has_view={has_view} text_len={format_log_text_len(content)}"
+        )
+        if has_view:
+            sent_message = await target.send(content, view=view)
+        else:
+            sent_message = await target.send(content)
+        log_line(
+            f"discord_message_send_sent id={delivery_id} context={safe_context or '-'} "
+            f"target={target_id} message={getattr(sent_message, 'id', '-') or '-'} "
+            f"has_view={has_view}"
+        )
+        return sent_message
+    except Exception as exc:
+        log_line(
+            f"discord_message_send_failed id={delivery_id} context={safe_context or '-'} "
+            f"target={target_id} has_view={has_view} text_len={format_log_text_len(content)} "
+            f"error_type={type(exc).__name__} error={str(exc)[:300]}"
+        )
+        raise
+    finally:
+        end_discord_delivery(delivery_token)
+
+
+async def send_interaction_response_tracked(
+    interaction: discord.Interaction,
+    content: str,
+    *,
+    ephemeral: bool = False,
+    context: str = "interaction_response",
+    allow_during_stop: bool = False,
+) -> None:
+    command_name = get_interaction_command_name(interaction)
+    safe_context = format_discord_command_label(context, limit=120)
+    channel_id = getattr(interaction, "channel_id", "-") or "-"
+    delivery_token = begin_discord_delivery(
+        f"response:{command_name}:{channel_id}:{safe_context}",
+        allow_during_stop=allow_during_stop,
+    )
+    try:
+        await interaction.response.send_message(content, ephemeral=ephemeral)
+        log_line(
+            f"interaction_response_sent command={command_name} context={safe_context or '-'} "
+            f"channel={channel_id} ephemeral={ephemeral} text_len={format_log_text_len(content)}"
+        )
+    except Exception as exc:
+        log_line(
+            f"interaction_response_failed command={command_name} context={safe_context or '-'} "
+            f"channel={channel_id} ephemeral={ephemeral} text_len={format_log_text_len(content)} "
+            f"error_type={type(exc).__name__} error={str(exc)[:300]}"
+        )
+        raise
+    finally:
+        end_discord_delivery(delivery_token)
+
+
+async def send_interaction_not_allowed(interaction: discord.Interaction) -> None:
+    await send_interaction_response_tracked(
+        interaction,
+        "This channel/user is not allowed.",
+        ephemeral=True,
+        context="interaction_not_allowed",
+    )
 
 
 @asynccontextmanager
@@ -3230,9 +3443,11 @@ async def report_unhandled_component_interaction(
             return
     try:
         await clear_interaction_message_components(interaction, context="unhandled_component")
-        await interaction.response.send_message(
+        await send_interaction_response_tracked(
+            interaction,
             "This Discord button is no longer active. Send the message again to get fresh controls.",
             ephemeral=True,
+            context="component_unhandled",
         )
         log_line(
             f"component_interaction_unhandled_reported custom_id={custom_id} "
@@ -3280,12 +3495,22 @@ async def handle_persistent_approval_interaction(
     target_thread_id, answer = parsed
     user_id = int(getattr(interaction.user, "id", 0) or 0)
     if not is_discord_user_allowed(user_id):
-        await interaction.response.send_message("This user is not allowed.", ephemeral=True)
+        await send_interaction_response_tracked(
+            interaction,
+            "This user is not allowed.",
+            ephemeral=True,
+            context="approval_persistent_denied",
+        )
         log_line(f"approval_persistent_denied user={user_id} target={target_thread_id}")
         return True
     if not claim_persistent_component_interaction(interaction, custom_id):
         await clear_interaction_message_components(interaction, context="approval_persistent_already_handled")
-        await interaction.response.send_message("This approval choice was already handled.", ephemeral=True)
+        await send_interaction_response_tracked(
+            interaction,
+            "This approval choice was already handled.",
+            ephemeral=True,
+            context="approval_persistent_already_handled",
+        )
         log_line(f"approval_persistent_already_handled user={user_id} target={target_thread_id}")
         return True
     await interaction.response.defer(thinking=True)
@@ -3326,12 +3551,22 @@ async def handle_persistent_input_choice_interaction(
     target_thread_id, value = parsed
     user_id = int(getattr(interaction.user, "id", 0) or 0)
     if not is_discord_user_allowed(user_id):
-        await interaction.response.send_message("This user is not allowed.", ephemeral=True)
+        await send_interaction_response_tracked(
+            interaction,
+            "This user is not allowed.",
+            ephemeral=True,
+            context="input_choice_persistent_denied",
+        )
         log_line(f"input_choice_persistent_denied user={user_id} target={target_thread_id}")
         return True
     if not claim_persistent_component_interaction(interaction, custom_id):
         await clear_interaction_message_components(interaction, context="input_choice_persistent_already_handled")
-        await interaction.response.send_message("This input choice was already handled.", ephemeral=True)
+        await send_interaction_response_tracked(
+            interaction,
+            "This input choice was already handled.",
+            ephemeral=True,
+            context="input_choice_persistent_already_handled",
+        )
         log_line(f"input_choice_persistent_already_handled user={user_id} target={target_thread_id}")
         return True
     await interaction.response.defer(thinking=True)
@@ -3380,9 +3615,11 @@ async def handle_persistent_busy_choice_interaction(
     user_id = int(getattr(interaction.user, "id", 0) or 0)
     if record is None:
         await clear_interaction_message_components(interaction, context="busy_choice_missing")
-        await interaction.response.send_message(
+        await send_interaction_response_tracked(
+            interaction,
             "This Discord button is no longer active. Send the message again to get fresh controls.",
             ephemeral=True,
+            context="busy_choice_missing",
         )
         log_line(
             f"busy_choice_persistent_missing action={action} choice={choice_id} "
@@ -3390,16 +3627,23 @@ async def handle_persistent_busy_choice_interaction(
         )
         return True
     if user_id != int(record["owner_user_id"]):
-        await interaction.response.send_message("Only the original sender can choose this.", ephemeral=True)
+        await send_interaction_response_tracked(
+            interaction,
+            "Only the original sender can choose this.",
+            ephemeral=True,
+            context="busy_choice_persistent_denied",
+        )
         log_line(
             f"busy_choice_persistent_denied action={action} choice={choice_id} "
             f"user={user_id} owner={record['owner_user_id']} target={record['target_thread_id'] or '-'}"
         )
         return True
     if action == "steer" and not bool(record["allow_steer"]):
-        await interaction.response.send_message(
+        await send_interaction_response_tracked(
+            interaction,
             "This message targets a different Codex thread. Queue it instead.",
             ephemeral=True,
+            context="busy_choice_persistent_steer_rejected",
         )
         log_line(
             f"busy_choice_persistent_steer_rejected user={user_id} choice={choice_id} "
@@ -3408,7 +3652,12 @@ async def handle_persistent_busy_choice_interaction(
         return True
     if not claim_busy_choice_record(choice_id):
         await clear_interaction_message_components(interaction, context="busy_choice_already_handled")
-        await interaction.response.send_message("This busy choice was already handled.", ephemeral=True)
+        await send_interaction_response_tracked(
+            interaction,
+            "This busy choice was already handled.",
+            ephemeral=True,
+            context="busy_choice_persistent_already_handled",
+        )
         log_line(
             f"busy_choice_persistent_already_handled action={action} choice={choice_id} "
             f"user={user_id} target={record['target_thread_id'] or '-'}"
@@ -3423,7 +3672,11 @@ async def handle_persistent_busy_choice_interaction(
             f"target={target_thread_id or '-'}"
         )
         await clear_interaction_message_components(interaction, context="busy_choice_ignore")
-        await interaction.response.send_message("Ignored.")
+        await send_interaction_response_tracked(
+            interaction,
+            "Ignored.",
+            context="busy_choice_persistent_ignore",
+        )
         return True
 
     await interaction.response.defer(thinking=True, ephemeral=(action == "steer"))
@@ -3606,7 +3859,12 @@ async def send_interactive_prompt(
         lines = ["Waiting approval", f"thread: {target_ref or target_thread_id}", ""]
         if prompt:
             lines.extend([prompt, ""])
-        await channel.send(fit_single_message("\n".join(lines)), view=ApprovalView(target_thread_id))
+        await send_message_tracked(
+            channel,
+            fit_single_message("\n".join(lines)),
+            view=ApprovalView(target_thread_id),
+            context="interactive_approval",
+        )
         return
 
     if state == INTERACTIVE_STATE_INPUT:
@@ -3614,9 +3872,11 @@ async def send_interactive_prompt(
         if prompt:
             lines.extend([prompt, ""])
         if options:
-            await channel.send(
+            await send_message_tracked(
+                channel,
                 fit_single_message("\n".join(lines)),
                 view=InputChoiceView(target_thread_id, options),
+                context="interactive_input_choice",
             )
         else:
             lines.append("Reply with plain text to answer this prompt.")
@@ -3677,6 +3937,7 @@ async def send_followup_chunks(
     exit_code: int | None = None,
     log_prefix: str = "followup_response",
     ephemeral: bool = False,
+    allow_during_stop: bool = False,
 ) -> None:
     chunks = split_message(text)
     command_name = get_interaction_command_name(interaction)
@@ -3684,6 +3945,10 @@ async def send_followup_chunks(
     log_line(
         f"{log_prefix}_start command={command_name} title={title!r} "
         f"exit={exit_part} chunks={len(chunks)} channel={interaction.channel_id}"
+    )
+    delivery_token = begin_discord_delivery(
+        f"followup:{command_name}:{interaction.channel_id}:{log_prefix}",
+        allow_during_stop=allow_during_stop,
     )
     sent_count = 0
     try:
@@ -3697,26 +3962,11 @@ async def send_followup_chunks(
         log_line(
             f"{log_prefix}_failed command={command_name} title={title!r} "
             f"exit={exit_part} sent={sent_count} chunks={len(chunks)} "
-            f"error_type={type(exc).__name__}"
+            f"error_type={type(exc).__name__} error={str(exc)[:300]}"
         )
-        channel = getattr(interaction, "channel", None)
-        if channel is not None and hasattr(channel, "send"):
-            remaining = "\n\n".join(chunks[sent_count:]) or "(no output)"
-            prefix = (
-                "Discord follow-up delivery failed; posting remaining response here."
-                if sent_count
-                else "Discord follow-up delivery failed; posting response here."
-            )
-            try:
-                await send_chunks(channel, f"{prefix}\n\n{remaining}")
-                log_line(
-                    f"{log_prefix}_fallback_sent command={command_name} title={title!r} "
-                    f"exit={exit_part} sent={sent_count} chunks={len(chunks)}"
-                )
-                return
-            except Exception:
-                log_line(f"{log_prefix}_fallback_failed\n" + traceback.format_exc())
         raise
+    finally:
+        end_discord_delivery(delivery_token)
     log_line(
         f"{log_prefix}_sent command={command_name} title={title!r} "
         f"exit={exit_part} chunks={len(chunks)}"
@@ -3727,44 +3977,39 @@ async def send_direct_followup(
     interaction: discord.Interaction,
     content: str,
     *,
+    ephemeral: bool = False,
     view=None,
     log_prefix: str = "direct_followup",
     context: str = "",
+    allow_during_stop: bool = False,
 ) -> None:
     command_name = get_interaction_command_name(interaction)
     safe_context = format_discord_command_label(context, limit=80)
     has_view = view is not None
-    failure: Exception | None = None
-    try:
-        await interaction.followup.send(content, view=view)
-        log_line(
-            f"{log_prefix}_sent command={command_name} context={safe_context or '-'} "
-            f"has_view={has_view} content_len={format_log_text_len(content)}"
-        )
-        return
-    except Exception as exc:
-        failure = exc
-        log_line(
-            f"{log_prefix}_failed command={command_name} context={safe_context or '-'} "
-            f"has_view={has_view} content_len={format_log_text_len(content)} "
-            f"error_type={type(exc).__name__}"
-        )
-    channel = getattr(interaction, "channel", None)
-    if channel is None or not hasattr(channel, "send"):
-        raise failure
-    prefix = "Discord follow-up delivery failed; posting response here."
+    delivery_token = begin_discord_delivery(
+        f"direct_followup:{command_name}:{getattr(interaction, 'channel_id', '-') or '-'}:{safe_context or '-'}",
+        allow_during_stop=allow_during_stop,
+    )
     try:
         if has_view:
-            await channel.send(fit_single_message(f"{prefix}\n\n{content}"), view=view)
+            await interaction.followup.send(content, view=view, ephemeral=ephemeral)
+        elif ephemeral:
+            await interaction.followup.send(content, ephemeral=True)
         else:
-            await send_chunks(channel, f"{prefix}\n\n{content}")
+            await interaction.followup.send(content)
         log_line(
-            f"{log_prefix}_fallback_sent command={command_name} context={safe_context or '-'} "
-            f"has_view={has_view}"
+            f"{log_prefix}_sent command={command_name} context={safe_context or '-'} "
+            f"has_view={has_view} ephemeral={ephemeral} content_len={format_log_text_len(content)}"
         )
-    except Exception:
-        log_line(f"{log_prefix}_fallback_failed\n" + traceback.format_exc())
+    except Exception as exc:
+        log_line(
+            f"{log_prefix}_failed command={command_name} context={safe_context or '-'} "
+            f"has_view={has_view} ephemeral={ephemeral} content_len={format_log_text_len(content)} "
+            f"error_type={type(exc).__name__} error={str(exc)[:300]}"
+        )
         raise
+    finally:
+        end_discord_delivery(delivery_token)
 
 
 def build_steering_start_message(prompt: str) -> str:
@@ -3784,7 +4029,11 @@ async def send_steering_start_ack(
     target_thread_id: str | None,
 ) -> bool:
     try:
-        await channel.send(build_steering_start_message(prompt))
+        await send_message_tracked(
+            channel,
+            build_steering_start_message(prompt),
+            context="steering_start_ack",
+        )
         log_line(
             f"steering_start_ack_sent target={target_thread_id or '-'} "
             f"prompt_len={format_log_text_len(prompt)}"
@@ -3863,7 +4112,12 @@ async def run_discord_button_qa(bot: "CodexDiscordBot", message: discord.Message
             target_thread_id=get_mirrored_codex_thread_id(getattr(channel, "id", None)),
             allow_steer=True,
         )
-        sent_message = await channel.send(content, view=view)
+        sent_message = await send_message_tracked(
+            channel,
+            content,
+            view=view,
+            context="button_qa_busy_choice",
+        )
         custom_ids = {
             str(getattr(item, "label", "")): str(getattr(item, "custom_id", ""))
             for item in view.children
@@ -4018,7 +4272,12 @@ async def run_discord_button_qa(bot: "CodexDiscordBot", message: discord.Message
     )
 
     approval_view = ApprovalView("qa-thread")
-    approval_message = await channel.send("QA approval persistent smoke", view=approval_view)
+    approval_message = await send_message_tracked(
+        channel,
+        "QA approval persistent smoke",
+        view=approval_view,
+        context="button_qa_approval",
+    )
     approval_custom_ids = {
         str(getattr(item, "label", "")): str(getattr(item, "custom_id", ""))
         for item in approval_view.children
@@ -4055,7 +4314,12 @@ async def run_discord_button_qa(bot: "CodexDiscordBot", message: discord.Message
     )
 
     input_view = InputChoiceView("qa-thread", [("choice-1", "Choice one")])
-    input_message = await channel.send("QA input persistent smoke", view=input_view)
+    input_message = await send_message_tracked(
+        channel,
+        "QA input persistent smoke",
+        view=input_view,
+        context="button_qa_input",
+    )
     input_custom_ids = {
         str(getattr(item, "label", "")): str(getattr(item, "custom_id", ""))
         for item in input_view.children
@@ -4146,14 +4410,11 @@ async def run_discord_new_thread(
         if new_thread_id:
             try:
                 preferred_project_channel_id = None
-                try:
-                    codex_thread = await asyncio.to_thread(bridge.choose_thread, new_thread_id, None)
-                    preferred_project_channel_id = resolve_discord_new_thread_project_channel_id(
-                        discord_channel_id,
-                        get_project_key(codex_thread),
-                    )
-                except Exception:
-                    log_line("new_thread_preferred_channel_resolve_failed\n" + traceback.format_exc())
+                codex_thread = await asyncio.to_thread(bridge.choose_thread, new_thread_id, None)
+                preferred_project_channel_id = resolve_discord_new_thread_project_channel_id(
+                    discord_channel_id,
+                    get_project_key(codex_thread),
+                )
                 discord_thread = await mirror_single_codex_thread(
                     bot,
                     new_thread_id,
@@ -4166,7 +4427,7 @@ async def run_discord_new_thread(
                 parts.append(f"Mirrored Discord thread: <#{discord_thread.id}>")
             except Exception as exc:
                 log_line("new_thread_mirror_failed\n" + traceback.format_exc())
-                parts.append(f"Mirror update failed: {exc}\nRun `!mirror sync` to repair.")
+                parts.append(f"Mirror update failed: {type(exc).__name__}: {exc}")
         else:
             log_line("new_thread_mirror_skipped reason=no_thread_id")
             parts.append("Mirror update skipped: new thread id was not found in bridge output.")
@@ -4216,13 +4477,167 @@ async def handle_slash_ask(interaction: discord.Interaction, prompt: str) -> Non
         f"target_source={target_source} target={target_thread_id or '-'} "
         f"prompt_len={format_log_text_len(prompt)}"
     )
-    await interaction.followup.send("Ask handling posted in this channel.", ephemeral=True)
+    await send_direct_followup(
+        interaction,
+        "Ask handling posted in this channel.",
+        ephemeral=True,
+        log_prefix="slash_ack",
+        context="ask_posted",
+    )
     log_line(
         f"slash_ask_ack_sent command={get_interaction_command_name(interaction)} "
         f"channel={interaction.channel_id}"
     )
     source_message = SimpleNamespace(channel=channel, author=interaction.user)
     await handle_plain_ask(source_message, prompt, target_thread_id=target_thread_id)  # type: ignore[arg-type]
+
+
+def build_deep_interview_prompt(user_request: str) -> str:
+    return DEEP_INTERVIEW_PROMPT_HEADER + str(user_request or "").strip()
+
+
+def build_github_triage_prompt(user_request: str) -> str:
+    request = str(user_request or "").strip() or "triage the current GitHub project"
+    return GITHUB_TRIAGE_PROMPT_HEADER + request
+
+
+def build_maintainer_orchestrator_prompt(user_request: str) -> str:
+    return MAINTAINER_ORCHESTRATOR_PROMPT_HEADER + str(user_request or "").strip()
+
+
+async def handle_slash_interview(interaction: discord.Interaction, prompt: str) -> None:
+    channel = interaction.channel
+    if channel is None or not hasattr(channel, "send"):
+        await send_interaction_chunks(
+            interaction,
+            "This Discord interaction has no messageable channel.",
+            title="Interview",
+        )
+        return
+
+    interview_prompt = build_deep_interview_prompt(prompt)
+    target_thread_id = get_mirrored_codex_thread_id(interaction.channel_id)
+    target_source = "mirror" if target_thread_id else "selected"
+    if target_thread_id is None:
+        project_message = describe_mirrored_project_channel(interaction.channel_id)
+        if project_message:
+            log_line(
+                f"slash_interview_blocked command={get_interaction_command_name(interaction)} "
+                f"channel={interaction.channel_id} user={interaction.user.id} "
+                f"reason=project_parent prompt_len={format_log_text_len(prompt)}"
+            )
+            await send_interaction_chunks(interaction, project_message, title="Interview")
+            return
+
+    log_line(
+        f"slash_interview_dispatch command={get_interaction_command_name(interaction)} "
+        f"channel={interaction.channel_id} user={interaction.user.id} "
+        f"target_source={target_source} target={target_thread_id or '-'} "
+        f"prompt_len={format_log_text_len(prompt)}"
+    )
+    await send_direct_followup(
+        interaction,
+        "Interview handling posted in this channel.",
+        ephemeral=True,
+        log_prefix="slash_ack",
+        context="interview_posted",
+    )
+    log_line(
+        f"slash_interview_ack_sent command={get_interaction_command_name(interaction)} "
+        f"channel={interaction.channel_id}"
+    )
+    source_message = SimpleNamespace(channel=channel, author=interaction.user)
+    await handle_plain_ask(source_message, interview_prompt, target_thread_id=target_thread_id)  # type: ignore[arg-type]
+
+
+async def handle_slash_github_triage(interaction: discord.Interaction, prompt: str = "") -> None:
+    channel = interaction.channel
+    if channel is None or not hasattr(channel, "send"):
+        await send_interaction_chunks(
+            interaction,
+            "This Discord interaction has no messageable channel.",
+            title="GitHub triage",
+        )
+        return
+
+    triage_prompt = build_github_triage_prompt(prompt)
+    target_thread_id = get_mirrored_codex_thread_id(interaction.channel_id)
+    target_source = "mirror" if target_thread_id else "selected"
+    if target_thread_id is None:
+        project_message = describe_mirrored_project_channel(interaction.channel_id)
+        if project_message:
+            log_line(
+                f"slash_github_triage_blocked command={get_interaction_command_name(interaction)} "
+                f"channel={interaction.channel_id} user={interaction.user.id} "
+                f"reason=project_parent prompt_len={format_log_text_len(prompt)}"
+            )
+            await send_interaction_chunks(interaction, project_message, title="GitHub triage")
+            return
+
+    log_line(
+        f"slash_github_triage_dispatch command={get_interaction_command_name(interaction)} "
+        f"channel={interaction.channel_id} user={interaction.user.id} "
+        f"target_source={target_source} target={target_thread_id or '-'} "
+        f"prompt_len={format_log_text_len(prompt)}"
+    )
+    await send_direct_followup(
+        interaction,
+        "GitHub triage handling posted in this channel.",
+        ephemeral=True,
+        log_prefix="slash_ack",
+        context="github_triage_posted",
+    )
+    log_line(
+        f"slash_github_triage_ack_sent command={get_interaction_command_name(interaction)} "
+        f"channel={interaction.channel_id}"
+    )
+    source_message = SimpleNamespace(channel=channel, author=interaction.user)
+    await handle_plain_ask(source_message, triage_prompt, target_thread_id=target_thread_id)  # type: ignore[arg-type]
+
+
+async def handle_slash_maintainer_orchestrator(interaction: discord.Interaction, prompt: str) -> None:
+    channel = interaction.channel
+    if channel is None or not hasattr(channel, "send"):
+        await send_interaction_chunks(
+            interaction,
+            "This Discord interaction has no messageable channel.",
+            title="Maintainer orchestrator",
+        )
+        return
+
+    orchestrator_prompt = build_maintainer_orchestrator_prompt(prompt)
+    target_thread_id = get_mirrored_codex_thread_id(interaction.channel_id)
+    target_source = "mirror" if target_thread_id else "selected"
+    if target_thread_id is None:
+        project_message = describe_mirrored_project_channel(interaction.channel_id)
+        if project_message:
+            log_line(
+                f"slash_maintainer_orchestrator_blocked command={get_interaction_command_name(interaction)} "
+                f"channel={interaction.channel_id} user={interaction.user.id} "
+                f"reason=project_parent prompt_len={format_log_text_len(prompt)}"
+            )
+            await send_interaction_chunks(interaction, project_message, title="Maintainer orchestrator")
+            return
+
+    log_line(
+        f"slash_maintainer_orchestrator_dispatch command={get_interaction_command_name(interaction)} "
+        f"channel={interaction.channel_id} user={interaction.user.id} "
+        f"target_source={target_source} target={target_thread_id or '-'} "
+        f"prompt_len={format_log_text_len(prompt)}"
+    )
+    await send_direct_followup(
+        interaction,
+        "Maintainer orchestrator handling posted in this channel.",
+        ephemeral=True,
+        log_prefix="slash_ack",
+        context="maintainer_orchestrator_posted",
+    )
+    log_line(
+        f"slash_maintainer_orchestrator_ack_sent command={get_interaction_command_name(interaction)} "
+        f"channel={interaction.channel_id}"
+    )
+    source_message = SimpleNamespace(channel=channel, author=interaction.user)
+    await handle_plain_ask(source_message, orchestrator_prompt, target_thread_id=target_thread_id)  # type: ignore[arg-type]
 
 
 async def get_mirror_guild(bot: CodexDiscordBot) -> discord.Guild:
@@ -4240,16 +4655,28 @@ async def get_or_create_mirror_category(guild: discord.Guild) -> discord.Categor
 
 
 def upsert_mirror_project(project_key: str, project_name: str, channel_id: int) -> None:
-    init_mirror_db()
-    with sqlite3.connect(MIRROR_DB_PATH) as conn:
-        conn.execute(
-            """
-            INSERT OR REPLACE INTO mirror_projects
-                (project_key, project_name, discord_channel_id, updated_at)
-            VALUES (?, ?, ?, ?)
-            """,
-            (project_key, project_name, int(channel_id), time.time()),
+    canonical_project_key = normalize_project_key(project_key)
+    merged_aliases = discord_store.upsert_mirror_project(
+        MIRROR_DB_PATH,
+        canonical_project_key,
+        project_name,
+        int(channel_id),
+        project_keys_match_func=project_keys_match,
+    )
+    if merged_aliases:
+        log_line(
+            f"mirror_project_aliases_merged project={canonical_project_key[:80]} "
+            f"aliases={len(merged_aliases)}"
         )
+
+
+def find_mirror_project_row_by_key(project_key: str | None) -> tuple[int, str] | None:
+    canonical_project_key = normalize_project_key(project_key)
+    return discord_store.find_mirror_project_row_by_key(
+        MIRROR_DB_PATH,
+        canonical_project_key,
+        project_keys_match_func=project_keys_match,
+    )
 
 
 def upsert_mirror_thread(
@@ -4259,23 +4686,15 @@ def upsert_mirror_thread(
     project_channel_id: int,
     discord_thread_id: int,
 ) -> None:
-    init_mirror_db()
-    with sqlite3.connect(MIRROR_DB_PATH) as conn:
-        conn.execute(
-            """
-            INSERT OR REPLACE INTO mirror_threads
-                (codex_thread_id, project_key, thread_title, discord_channel_id, discord_thread_id, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?)
-            """,
-            (
-                codex_thread.id,
-                project_key,
-                thread_name,
-                int(project_channel_id),
-                int(discord_thread_id),
-                time.time(),
-            ),
-        )
+    canonical_project_key = normalize_project_key(project_key)
+    discord_store.upsert_mirror_thread(
+        MIRROR_DB_PATH,
+        codex_thread.id,
+        canonical_project_key,
+        thread_name,
+        int(project_channel_id),
+        int(discord_thread_id),
+    )
 
 
 def find_existing_project_channel(
@@ -4351,23 +4770,27 @@ async def get_or_create_project_channel(
     project_key: str,
     project_name: str,
 ) -> discord.TextChannel:
-    init_mirror_db()
-    with sqlite3.connect(MIRROR_DB_PATH) as conn:
-        row = conn.execute(
-            "SELECT discord_channel_id FROM mirror_projects WHERE project_key = ?",
-            (project_key,),
-        ).fetchone()
+    project_key = normalize_project_key(project_key)
+    row = find_mirror_project_row_by_key(project_key)
 
     if row:
-        channel = guild.get_channel(int(row[0]))
+        stored_channel_id = int(row[0])
+        channel = guild.get_channel(stored_channel_id)
         if isinstance(channel, discord.TextChannel):
             return await ensure_mirror_project_channel(guild, channel, project_key, project_name)
         try:
-            fetched = await guild.fetch_channel(int(row[0]))
-            if isinstance(fetched, discord.TextChannel):
-                return await ensure_mirror_project_channel(guild, fetched, project_key, project_name)
-        except Exception:
-            pass
+            fetched = await guild.fetch_channel(stored_channel_id)
+        except Exception as exc:
+            raise RuntimeError(
+                f"Stored mirror project channel {stored_channel_id} for {project_key} "
+                f"is unavailable: {type(exc).__name__}: {exc}"
+            ) from exc
+        if not isinstance(fetched, discord.TextChannel):
+            raise RuntimeError(
+                f"Stored mirror project channel {stored_channel_id} for {project_key} "
+                f"is {type(fetched).__name__}, not TextChannel."
+            )
+        return await ensure_mirror_project_channel(guild, fetched, project_key, project_name)
 
     base_name = normalize_discord_name(project_name, prefix="codex-", max_len=80)
     existing_channel = find_existing_project_channel(
@@ -4458,17 +4881,20 @@ async def get_or_create_thread_channel(
     project_key: str,
     project_channel: discord.TextChannel,
 ) -> discord.Thread:
-    init_mirror_db()
     thread_name = get_mirror_thread_name(codex_thread)
-    with sqlite3.connect(MIRROR_DB_PATH) as conn:
-        row = conn.execute(
-            "SELECT discord_channel_id, discord_thread_id FROM mirror_threads WHERE codex_thread_id = ?",
-            (codex_thread.id,),
-        ).fetchone()
+    row = discord_store.get_mirror_thread_row_by_codex_thread_id(
+        MIRROR_DB_PATH,
+        codex_thread.id,
+    )
 
     if row:
         channel_id = int(row[0])
         thread_id = int(row[1])
+        if channel_id != int(project_channel.id):
+            raise RuntimeError(
+                f"Stored mirror thread {thread_id} for {codex_thread.id} belongs to "
+                f"project channel {channel_id}, not current project channel {project_channel.id}."
+            )
         if channel_id == int(project_channel.id):
             cached = project_channel.guild.get_thread(thread_id)
             if isinstance(cached, discord.Thread):
@@ -4481,16 +4907,23 @@ async def get_or_create_thread_channel(
                 )
             try:
                 fetched = await project_channel.guild.fetch_channel(thread_id)
-                if isinstance(fetched, discord.Thread):
-                    return await ensure_mirror_thread_channel(
-                        codex_thread,
-                        project_key,
-                        project_channel,
-                        fetched,
-                        thread_name,
-                    )
-            except Exception:
-                pass
+            except Exception as exc:
+                raise RuntimeError(
+                    f"Stored mirror thread {thread_id} for {codex_thread.id} "
+                    f"is unavailable: {type(exc).__name__}: {exc}"
+                ) from exc
+            if not isinstance(fetched, discord.Thread):
+                raise RuntimeError(
+                    f"Stored mirror thread {thread_id} for {codex_thread.id} "
+                    f"is {type(fetched).__name__}, not Thread."
+                )
+            return await ensure_mirror_thread_channel(
+                codex_thread,
+                project_key,
+                project_channel,
+                fetched,
+                thread_name,
+            )
 
     existing_thread = await find_existing_thread_channel(project_channel, thread_name)
     if existing_thread is not None:
@@ -4689,8 +5122,19 @@ def load_mirror_scope_threads(limit: int | None = None) -> list[bridge.ThreadInf
     return bridge.load_recent_threads(bounded_mirror_limit(limit))
 
 
+def empty_mirror_cleanup_result() -> dict[str, object]:
+    return {
+        "deleted": 0,
+        "missing": 0,
+        "skipped": 0,
+        "failed": 0,
+        "errors": [],
+    }
+
+
 async def sync_codex_mirror(bot: CodexDiscordBot, *, limit: int | None = None) -> str:
     scope = "db-root" if limit is None else str(bounded_mirror_limit(limit))
+    cleanup_scope = "full_db_root" if limit is None else "limited_sync_no_prune"
     log_line(f"mirror_sync_start limit={scope}")
     guild = await get_mirror_guild(bot)
     category = await get_or_create_mirror_category(guild)
@@ -4709,92 +5153,46 @@ async def sync_codex_mirror(bot: CodexDiscordBot, *, limit: int | None = None) -
         await get_or_create_thread_channel(codex_thread, project_key, channel)
         mirrored += 1
 
-    valid_thread_ids = {thread.id for thread in threads}
-    valid_project_keys = {get_project_key(thread) for thread in threads}
-    with sqlite3.connect(MIRROR_DB_PATH) as conn:
-        if valid_thread_ids:
-            stale_threads = conn.execute(
-                """
-                SELECT codex_thread_id, discord_thread_id, thread_title
-                FROM mirror_threads
-                WHERE codex_thread_id NOT IN ({})
-                """.format(",".join("?" for _ in valid_thread_ids)),
-                tuple(valid_thread_ids),
-            ).fetchall()
-        else:
-            stale_threads = conn.execute(
-                """
-                SELECT codex_thread_id, discord_thread_id, thread_title
-                FROM mirror_threads
-                """
-            ).fetchall()
-        if valid_project_keys:
-            stale_projects = conn.execute(
-                """
-                SELECT project_key, project_name, discord_channel_id FROM mirror_projects
-                WHERE project_key NOT IN ({})
-                """.format(",".join("?" for _ in valid_project_keys)),
-                tuple(valid_project_keys),
-            ).fetchall()
-        else:
-            stale_projects = conn.execute(
-                "SELECT project_key, project_name, discord_channel_id FROM mirror_projects"
-            ).fetchall()
+    if limit is None:
+        valid_thread_ids = {thread.id for thread in threads}
+        valid_project_keys = {get_project_key(thread) for thread in threads}
+        stale_threads = discord_store.get_stale_mirror_thread_rows(MIRROR_DB_PATH, valid_thread_ids)
+        stale_projects = discord_store.get_stale_mirror_project_rows(MIRROR_DB_PATH, valid_project_keys)
 
-    stale_cleanup = await delete_stale_discord_threads(guild, stale_threads)
-    stale_project_cleanup = await delete_stale_project_channels(guild, category, stale_projects)
+        stale_cleanup = await delete_stale_discord_threads(guild, stale_threads)
+        stale_project_cleanup = await delete_stale_project_channels(guild, category, stale_projects)
 
-    with sqlite3.connect(MIRROR_DB_PATH) as conn:
-        if valid_thread_ids:
-            conn.execute(
-                """
-                DELETE FROM mirror_threads
-                WHERE codex_thread_id NOT IN ({})
-                """.format(",".join("?" for _ in valid_thread_ids)),
-                tuple(valid_thread_ids),
-            )
-        else:
-            conn.execute("DELETE FROM mirror_threads")
-        if valid_project_keys:
-            conn.execute(
-                """
-                DELETE FROM mirror_projects
-                WHERE project_key NOT IN ({})
-                """.format(",".join("?" for _ in valid_project_keys)),
-                tuple(valid_project_keys),
-            )
-        else:
-            conn.execute("DELETE FROM mirror_projects")
-        known_thread_ids = {
-            int(row[0])
-            for row in conn.execute("SELECT discord_thread_id FROM mirror_threads").fetchall()
-            if row[0]
-        }
-        project_channel_ids = [
-            int(row[0])
-            for row in conn.execute("SELECT discord_channel_id FROM mirror_projects").fetchall()
-            if row[0]
-        ]
+        discord_store.delete_stale_mirror_rows(MIRROR_DB_PATH, valid_thread_ids, valid_project_keys)
+        known_thread_ids, project_channel_ids = discord_store.get_remaining_mirror_discord_ids(
+            MIRROR_DB_PATH
+        )
 
-    project_channels: list[discord.TextChannel] = []
-    for channel_id in project_channel_ids:
-        channel = guild.get_channel(channel_id)
-        if channel is None:
-            try:
-                channel = await guild.fetch_channel(channel_id)
-            except Exception:
-                channel = None
-        if isinstance(channel, discord.TextChannel):
-            project_channels.append(channel)
+        project_channels: list[discord.TextChannel] = []
+        for channel_id in project_channel_ids:
+            channel = guild.get_channel(channel_id)
+            if channel is None:
+                try:
+                    channel = await guild.fetch_channel(channel_id)
+                except Exception:
+                    channel = None
+            if isinstance(channel, discord.TextChannel):
+                project_channels.append(channel)
 
-    orphan_cleanup = await cleanup_orphan_discord_threads(
-        project_channels,
-        known_thread_ids,
-        bot.user.id if bot.user else None,
-    )
+        orphan_cleanup = await cleanup_orphan_discord_threads(
+            project_channels,
+            known_thread_ids,
+            bot.user.id if bot.user else None,
+        )
+    else:
+        stale_threads = []
+        stale_projects = []
+        stale_cleanup = empty_mirror_cleanup_result()
+        stale_project_cleanup = empty_mirror_cleanup_result()
+        orphan_cleanup = empty_mirror_cleanup_result()
+        log_line(f"mirror_sync_cleanup_skipped scope={cleanup_scope} limit={scope}")
     log_line(
         "mirror_sync_done "
-        f"mirrored={mirrored} stale_rows={len(stale_threads)} "
+        f"mirrored={mirrored} cleanup_scope={cleanup_scope} stale_rows={len(stale_threads)} "
         f"stale_deleted={stale_cleanup['deleted']} orphan_deleted={orphan_cleanup['deleted']} "
         f"orphan_failed={orphan_cleanup['failed']} "
         f"stale_projects_deleted={stale_project_cleanup['deleted']}"
@@ -4803,6 +5201,7 @@ async def sync_codex_mirror(bot: CodexDiscordBot, *, limit: int | None = None) -
     return "\n".join(
         [
             "Mirror sync complete.",
+            f"cleanup_scope: {cleanup_scope}",
             f"projects: {len(created_or_seen_projects)}",
             f"threads: {mirrored}",
             f"stale_threads_removed: {len(stale_threads)}",
@@ -4911,22 +5310,20 @@ async def mirror_single_codex_thread(
         if not isinstance(candidate, discord.TextChannel):
             try:
                 fetched = await guild.fetch_channel(int(preferred_project_channel_id))
-                if isinstance(fetched, discord.TextChannel):
-                    candidate = fetched
-            except Exception:
-                candidate = None
+            except Exception as exc:
+                raise RuntimeError(
+                    f"Preferred mirror project channel {preferred_project_channel_id} "
+                    f"is unavailable: {type(exc).__name__}: {exc}"
+                ) from exc
+            if not isinstance(fetched, discord.TextChannel):
+                raise RuntimeError(
+                    f"Preferred mirror project channel {preferred_project_channel_id} "
+                    f"is {type(fetched).__name__}, not TextChannel."
+                )
+            candidate = fetched
         if isinstance(candidate, discord.TextChannel):
             project_channel = candidate
-            init_mirror_db()
-            with sqlite3.connect(MIRROR_DB_PATH) as conn:
-                conn.execute(
-                    """
-                    INSERT OR REPLACE INTO mirror_projects
-                        (project_key, project_name, discord_channel_id, updated_at)
-                    VALUES (?, ?, ?, ?)
-                    """,
-                    (project_key, project_name, int(project_channel.id), time.time()),
-                )
+            upsert_mirror_project(project_key, project_name, int(project_channel.id))
             log_line(
                 f"single_thread_mirror_preferred_channel codex_thread={thread_id} "
                 f"project_channel={project_channel.id}"
@@ -5531,6 +5928,7 @@ async def report_thread_runner_job_failed(job: object, target_thread_id: str | N
     await discord_runner.report_thread_runner_job_failed(
         job,
         target_thread_id,
+        send_text_func=send_chunks,
         log_func=log_line,
     )
 
@@ -5546,6 +5944,7 @@ async def thread_runner_loop(target_thread_id: str | None) -> None:
         wait_for_idle_func=wait_for_codex_thread_idle,
         run_prompt_and_send_func=run_prompt_and_send,
         report_job_failed_func=report_thread_runner_job_failed,
+        send_text_func=send_chunks,
         log_func=log_line,
     )
 
@@ -5839,7 +6238,11 @@ async def _run_prompt_and_send_unlocked(
     target_thread_id: str | None = None,
 ) -> None:
     if not ack_sent:
-        await channel.send(build_ask_start_message(prompt, queued=queued))
+        await send_chunks(
+            channel,
+            build_ask_start_message(prompt, queued=queued),
+            context="ask_start",
+        )
     target_thread_id, target_ref = resolve_target_ref(target_thread_id)
     if await prepare_mapped_session_mirror_output(channel, target_thread_id):
         async with channel_typing(channel, context="ask_transport_no_wait"):
@@ -6062,19 +6465,27 @@ async def _run_prompt_and_send_unlocked(
                 return
             else:
                 log_line(
-                    f"ask_stream_no_final_fallback target={target_thread_id or '-'} "
+                    f"ask_stream_no_final_error target={target_thread_id or '-'} "
                     f"output_len={format_log_text_len(output)}"
                 )
-                await send_chunks(channel, f"Ask finished\n\n{output or '(no final answer captured)'}")
+                await send_chunks(
+                    channel,
+                    "Ask failed\n\n"
+                    "ERROR: Codex stream completed without a final answer.\n\n"
+                    f"{output or '(no output)'}",
+                )
         elif not relay.saw_aborted and not relay.saw_timeout:
             await send_chunks(channel, f"Ask failed (exit {exit_code})\n\n{output or '(no output)'}")
         return
     if exit_code == 0 and not relay.saw_final and not relay.saw_aborted and not relay.saw_timeout:
         log_line(
-            f"ask_stream_no_final_fallback target={target_thread_id or '-'} "
+            f"ask_stream_no_final_error target={target_thread_id or '-'} "
             f"output_len={format_log_text_len(output)}"
         )
-    title = "Ask finished" if exit_code == 0 else f"Ask failed (exit {exit_code})"
+        title = "Ask failed"
+        output = "ERROR: Codex stream completed without a final answer.\n\n" + (output or "(no output)")
+    else:
+        title = "Ask finished" if exit_code == 0 else f"Ask failed (exit {exit_code})"
     await send_chunks(channel, f"{title}\n\n{output or '(no output)'}")
 
 
@@ -6166,7 +6577,11 @@ async def run_prompt_flow(
     warning = build_context_warning(target_thread_id)
     if warning:
         await send_chunks(channel, warning)
-    await channel.send(build_ask_start_message(prompt, queued=queued))
+    await send_chunks(
+        channel,
+        build_ask_start_message(prompt, queued=queued),
+        context="ask_start",
+    )
     await run_prompt_and_send(
         channel,
         prompt,
@@ -6212,6 +6627,7 @@ async def send_busy_choice_message(
     allow_steer: bool,
     reason: str,
 ) -> bool:
+    failure: Exception | None = None
     try:
         content, view = make_busy_choice_payload(
             source_message,
@@ -6219,10 +6635,16 @@ async def send_busy_choice_message(
             target_thread_id=target_thread_id,
             allow_steer=allow_steer,
         )
-        await channel.send(content, view=view)
+        await send_message_tracked(
+            channel,
+            content,
+            view=view,
+            context=f"busy_choice:{reason}",
+        )
         log_busy_choice_sent(reason, target_thread_id, prompt)
         return True
-    except Exception:
+    except Exception as exc:
+        failure = exc
         log_line(
             f"busy_choice_send_failed reason={reason.replace(chr(10), ' ')[:80]} "
             f"target={target_thread_id or '-'} prompt_len={format_log_text_len(prompt)}\n"
@@ -6233,19 +6655,19 @@ async def send_busy_choice_message(
             channel,
             "\n\n".join(
                 [
-                    build_busy_choice_message(prompt, target_thread_id),
-                    "Discord could not attach steering buttons. Send the message again when the thread is idle, or use `/ask` from the mapped Discord thread.",
+                    "Busy choice failed",
+                    f"ERROR: {type(failure).__name__}: {failure}",
                 ]
             ),
         )
         log_line(
-            f"busy_choice_fallback_sent reason={reason.replace(chr(10), ' ')[:80]} "
+            f"busy_choice_error_sent reason={reason.replace(chr(10), ' ')[:80]} "
             f"target={target_thread_id or '-'}"
         )
         return False
     except Exception:
         log_line(
-            f"busy_choice_fallback_failed reason={reason.replace(chr(10), ' ')[:80]} "
+            f"busy_choice_error_send_failed reason={reason.replace(chr(10), ' ')[:80]} "
             f"target={target_thread_id or '-'}\n"
             + traceback.format_exc()
         )
@@ -6417,12 +6839,22 @@ class ApprovalView(discord.ui.View):
         if is_discord_user_allowed(interaction.user.id):
             return True
         log_line(f"approval_button_denied user={interaction.user.id} target={self.target_thread_id}")
-        await interaction.response.send_message("This user is not allowed.", ephemeral=True)
+        await send_interaction_response_tracked(
+            interaction,
+            "This user is not allowed.",
+            ephemeral=True,
+            context="approval_button_denied",
+        )
         return False
 
     async def _submit(self, interaction: discord.Interaction, answer: str) -> None:
         if self.claimed:
-            await interaction.response.send_message("This approval choice was already handled.", ephemeral=True)
+            await send_interaction_response_tracked(
+                interaction,
+                "This approval choice was already handled.",
+                ephemeral=True,
+                context="approval_button_already_handled",
+            )
             return
         self.claimed = True
         self.disable_all_items()
@@ -6492,11 +6924,21 @@ class InputChoiceButton(discord.ui.Button):
     async def callback(self, interaction: discord.Interaction) -> None:
         if not is_discord_user_allowed(interaction.user.id):
             log_line(f"input_choice_button_denied user={interaction.user.id} target={self.target_thread_id}")
-            await interaction.response.send_message("This user is not allowed.", ephemeral=True)
+            await send_interaction_response_tracked(
+                interaction,
+                "This user is not allowed.",
+                ephemeral=True,
+                context="input_choice_button_denied",
+            )
             return
         view = self.view
         if isinstance(view, InputChoiceView) and not view.claim():
-            await interaction.response.send_message("This input choice was already handled.", ephemeral=True)
+            await send_interaction_response_tracked(
+                interaction,
+                "This input choice was already handled.",
+                ephemeral=True,
+                context="input_choice_button_already_handled",
+            )
             return
         await interaction.response.defer(thinking=True, ephemeral=True)
         if isinstance(view, InputChoiceView):
@@ -6586,7 +7028,12 @@ class BusyChoiceView(discord.ui.View):
             f"busy_choice_denied user={interaction.user.id} "
             f"owner={self.message.author.id} target={self.target_thread_id or '-'}"
         )
-        await interaction.response.send_message("Only the original sender can choose this.", ephemeral=True)
+        await send_interaction_response_tracked(
+            interaction,
+            "Only the original sender can choose this.",
+            ephemeral=True,
+            context="busy_choice_denied",
+        )
         return False
 
     def claim(self) -> bool:
@@ -6601,9 +7048,11 @@ class BusyChoiceView(discord.ui.View):
     @discord.ui.button(label="Steer now", style=discord.ButtonStyle.primary)
     async def steer_now(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         if not self.allow_steer:
-            await interaction.response.send_message(
+            await send_interaction_response_tracked(
+                interaction,
                 "This message targets a different Codex thread. Queue it instead.",
                 ephemeral=True,
+                context="steer_now_not_allowed",
             )
             log_line(
                 f"steer_now_rejected user={interaction.user.id} "
@@ -6615,7 +7064,12 @@ class BusyChoiceView(discord.ui.View):
                 f"busy_choice_already_handled action=steer_now user={interaction.user.id} "
                 f"target={self.target_thread_id or '-'}"
             )
-            await interaction.response.send_message("This busy choice was already handled.", ephemeral=True)
+            await send_interaction_response_tracked(
+                interaction,
+                "This busy choice was already handled.",
+                ephemeral=True,
+                context="steer_now_already_claimed",
+            )
             return
         await interaction.response.defer(thinking=True, ephemeral=True)
         if not self.claim():
@@ -6747,7 +7201,12 @@ class BusyChoiceView(discord.ui.View):
                 f"busy_choice_already_handled action=queue_next user={interaction.user.id} "
                 f"target={self.target_thread_id or '-'}"
             )
-            await interaction.response.send_message("This busy choice was already handled.", ephemeral=True)
+            await send_interaction_response_tracked(
+                interaction,
+                "This busy choice was already handled.",
+                ephemeral=True,
+                context="queue_next_already_claimed",
+            )
             return
         await interaction.response.defer(thinking=True)
         if not self.claim():
@@ -6826,7 +7285,12 @@ class BusyChoiceView(discord.ui.View):
                 f"busy_choice_already_handled action=ignore user={interaction.user.id} "
                 f"target={self.target_thread_id or '-'}"
             )
-            await interaction.response.send_message("This busy choice was already handled.", ephemeral=True)
+            await send_interaction_response_tracked(
+                interaction,
+                "This busy choice was already handled.",
+                ephemeral=True,
+                context="ignore_already_claimed",
+            )
             return
         await interaction.response.defer(thinking=True)
         if not self.claim():
@@ -6883,7 +7347,7 @@ async def handle_prefix_command(bot: CodexDiscordBot, message: discord.Message, 
     )
     if bridge_action is not None:
         if bridge_action.usage:
-            await message.channel.send(bridge_action.usage)
+            await send_chunks(message.channel, bridge_action.usage, context="prefix_bridge_usage")
             return
         await run_bridge_and_send(message.channel, bridge_action.argv or [], bridge_action.title)
         return
@@ -6896,16 +7360,20 @@ async def handle_prefix_command(bot: CodexDiscordBot, message: discord.Message, 
         return
     if command == "steer":
         if not discord_qa_commands_enabled():
-            await message.channel.send("Discord QA steering is disabled. Set DISCORD_ENABLE_QA_COMMANDS=1 to enable it.")
+            await send_chunks(
+                message.channel,
+                "Discord QA steering is disabled. Set DISCORD_ENABLE_QA_COMMANDS=1 to enable it.",
+                context="prefix_steer_disabled",
+            )
             return
         if not arg:
-            await message.channel.send("Usage: !steer <prompt>")
+            await send_chunks(message.channel, "Usage: !steer <prompt>", context="prefix_steer_usage")
             return
         target_thread_id = get_mirrored_codex_thread_id(message.channel.id)
         if target_thread_id is None:
             target_thread_id, _target_ref = resolve_selected_target()
         if not target_thread_id:
-            await message.channel.send("No Codex thread target found.")
+            await send_chunks(message.channel, "No Codex thread target found.", context="prefix_steer_no_target")
             return
         log_line(
             f"prefix_steer channel={message.channel.id} user={message.author.id} "
@@ -6977,7 +7445,7 @@ async def handle_prefix_command(bot: CodexDiscordBot, message: discord.Message, 
     if command in {"usage", "quota", "limit"}:
         usage_action = discord_commands.parse_usage_days(arg)
         if usage_action.usage:
-            await message.channel.send(usage_action.usage)
+            await send_chunks(message.channel, usage_action.usage, context="prefix_usage_help")
             return
         days = int(usage_action.limit or 7)
         await send_chunks(message.channel, build_weekly_usage_message(days=days))
@@ -7001,9 +7469,9 @@ async def handle_prefix_command(bot: CodexDiscordBot, message: discord.Message, 
     if command in {"bridge_sync", "resync", "sync"} or command == "bridge":
         bridge_sync_action = discord_commands.parse_bridge_sync_limit(command, arg)
         if bridge_sync_action.usage:
-            await message.channel.send(bridge_sync_action.usage)
+            await send_chunks(message.channel, bridge_sync_action.usage, context="prefix_bridge_sync_usage")
             return
-        await message.channel.send("Discord bridge sync started.")
+        await send_chunks(message.channel, "Discord bridge sync started.", context="prefix_bridge_sync_start")
         try:
             output = await refresh_discord_bridge_session(bot, limit=bridge_sync_action.limit)
             await send_chunks(message.channel, output)
@@ -7016,7 +7484,7 @@ async def handle_prefix_command(bot: CodexDiscordBot, message: discord.Message, 
         if not target_thread_id:
             target_thread_id, _target_ref = resolve_selected_target()
         if not target_thread_id:
-            await message.channel.send("No Codex thread target found.")
+            await send_chunks(message.channel, "No Codex thread target found.", context="prefix_approval_no_target")
             return
         state, resolved_thread_id, target_ref = get_interactive_state_for_thread(target_thread_id)
         if state != INTERACTIVE_STATE_APPROVAL or not resolved_thread_id:
@@ -7041,7 +7509,11 @@ async def handle_prefix_command(bot: CodexDiscordBot, message: discord.Message, 
         return
     if command == "delete_archive":
         if not arg:
-            await message.channel.send("Usage: !delete_archive <ref>")
+            await send_chunks(
+                message.channel,
+                "Usage: !delete_archive <ref>",
+                context="prefix_delete_archive_usage",
+            )
             return
         exit_code, output = await asyncio.to_thread(run_bridge_command, ["delete_archive", arg])
         prefix = "Delete archive preview" if exit_code == 0 else f"Delete archive failed (exit {exit_code})"
@@ -7053,10 +7525,10 @@ async def handle_prefix_command(bot: CodexDiscordBot, message: discord.Message, 
     if command == "mirror":
         mirror_action = discord_commands.parse_mirror_action(arg)
         if mirror_action.usage:
-            await message.channel.send(mirror_action.usage)
+            await send_chunks(message.channel, mirror_action.usage, context="prefix_mirror_usage")
             return
         if mirror_action.subcommand == "sync":
-            await message.channel.send("Mirror sync started.")
+            await send_chunks(message.channel, "Mirror sync started.", context="prefix_mirror_sync_start")
             try:
                 output = await sync_codex_mirror(bot, limit=mirror_action.limit)
                 await send_chunks(message.channel, output)
@@ -7082,13 +7554,17 @@ async def handle_prefix_command(bot: CodexDiscordBot, message: discord.Message, 
             return
     if command == "qa":
         if not discord_qa_commands_enabled():
-            await message.channel.send("Discord QA commands are disabled. Set DISCORD_ENABLE_QA_COMMANDS=1 to enable them.")
+            await send_chunks(
+                message.channel,
+                "Discord QA commands are disabled. Set DISCORD_ENABLE_QA_COMMANDS=1 to enable them.",
+                context="prefix_qa_disabled",
+            )
             return
         subcommand = (arg.strip() or "buttons").lower()
         if subcommand not in {"buttons", "button"}:
-            await message.channel.send("Usage: !qa buttons")
+            await send_chunks(message.channel, "Usage: !qa buttons", context="prefix_qa_usage")
             return
-        await message.channel.send("Discord button QA started.")
+        await send_chunks(message.channel, "Discord button QA started.", context="prefix_qa_start")
         try:
             output = await run_discord_button_qa(bot, message)
             await send_chunks(message.channel, output)
@@ -7098,14 +7574,67 @@ async def handle_prefix_command(bot: CodexDiscordBot, message: discord.Message, 
         return
     if command == "new":
         if not arg:
-            await message.channel.send("Usage: !new <prompt>")
+            await send_chunks(message.channel, "Usage: !new <prompt>", context="prefix_new_usage")
             return
         _exit_code, output = await run_discord_new_thread(bot, message.channel.id, arg)
         await send_chunks(message.channel, output)
         return
+    if command in {"interview", "deep_interview", "deep-interview"}:
+        if not arg:
+            await send_chunks(
+                message.channel,
+                f"Usage: !{format_discord_command_label(command)} <request>",
+                context="prefix_interview_usage",
+            )
+            return
+        target_thread_id = get_mirrored_codex_thread_id(message.channel.id)
+        if target_thread_id is None:
+            project_message = describe_mirrored_project_channel(message.channel.id)
+            if project_message:
+                await send_chunks(message.channel, project_message)
+                return
+        log_line(
+            f"prefix_interview channel={message.channel.id} user={message.author.id} "
+            f"target={target_thread_id or '-'} prompt_len={format_log_text_len(arg)}"
+        )
+        await handle_plain_ask(message, build_deep_interview_prompt(arg), target_thread_id=target_thread_id)
+        return
+    if command in {"triage", "github_triage", "github-triage", "github_project_triage", "github-project-triage"}:
+        target_thread_id = get_mirrored_codex_thread_id(message.channel.id)
+        if target_thread_id is None:
+            project_message = describe_mirrored_project_channel(message.channel.id)
+            if project_message:
+                await send_chunks(message.channel, project_message)
+                return
+        log_line(
+            f"prefix_github_triage channel={message.channel.id} user={message.author.id} "
+            f"target={target_thread_id or '-'} prompt_len={format_log_text_len(arg)}"
+        )
+        await handle_plain_ask(message, build_github_triage_prompt(arg), target_thread_id=target_thread_id)
+        return
+    if command in {"orchestrate", "maintainer", "maintainer_orchestrator", "maintainer-orchestrator"}:
+        if not arg:
+            await send_chunks(
+                message.channel,
+                f"Usage: !{format_discord_command_label(command)} <request>",
+                context="prefix_maintainer_orchestrator_usage",
+            )
+            return
+        target_thread_id = get_mirrored_codex_thread_id(message.channel.id)
+        if target_thread_id is None:
+            project_message = describe_mirrored_project_channel(message.channel.id)
+            if project_message:
+                await send_chunks(message.channel, project_message)
+                return
+        log_line(
+            f"prefix_maintainer_orchestrator channel={message.channel.id} user={message.author.id} "
+            f"target={target_thread_id or '-'} prompt_len={format_log_text_len(arg)}"
+        )
+        await handle_plain_ask(message, build_maintainer_orchestrator_prompt(arg), target_thread_id=target_thread_id)
+        return
     if command in {"ask", "ask_ipc"}:
         if not arg:
-            await message.channel.send(f"Usage: !{command} <prompt>")
+            await send_chunks(message.channel, f"Usage: !{command} <prompt>", context="prefix_ask_usage")
             return
         target_thread_id = get_mirrored_codex_thread_id(message.channel.id)
         if target_thread_id is None:
@@ -7116,7 +7645,11 @@ async def handle_prefix_command(bot: CodexDiscordBot, message: discord.Message, 
         await handle_plain_ask(message, arg, target_thread_id=target_thread_id)
         return
 
-    await message.channel.send(f"Unknown command: !{format_discord_command_label(command)}")
+    await send_chunks(
+        message.channel,
+        f"Unknown command: !{format_discord_command_label(command)}",
+        context="prefix_unknown",
+    )
 
 
 def build_help() -> str:
@@ -7127,7 +7660,7 @@ def register_commands(bot: CodexDiscordBot) -> None:
     @bot.tree.command(name="help", description="Show Discord Codex commands.")
     async def slash_help(interaction: discord.Interaction) -> None:
         if not check_interaction_allowed(bot, interaction):
-            await interaction.response.send_message("This channel/user is not allowed.", ephemeral=True)
+            await send_interaction_not_allowed(interaction)
             return
         await interaction.response.defer(thinking=True)
         await send_interaction_chunks(interaction, build_help(), title="Help")
@@ -7135,7 +7668,7 @@ def register_commands(bot: CodexDiscordBot) -> None:
     @bot.tree.command(name="list", description="Show recent Codex threads.")
     async def slash_list(interaction: discord.Interaction, limit: int = 10) -> None:
         if not check_interaction_allowed(bot, interaction):
-            await interaction.response.send_message("This channel/user is not allowed.", ephemeral=True)
+            await send_interaction_not_allowed(interaction)
             return
         await interaction.response.defer(thinking=True)
         await run_interaction_bridge_and_send(
@@ -7147,7 +7680,7 @@ def register_commands(bot: CodexDiscordBot) -> None:
     @bot.tree.command(name="archived_list", description="Show archived Codex threads.")
     async def slash_archived_list(interaction: discord.Interaction, limit: int = 10) -> None:
         if not check_interaction_allowed(bot, interaction):
-            await interaction.response.send_message("This channel/user is not allowed.", ephemeral=True)
+            await send_interaction_not_allowed(interaction)
             return
         await interaction.response.defer(thinking=True)
         await run_interaction_bridge_and_send(
@@ -7159,7 +7692,7 @@ def register_commands(bot: CodexDiscordBot) -> None:
     @bot.tree.command(name="use", description="Select the active Codex thread.")
     async def slash_use(interaction: discord.Interaction, ref: str) -> None:
         if not check_interaction_allowed(bot, interaction):
-            await interaction.response.send_message("This channel/user is not allowed.", ephemeral=True)
+            await send_interaction_not_allowed(interaction)
             return
         await interaction.response.defer(thinking=True)
         await run_interaction_bridge_and_send(interaction, ["use", ref], "Use")
@@ -7167,7 +7700,7 @@ def register_commands(bot: CodexDiscordBot) -> None:
     @bot.tree.command(name="status", description="Show selected Codex thread status.")
     async def slash_status(interaction: discord.Interaction, ref: str = "") -> None:
         if not check_interaction_allowed(bot, interaction):
-            await interaction.response.send_message("This channel/user is not allowed.", ephemeral=True)
+            await send_interaction_not_allowed(interaction)
             return
         await interaction.response.defer(thinking=True)
         argv = discord_commands.build_status_argv(
@@ -7180,7 +7713,7 @@ def register_commands(bot: CodexDiscordBot) -> None:
     @bot.tree.command(name="doctor", description="Run Codex bridge diagnostics.")
     async def slash_doctor(interaction: discord.Interaction) -> None:
         if not check_interaction_allowed(bot, interaction):
-            await interaction.response.send_message("This channel/user is not allowed.", ephemeral=True)
+            await send_interaction_not_allowed(interaction)
             return
         await interaction.response.defer(thinking=True)
         await send_interaction_chunks(
@@ -7193,7 +7726,7 @@ def register_commands(bot: CodexDiscordBot) -> None:
     @bot.tree.command(name="where", description="Show the Codex thread mapped to this Discord channel.")
     async def slash_where(interaction: discord.Interaction) -> None:
         if not check_interaction_allowed(bot, interaction):
-            await interaction.response.send_message("This channel/user is not allowed.", ephemeral=True)
+            await send_interaction_not_allowed(interaction)
             return
         await interaction.response.defer(thinking=True)
         await send_interaction_chunks(
@@ -7210,7 +7743,7 @@ def register_commands(bot: CodexDiscordBot) -> None:
         limit: int = CONTEXT_REFRESH_DEFAULT_LIMIT,
     ) -> None:
         if not check_interaction_allowed(bot, interaction):
-            await interaction.response.send_message("This channel/user is not allowed.", ephemeral=True)
+            await send_interaction_not_allowed(interaction)
             return
         await interaction.response.defer(thinking=True)
         if refresh:
@@ -7225,7 +7758,7 @@ def register_commands(bot: CodexDiscordBot) -> None:
     @bot.tree.command(name="usage", description="Show local Codex usage estimate.")
     async def slash_usage(interaction: discord.Interaction, days: int = 7) -> None:
         if not check_interaction_allowed(bot, interaction):
-            await interaction.response.send_message("This channel/user is not allowed.", ephemeral=True)
+            await send_interaction_not_allowed(interaction)
             return
         await interaction.response.defer(thinking=True)
         output = build_weekly_usage_message(days=max(1, min(30, days)))
@@ -7234,7 +7767,7 @@ def register_commands(bot: CodexDiscordBot) -> None:
     @bot.tree.command(name="runners", description="Show Discord runner queues.")
     async def slash_runners(interaction: discord.Interaction) -> None:
         if not check_interaction_allowed(bot, interaction):
-            await interaction.response.send_message("This channel/user is not allowed.", ephemeral=True)
+            await send_interaction_not_allowed(interaction)
             return
         await interaction.response.defer(thinking=True)
         await send_interaction_chunks(interaction, await build_runners_message(), title="Runners")
@@ -7242,7 +7775,7 @@ def register_commands(bot: CodexDiscordBot) -> None:
     @bot.tree.command(name="retract", description="Remove your latest queued ask for this Codex thread.")
     async def slash_retract(interaction: discord.Interaction, ref: str = "") -> None:
         if not check_interaction_allowed(bot, interaction):
-            await interaction.response.send_message("This channel/user is not allowed.", ephemeral=True)
+            await send_interaction_not_allowed(interaction)
             return
         await interaction.response.defer(thinking=True)
         response, _result = await retract_queued_ask_for_request(
@@ -7255,7 +7788,7 @@ def register_commands(bot: CodexDiscordBot) -> None:
     @bot.tree.command(name="new", description="Create a new Codex thread with the first prompt.")
     async def slash_new(interaction: discord.Interaction, prompt: str) -> None:
         if not check_interaction_allowed(bot, interaction):
-            await interaction.response.send_message("This channel/user is not allowed.", ephemeral=True)
+            await send_interaction_not_allowed(interaction)
             return
         await interaction.response.defer(thinking=True)
         await handle_slash_new(bot, interaction, prompt)
@@ -7263,15 +7796,39 @@ def register_commands(bot: CodexDiscordBot) -> None:
     @bot.tree.command(name="ask", description="Send a prompt to the mapped or selected Codex thread.")
     async def slash_ask(interaction: discord.Interaction, prompt: str) -> None:
         if not check_interaction_allowed(bot, interaction):
-            await interaction.response.send_message("This channel/user is not allowed.", ephemeral=True)
+            await send_interaction_not_allowed(interaction)
             return
         await interaction.response.defer(thinking=True)
         await handle_slash_ask(interaction, prompt)
 
+    @bot.tree.command(name="interview", description="Clarify a request before implementation.")
+    async def slash_interview(interaction: discord.Interaction, prompt: str) -> None:
+        if not check_interaction_allowed(bot, interaction):
+            await send_interaction_not_allowed(interaction)
+            return
+        await interaction.response.defer(thinking=True)
+        await handle_slash_interview(interaction, prompt)
+
+    @bot.tree.command(name="github_triage", description="Run GitHub project triage in the mapped Codex thread.")
+    async def slash_github_triage(interaction: discord.Interaction, prompt: str = "") -> None:
+        if not check_interaction_allowed(bot, interaction):
+            await send_interaction_not_allowed(interaction)
+            return
+        await interaction.response.defer(thinking=True)
+        await handle_slash_github_triage(interaction, prompt)
+
+    @bot.tree.command(name="maintainer_orchestrator", description="Run maintainer orchestration.")
+    async def slash_maintainer_orchestrator(interaction: discord.Interaction, prompt: str) -> None:
+        if not check_interaction_allowed(bot, interaction):
+            await send_interaction_not_allowed(interaction)
+            return
+        await interaction.response.defer(thinking=True)
+        await handle_slash_maintainer_orchestrator(interaction, prompt)
+
     @bot.tree.command(name="ask_ipc", description="Legacy alias of /ask.")
     async def slash_ask_ipc(interaction: discord.Interaction, prompt: str) -> None:
         if not check_interaction_allowed(bot, interaction):
-            await interaction.response.send_message("This channel/user is not allowed.", ephemeral=True)
+            await send_interaction_not_allowed(interaction)
             return
         await interaction.response.defer(thinking=True)
         await handle_slash_ask(interaction, prompt)
@@ -7279,7 +7836,7 @@ def register_commands(bot: CodexDiscordBot) -> None:
     @bot.tree.command(name="mirror_check", description="Check Discord mirror mappings.")
     async def slash_mirror_check(interaction: discord.Interaction) -> None:
         if not check_interaction_allowed(bot, interaction):
-            await interaction.response.send_message("This channel/user is not allowed.", ephemeral=True)
+            await send_interaction_not_allowed(interaction)
             return
         await interaction.response.defer(thinking=True)
         try:
@@ -7295,7 +7852,7 @@ def register_commands(bot: CodexDiscordBot) -> None:
         limit: app_commands.Range[int, 1, 100] | None = None,
     ) -> None:
         if not check_interaction_allowed(bot, interaction):
-            await interaction.response.send_message("This channel/user is not allowed.", ephemeral=True)
+            await send_interaction_not_allowed(interaction)
             return
         await interaction.response.defer(thinking=True)
         try:
@@ -7309,10 +7866,15 @@ def register_commands(bot: CodexDiscordBot) -> None:
         @bot.tree.command(name="qa_buttons", description="Run Discord button QA smoke.")
         async def slash_qa_buttons(interaction: discord.Interaction) -> None:
             if not check_interaction_allowed(bot, interaction):
-                await interaction.response.send_message("This channel/user is not allowed.", ephemeral=True)
+                await send_interaction_not_allowed(interaction)
                 return
             if interaction.channel is None:
-                await interaction.response.send_message("Discord channel is unavailable.", ephemeral=True)
+                await send_interaction_response_tracked(
+                    interaction,
+                    "Discord channel is unavailable.",
+                    ephemeral=True,
+                    context="qa_buttons_channel_unavailable",
+                )
                 return
             await interaction.response.defer(thinking=True)
             source_message = SimpleNamespace(author=interaction.user, channel=interaction.channel)

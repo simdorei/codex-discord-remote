@@ -383,6 +383,234 @@ def get_mirror_project_for_channel(db_path: Path, discord_channel_id: int | None
     return str(row[0] or ""), str(row[1] or "")
 
 
+def merge_mirror_project_key_aliases(
+    conn: sqlite3.Connection,
+    canonical_project_key: str,
+    *,
+    project_keys_match_func,
+) -> list[str]:
+    if not canonical_project_key:
+        return []
+    rows = conn.execute("SELECT project_key FROM mirror_projects").fetchall()
+    aliases = [
+        str(row[0] or "")
+        for row in rows
+        if str(row[0] or "")
+        and str(row[0] or "") != canonical_project_key
+        and project_keys_match_func(str(row[0] or ""), canonical_project_key)
+    ]
+    for alias in aliases:
+        conn.execute(
+            "UPDATE mirror_threads SET project_key = ? WHERE project_key = ?",
+            (canonical_project_key, alias),
+        )
+        conn.execute("DELETE FROM mirror_projects WHERE project_key = ?", (alias,))
+    return aliases
+
+
+def upsert_mirror_project(
+    db_path: Path,
+    canonical_project_key: str,
+    project_name: str,
+    channel_id: int,
+    *,
+    project_keys_match_func,
+    now: float | None = None,
+) -> list[str]:
+    current = time.time() if now is None else now
+    init_mirror_db(db_path)
+    with sqlite3.connect(db_path) as conn:
+        merged_aliases = merge_mirror_project_key_aliases(
+            conn,
+            canonical_project_key,
+            project_keys_match_func=project_keys_match_func,
+        )
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO mirror_projects
+                (project_key, project_name, discord_channel_id, updated_at)
+            VALUES (?, ?, ?, ?)
+            """,
+            (canonical_project_key, project_name, int(channel_id), current),
+        )
+    return merged_aliases
+
+
+def find_mirror_project_row_by_key(
+    db_path: Path,
+    canonical_project_key: str | None,
+    *,
+    project_keys_match_func,
+) -> tuple[int, str] | None:
+    canonical = str(canonical_project_key or "").strip()
+    if not canonical:
+        return None
+    init_mirror_db(db_path)
+    with sqlite3.connect(db_path) as conn:
+        row = conn.execute(
+            """
+            SELECT discord_channel_id, project_key
+            FROM mirror_projects
+            WHERE project_key = ?
+            """,
+            (canonical,),
+        ).fetchone()
+        if row:
+            return int(row[0]), str(row[1] or "")
+        rows = conn.execute(
+            """
+            SELECT discord_channel_id, project_key
+            FROM mirror_projects
+            ORDER BY updated_at DESC
+            """
+        ).fetchall()
+    for row in rows:
+        row_project_key = str(row[1] or "")
+        if project_keys_match_func(row_project_key, canonical):
+            return int(row[0]), row_project_key
+    return None
+
+
+def upsert_mirror_thread(
+    db_path: Path,
+    codex_thread_id: str,
+    canonical_project_key: str,
+    thread_name: str,
+    project_channel_id: int,
+    discord_thread_id: int,
+    *,
+    now: float | None = None,
+) -> None:
+    current = time.time() if now is None else now
+    init_mirror_db(db_path)
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO mirror_threads
+                (codex_thread_id, project_key, thread_title, discord_channel_id, discord_thread_id, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                str(codex_thread_id),
+                canonical_project_key,
+                thread_name,
+                int(project_channel_id),
+                int(discord_thread_id),
+                current,
+            ),
+        )
+
+
+def get_mirror_thread_row_by_codex_thread_id(
+    db_path: Path,
+    codex_thread_id: str,
+) -> tuple[int, int] | None:
+    init_mirror_db(db_path)
+    with sqlite3.connect(db_path) as conn:
+        row = conn.execute(
+            "SELECT discord_channel_id, discord_thread_id FROM mirror_threads WHERE codex_thread_id = ?",
+            (str(codex_thread_id),),
+        ).fetchone()
+    if not row:
+        return None
+    return int(row[0]), int(row[1])
+
+
+def get_stale_mirror_thread_rows(
+    db_path: Path,
+    valid_thread_ids: set[str],
+) -> list[tuple[object, object, object]]:
+    init_mirror_db(db_path)
+    with sqlite3.connect(db_path) as conn:
+        if valid_thread_ids:
+            ordered_ids = tuple(sorted(str(thread_id) for thread_id in valid_thread_ids))
+            rows = conn.execute(
+                """
+                SELECT codex_thread_id, discord_thread_id, thread_title
+                FROM mirror_threads
+                WHERE codex_thread_id NOT IN ({})
+                """.format(",".join("?" for _ in ordered_ids)),
+                ordered_ids,
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """
+                SELECT codex_thread_id, discord_thread_id, thread_title
+                FROM mirror_threads
+                """
+            ).fetchall()
+    return list(rows)
+
+
+def get_stale_mirror_project_rows(
+    db_path: Path,
+    valid_project_keys: set[str],
+) -> list[tuple[object, object, object]]:
+    init_mirror_db(db_path)
+    with sqlite3.connect(db_path) as conn:
+        if valid_project_keys:
+            ordered_keys = tuple(sorted(str(project_key) for project_key in valid_project_keys))
+            rows = conn.execute(
+                """
+                SELECT project_key, project_name, discord_channel_id FROM mirror_projects
+                WHERE project_key NOT IN ({})
+                """.format(",".join("?" for _ in ordered_keys)),
+                ordered_keys,
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT project_key, project_name, discord_channel_id FROM mirror_projects"
+            ).fetchall()
+    return list(rows)
+
+
+def delete_stale_mirror_rows(
+    db_path: Path,
+    valid_thread_ids: set[str],
+    valid_project_keys: set[str],
+) -> None:
+    init_mirror_db(db_path)
+    with sqlite3.connect(db_path) as conn:
+        if valid_thread_ids:
+            ordered_ids = tuple(sorted(str(thread_id) for thread_id in valid_thread_ids))
+            conn.execute(
+                """
+                DELETE FROM mirror_threads
+                WHERE codex_thread_id NOT IN ({})
+                """.format(",".join("?" for _ in ordered_ids)),
+                ordered_ids,
+            )
+        else:
+            conn.execute("DELETE FROM mirror_threads")
+        if valid_project_keys:
+            ordered_keys = tuple(sorted(str(project_key) for project_key in valid_project_keys))
+            conn.execute(
+                """
+                DELETE FROM mirror_projects
+                WHERE project_key NOT IN ({})
+                """.format(",".join("?" for _ in ordered_keys)),
+                ordered_keys,
+            )
+        else:
+            conn.execute("DELETE FROM mirror_projects")
+
+
+def get_remaining_mirror_discord_ids(db_path: Path) -> tuple[set[int], list[int]]:
+    init_mirror_db(db_path)
+    with sqlite3.connect(db_path) as conn:
+        known_thread_ids = {
+            int(row[0])
+            for row in conn.execute("SELECT discord_thread_id FROM mirror_threads").fetchall()
+            if row[0]
+        }
+        project_channel_ids = [
+            int(row[0])
+            for row in conn.execute("SELECT discord_channel_id FROM mirror_projects").fetchall()
+            if row[0]
+        ]
+    return known_thread_ids, project_channel_ids
+
+
 def is_mirrored_channel_id(db_path: Path, discord_channel_id: int | None) -> bool:
     if discord_channel_id is None:
         return False

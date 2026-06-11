@@ -692,10 +692,7 @@ def normalize_workspace_path(path: str) -> str:
     value = strip_windows_extended_prefix(path)
     if not value:
         return ""
-    try:
-        return os.path.normcase(os.path.normpath(value))
-    except Exception:
-        return value.lower()
+    return os.path.normcase(os.path.normpath(value))
 
 
 def load_session_thread_names() -> dict[str, str]:
@@ -6065,29 +6062,12 @@ def command_ask(args: argparse.Namespace) -> int:
         elif args.ipc:
             print("ui_activation: ipc-thread-follower-start-turn")
             ipc_result: dict[str, object]
-            try:
-                ipc_result = start_turn_via_ipc(
-                    thread,
-                    prompt,
-                    timeout_sec=10.0,
-                    allow_ui_recovery=args.ipc_recover_ui,
-                )
-            except RuntimeError as exc:
-                if (
-                    getattr(args, "no_fallback", False)
-                    or "IPC owner client for the selected thread was not discovered" not in str(exc)
-                ):
-                    raise
-                ipc_result = start_turn_via_sidecar(
-                    thread,
-                    prompt,
-                    timeout_sec=10.0,
-                    keep_client_open=not args.background,
-                )
-                maybe_client = ipc_result.pop("_client", None)
-                if isinstance(maybe_client, CodexAppServerSidecar):
-                    sidecar_client = maybe_client
-                ipc_result["fallback_transport"] = "local-sidecar"
+            ipc_result = start_turn_via_ipc(
+                thread,
+                prompt,
+                timeout_sec=10.0,
+                allow_ui_recovery=args.ipc_recover_ui,
+            )
             delivered_thread = wait_for_prompt_delivery(recent_offsets, prompt, timeout_sec=6.0)
             if delivered_thread is None:
                 print("[delivery_pending]")
@@ -6102,11 +6082,6 @@ def command_ask(args: argparse.Namespace) -> int:
                 )
             else:
                 print(f"[delivery_verified] {get_thread_label(thread)}")
-            if ipc_result.get("fallback_transport"):
-                print(
-                    f"[ipc_fallback] transport={ipc_result['fallback_transport']} "
-                    f"attempts={ipc_result.get('attempts', '-')}"
-                )
             if ipc_result.get("recovery_method"):
                 print(f"[ipc_recovery] {ipc_result['recovery_method']}")
             print(
@@ -6447,7 +6422,7 @@ def build_parser() -> argparse.ArgumentParser:
     ask_parser.add_argument(
         "--no-fallback",
         action="store_true",
-        help="Do not fall back to sidecar or UI delivery after IPC transport failure.",
+        help="Compatibility flag; fallback delivery is disabled.",
     )
     ask_parser.add_argument(
         "--switch-thread",
@@ -6468,7 +6443,7 @@ def build_parser() -> argparse.ArgumentParser:
         ipc=True,
         sidecar=False,
         ipc_recover_ui=False,
-        no_fallback=False,
+        no_fallback=True,
         switch_thread=False,
         stream=False,
         include_commentary=False,

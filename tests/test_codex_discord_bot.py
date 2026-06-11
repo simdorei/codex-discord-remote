@@ -17,6 +17,7 @@ from types import SimpleNamespace
 
 import codex_discord_bot as bot
 import codex_discord_commands as commands
+import codex_discord_store as discord_store
 import codex_desktop_bridge as bridge
 import codex_windows_harness as harness
 
@@ -40,6 +41,18 @@ class FailingFollowup:
         if len(self.messages) >= self.fail_after:
             raise RuntimeError("followup unavailable")
         self.messages.append(content if view is None else (content, view))
+
+
+class NoViewKeywordFollowup:
+    def __init__(self) -> None:
+        self.messages: list[str] = []
+        self.kwargs: list[dict[str, object]] = []
+
+    async def send(self, content: str, **kwargs) -> None:
+        if "view" in kwargs:
+            raise TypeError("send() got an unexpected keyword argument 'view'")
+        self.messages.append(content)
+        self.kwargs.append(kwargs)
 
 
 class FakeResponse:
@@ -240,6 +253,8 @@ class DiscordBotHelperTests(unittest.IsolatedAsyncioTestCase):
         self._old_pending_session_mirror_cursor_targets = set(bot.get_session_mirror_state().pending_cursor_targets)
         bot.get_session_mirror_state().active_output_targets.clear()
         bot.get_session_mirror_state().pending_cursor_targets.clear()
+        bot.ACTIVE_DISCORD_DELIVERIES.clear()
+        bot.clear_discord_delivery_stopping()
         self._mirror_db_temp_dir = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
         bot.MIRROR_DB_PATH = Path(self._mirror_db_temp_dir.name) / "mirror.sqlite"
         os.environ["CODEX_DISCORD_LOG_PATH"] = str(
@@ -257,6 +272,8 @@ class DiscordBotHelperTests(unittest.IsolatedAsyncioTestCase):
         bot.get_session_mirror_state().active_output_targets.update(self._old_active_session_mirror_output_targets)
         bot.get_session_mirror_state().pending_cursor_targets.clear()
         bot.get_session_mirror_state().pending_cursor_targets.update(self._old_pending_session_mirror_cursor_targets)
+        bot.ACTIVE_DISCORD_DELIVERIES.clear()
+        bot.clear_discord_delivery_stopping()
         self._mirror_db_temp_dir.cleanup()
 
     def test_log_path_override_writes_to_temp_file(self) -> None:
@@ -602,6 +619,144 @@ class DiscordBotHelperTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("resident-app-server", output)
         self.assertEqual(calls, [("please run", "thread-1")])
 
+    def test_run_ask_uses_ipc_no_fallback_without_ui_retry(self) -> None:
+        original_run_bridge_command = bot.run_bridge_command
+        captured_argvs: list[list[str]] = []
+
+        def fake_run_bridge_command(argv):
+            captured_argvs.append(list(argv))
+            return 1, "ERROR: IPC owner client for the selected thread was not discovered."
+
+        try:
+            bot.run_bridge_command = fake_run_bridge_command
+            exit_code, output = bot.run_ask("please run", target_thread_id="thread-1")
+        finally:
+            bot.run_bridge_command = original_run_bridge_command
+
+        self.assertEqual(exit_code, 1)
+        self.assertIn("IPC owner client", output)
+        self.assertEqual(len(captured_argvs), 1)
+        self.assertIn("--ipc", captured_argvs[0])
+        self.assertIn("--no-fallback", captured_argvs[0])
+        self.assertNotIn("--ipc-recover-ui", captured_argvs[0])
+        self.assertNotIn("--ui", captured_argvs[0])
+
+    def test_run_transport_prompt_no_wait_surfaces_transport_failure_without_legacy_fallback(self) -> None:
+        original_run_app_server = bot.run_app_server_prompt_no_wait
+        original_legacy = bot.run_legacy_ipc_prompt_no_wait
+
+        def fake_run_app_server(prompt, target_thread_id):
+            raise RuntimeError("transport boom")
+
+        def fake_legacy(prompt, target_thread_id):
+            raise AssertionError("transport failure must not use legacy IPC fallback")
+
+        try:
+            bot.run_app_server_prompt_no_wait = fake_run_app_server
+            bot.run_legacy_ipc_prompt_no_wait = fake_legacy
+            with tempfile.TemporaryDirectory() as temp_dir:
+                log_path = Path(temp_dir) / "discord-smoke.log"
+                with EnvPatch("CODEX_DISCORD_LOG_PATH", str(log_path)):
+                    with EnvPatch("CODEX_DISCORD_APP_SERVER_TRANSPORT", "1"):
+                        with EnvPatch("CODEX_DISCORD_APP_SERVER_LEGACY_FALLBACK", "1"):
+                            exit_code, output = bot.run_transport_prompt_no_wait(
+                                "please run",
+                                "thread-1",
+                            )
+                log_text = log_path.read_text(encoding="utf-8")
+        finally:
+            bot.run_app_server_prompt_no_wait = original_run_app_server
+            bot.run_legacy_ipc_prompt_no_wait = original_legacy
+
+        self.assertEqual(exit_code, 1)
+        self.assertEqual(output, "ERROR: resident app-server transport failed: transport boom")
+        self.assertIn("app_server_prompt_failed target=thread-1", log_text)
+        self.assertIn("error_type=RuntimeError error=transport boom", log_text)
+        self.assertNotIn("fallback=", log_text)
+
+    def test_run_app_server_steering_surfaces_transport_failure_without_legacy_fallback(self) -> None:
+        original_run_steering = bot.discord_app_server.run_steering_no_wait
+        original_legacy = bot.discord_steering.run_steering_prompt
+        original_resolve_target_ref = bot.resolve_target_ref
+
+        def fake_run_steering(*args, **kwargs):
+            raise RuntimeError("steer transport boom")
+
+        def fake_legacy(*args, **kwargs):
+            raise AssertionError("steering transport failure must not use legacy fallback")
+
+        try:
+            bot.discord_app_server.run_steering_no_wait = fake_run_steering
+            bot.discord_steering.run_steering_prompt = fake_legacy
+            bot.resolve_target_ref = lambda target_thread_id: (target_thread_id, "taxlab:1")
+            with tempfile.TemporaryDirectory() as temp_dir:
+                log_path = Path(temp_dir) / "discord-smoke.log"
+                with EnvPatch("CODEX_DISCORD_LOG_PATH", str(log_path)):
+                    with EnvPatch("CODEX_DISCORD_APP_SERVER_LEGACY_FALLBACK", "1"):
+                        result = bot.run_app_server_steering_prompt("please run", "thread-1")
+                log_text = log_path.read_text(encoding="utf-8")
+        finally:
+            bot.discord_app_server.run_steering_no_wait = original_run_steering
+            bot.discord_steering.run_steering_prompt = original_legacy
+            bot.resolve_target_ref = original_resolve_target_ref
+
+        self.assertEqual(result.exit_code, 1)
+        self.assertEqual(
+            result.output,
+            "ERROR: resident app-server transport failed: steer transport boom",
+        )
+        self.assertEqual(result.target_thread_id, "thread-1")
+        self.assertEqual(result.target_ref, "taxlab:1")
+        self.assertIn("app_server_steering_failed target=thread-1", log_text)
+        self.assertIn("error_type=RuntimeError error=steer transport boom", log_text)
+        self.assertNotIn("fallback=", log_text)
+
+    def test_run_ask_stream_surfaces_transport_failure_without_stream_fallback(self) -> None:
+        original_start_turn = bot.app_server_transport.start_turn_no_wait
+        original_stream = bot.discord_stream.run_ask_stream
+
+        class FakeRelay:
+            def __init__(self) -> None:
+                self.finished = False
+
+            def feed_line(self, line: str) -> None:
+                raise AssertionError("transport failure should not stream bridge output")
+
+            def finish(self) -> None:
+                self.finished = True
+
+        def fake_start_turn(*args, **kwargs):
+            raise RuntimeError("stream transport boom")
+
+        def fake_stream(*args, **kwargs):
+            raise AssertionError("transport failure must not use stream fallback")
+
+        try:
+            bot.app_server_transport.start_turn_no_wait = fake_start_turn
+            bot.discord_stream.run_ask_stream = fake_stream
+            relay = FakeRelay()
+            with tempfile.TemporaryDirectory() as temp_dir:
+                log_path = Path(temp_dir) / "discord-smoke.log"
+                with EnvPatch("CODEX_DISCORD_LOG_PATH", str(log_path)):
+                    with EnvPatch("CODEX_DISCORD_APP_SERVER_TRANSPORT", "1"):
+                        with EnvPatch("CODEX_DISCORD_APP_SERVER_LEGACY_FALLBACK", "1"):
+                            exit_code, output = bot.run_ask_stream(
+                                "please run",
+                                relay,
+                                target_thread_id="thread-1",
+                            )
+                log_text = log_path.read_text(encoding="utf-8")
+        finally:
+            bot.app_server_transport.start_turn_no_wait = original_start_turn
+            bot.discord_stream.run_ask_stream = original_stream
+
+        self.assertEqual(exit_code, 1)
+        self.assertEqual(output, "ERROR: resident app-server transport failed: stream transport boom")
+        self.assertTrue(relay.finished)
+        self.assertIn("app_server_stream_prompt_failed target=thread-1", log_text)
+        self.assertIn("error_type=RuntimeError error=stream transport boom", log_text)
+        self.assertNotIn("fallback=", log_text)
+
     def test_running_app_server_executable_ignores_windowsapps_alias(self) -> None:
         original_run_powershell_capture = bridge.run_powershell_capture
         try:
@@ -715,7 +870,7 @@ class DiscordBotHelperTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("[sidecar_delivery] turn_id=turn-1 attempts=1", text)
         self.assertIn("[final_answer]\ndone", text)
 
-    def test_command_ask_no_fallback_does_not_use_sidecar_after_ipc_owner_failure(self) -> None:
+    def test_command_ask_default_does_not_use_sidecar_after_ipc_owner_failure(self) -> None:
         original_choose_thread = bridge.choose_thread
         original_get_busy_state = bridge.get_thread_busy_state
         original_start_sidecar = bridge.start_turn_via_sidecar
@@ -751,8 +906,9 @@ class DiscordBotHelperTests(unittest.IsolatedAsyncioTestCase):
 
                 parser = bridge.build_parser()
                 args = parser.parse_args(
-                    ["ask", "--ipc", "--no-fallback", "--no-wait", "--thread-id", "thread-1", "please run"]
+                    ["ask", "--ipc", "--no-wait", "--thread-id", "thread-1", "please run"]
                 )
+                self.assertTrue(args.no_fallback)
                 with self.assertRaises(RuntimeError) as raised:
                     args.func(args)
             finally:
@@ -3185,6 +3341,9 @@ class DiscordBotHelperTests(unittest.IsolatedAsyncioTestCase):
             "bridge_sync",
             "new",
             "ask",
+            "interview",
+            "github_triage",
+            "maintainer_orchestrator",
             "ask_ipc",
         }
 
@@ -3213,6 +3372,51 @@ class DiscordBotHelperTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(command_names, expected_commands | {"qa_buttons"})
         self.assertIn("slash_new_dispatch", source)
         self.assertIn("slash_new_done", source)
+
+    def test_startup_notice_is_actionable(self) -> None:
+        notice = bot.build_startup_notice()
+
+        self.assertIn("Codex Discord bot online.", notice)
+        self.assertIn("restart/startup completed", notice)
+        self.assertIn("new Discord messages and slash commands are accepted", notice)
+        self.assertIn("`!where` or `/where`", notice)
+        self.assertIn("`!help` or `/help`", notice)
+
+    def test_plugin_packages_workflow_skills(self) -> None:
+        plugin_root = Path("plugins/codex-discord-harness")
+        manifest = json.loads((plugin_root / ".codex-plugin/plugin.json").read_text(encoding="utf-8"))
+        skill_text = (plugin_root / "skills/deep-interview/SKILL.md").read_text(encoding="utf-8")
+        auto_research = plugin_root / "skills/deep-interview/auto-research-greenfield.md"
+        auto_answer = plugin_root / "skills/deep-interview/auto-answer-uncertain.md"
+        notice = plugin_root / "skills/deep-interview/NOTICE.md"
+        github_triage = plugin_root / "skills/github-project-triage/SKILL.md"
+        github_triage_notice = plugin_root / "skills/github-project-triage/NOTICE.md"
+        maintainer_orchestrator = plugin_root / "skills/maintainer-orchestrator/SKILL.md"
+        maintainer_orchestrator_notice = plugin_root / "skills/maintainer-orchestrator/NOTICE.md"
+        readme = Path("README.md").read_text(encoding="utf-8")
+        root_notice = Path("NOTICE.md").read_text(encoding="utf-8")
+
+        self.assertEqual(manifest["skills"], "./skills/")
+        self.assertIn("deep interview", manifest["interface"]["longDescription"])
+        self.assertIn("GitHub triage", manifest["interface"]["longDescription"])
+        self.assertIn("maintainer orchestration", manifest["interface"]["longDescription"])
+        self.assertIn("name: deep-interview", skill_text)
+        self.assertIn("작업 구조", skill_text)
+        self.assertIn("Phase 0: Resolve Ambiguity Threshold", skill_text)
+        self.assertIn("Ontology Convergence", skill_text)
+        self.assertIn("pending-approval ticket", skill_text)
+        self.assertIn("Do not silently fill missing requirements", skill_text)
+        self.assertTrue(auto_research.is_file())
+        self.assertTrue(auto_answer.is_file())
+        self.assertIn("MIT License", notice.read_text(encoding="utf-8"))
+        self.assertIn("`deep-interview`", readme)
+        self.assertIn('name: "github-project-triage"', github_triage.read_text(encoding="utf-8"))
+        self.assertIn("name: maintainer-orchestrator", maintainer_orchestrator.read_text(encoding="utf-8"))
+        self.assertIn("steipete/agent-scripts", github_triage_notice.read_text(encoding="utf-8"))
+        self.assertIn("steipete/agent-scripts", maintainer_orchestrator_notice.read_text(encoding="utf-8"))
+        self.assertIn("steipete/agent-scripts", root_notice)
+        self.assertIn("`github-project-triage`", readme)
+        self.assertIn("`maintainer-orchestrator`", readme)
 
     def test_qa_commands_are_hidden_unless_enabled(self) -> None:
         self.assertNotIn("!qa buttons", bot.build_help())
@@ -3333,6 +3537,95 @@ class DiscordBotHelperTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("error_type=RuntimeError", log_text)
         self.assertIn("discord_delivery_sent", log_text)
 
+    async def test_send_chunks_rejects_new_delivery_while_stopping(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            log_path = Path(temp_dir) / "discord-smoke.log"
+            target = FakeTarget(channel_id=456)
+            with EnvPatch("CODEX_DISCORD_LOG_PATH", str(log_path)):
+                bot.set_discord_delivery_stopping("unit")
+                with self.assertRaisesRegex(
+                    bot.DiscordDeliveryRejected,
+                    "Discord bot is restarting",
+                ):
+                    await bot.send_chunks(target, "blocked", context="unit_blocked")
+            log_text = log_path.read_text(encoding="utf-8")
+
+        self.assertEqual(target.messages, [])
+        self.assertIn("discord_delivery_rejected", log_text)
+        self.assertIn("context=chunks:", log_text)
+
+    async def test_restart_notice_is_allowed_while_stopping(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            log_path = Path(temp_dir) / "discord-smoke.log"
+            target = FakeTarget(channel_id=456)
+            with EnvPatch("CODEX_DISCORD_LOG_PATH", str(log_path)):
+                bot.set_discord_delivery_stopping("unit")
+                await bot.send_discord_restarting_notice(target)
+            log_text = log_path.read_text(encoding="utf-8")
+
+        self.assertEqual(len(target.messages), 1)
+        self.assertIn("Discord bot is restarting", target.messages[0][0])
+        self.assertIn("context=restart_notice", log_text)
+        self.assertIn("discord_delivery_sent", log_text)
+
+    async def test_send_message_tracked_rejects_new_delivery_while_stopping(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            log_path = Path(temp_dir) / "discord-smoke.log"
+            target = FakeTarget(channel_id=456)
+            with EnvPatch("CODEX_DISCORD_LOG_PATH", str(log_path)):
+                bot.set_discord_delivery_stopping("unit")
+                with self.assertRaisesRegex(
+                    bot.DiscordDeliveryRejected,
+                    "Discord bot is restarting",
+                ):
+                    await bot.send_message_tracked(target, "blocked", context="unit_message")
+            log_text = log_path.read_text(encoding="utf-8")
+
+        self.assertEqual(target.messages, [])
+        self.assertIn("discord_delivery_rejected", log_text)
+        self.assertIn("context=message:", log_text)
+
+    async def test_interaction_response_tracked_rejects_new_delivery_while_stopping(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            log_path = Path(temp_dir) / "discord-smoke.log"
+            interaction = FakeInteraction(command_name="ask", channel_id=456)
+            with EnvPatch("CODEX_DISCORD_LOG_PATH", str(log_path)):
+                bot.set_discord_delivery_stopping("unit")
+                with self.assertRaisesRegex(
+                    bot.DiscordDeliveryRejected,
+                    "Discord bot is restarting",
+                ):
+                    await bot.send_interaction_response_tracked(
+                        interaction,
+                        "blocked",
+                        ephemeral=True,
+                        context="unit_response",
+                    )
+            log_text = log_path.read_text(encoding="utf-8")
+
+        self.assertEqual(interaction.response.messages, [])
+        self.assertIn("discord_delivery_rejected", log_text)
+        self.assertIn("context=response:", log_text)
+
+    async def test_slash_command_error_reports_restart_notice_while_stopping(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            log_path = Path(temp_dir) / "discord-smoke.log"
+            interaction = FakeInteraction(command_name="ask", channel_id=456)
+            interaction.response.done = True
+            with EnvPatch("CODEX_DISCORD_LOG_PATH", str(log_path)):
+                bot.set_discord_delivery_stopping("unit")
+                await bot.LoggingCommandTree.on_error(
+                    None,
+                    interaction,
+                    bot.DiscordDeliveryRejected(bot.DISCORD_RESTARTING_ERROR),
+                )
+            log_text = log_path.read_text(encoding="utf-8")
+
+        self.assertEqual(len(interaction.followup.messages), 1)
+        self.assertIn("Discord bot is restarting", interaction.followup.messages[0])
+        self.assertEqual(interaction.followup.kwargs, [{"ephemeral": True}])
+        self.assertIn("slash_command_error_sent command=ask response=followup", log_text)
+
     async def test_send_followup_chunks_splits_long_button_response(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             log_path = Path(temp_dir) / "discord-smoke.log"
@@ -3352,55 +3645,55 @@ class DiscordBotHelperTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("button_response_start command=ask title='Steering' exit=1", log_text)
         self.assertIn("button_response_sent command=ask title='Steering' exit=1", log_text)
 
-    async def test_send_followup_chunks_falls_back_to_channel_on_send_failure(self) -> None:
+    async def test_send_followup_chunks_surfaces_send_failure(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             log_path = Path(temp_dir) / "discord-smoke.log"
             interaction = FakeInteraction(command_name="ask", channel_id=222)
             interaction.followup = FailingFollowup()
             interaction.channel = FakeTarget()
             with EnvPatch("CODEX_DISCORD_LOG_PATH", str(log_path)):
-                await bot.send_followup_chunks(
-                    interaction,
-                    "button result",
-                    title="Steering",
-                    exit_code=1,
-                    log_prefix="button_response",
-                )
+                with self.assertRaisesRegex(RuntimeError, "followup unavailable"):
+                    await bot.send_followup_chunks(
+                        interaction,
+                        "button result",
+                        title="Steering",
+                        exit_code=1,
+                        log_prefix="button_response",
+                    )
             log_text = log_path.read_text(encoding="utf-8")
 
         self.assertEqual(interaction.followup.messages, [])
-        self.assertEqual(len(interaction.channel.messages), 1)
-        content, view = interaction.channel.messages[0]
-        self.assertIsNone(view)
-        self.assertIn("Discord follow-up delivery failed; posting response here.", content)
-        self.assertIn("button result", content)
+        self.assertEqual(interaction.channel.messages, [])
         self.assertIn("button_response_failed command=ask title='Steering' exit=1", log_text)
         self.assertIn("error_type=RuntimeError", log_text)
-        self.assertIn("button_response_fallback_sent command=ask title='Steering' exit=1", log_text)
+        self.assertIn("error=followup unavailable", log_text)
+        self.assertNotIn("button_response_fallback_sent", log_text)
 
-    async def test_send_followup_chunks_falls_back_with_remaining_chunks(self) -> None:
+    async def test_send_followup_chunks_surfaces_partial_send_failure(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             log_path = Path(temp_dir) / "discord-smoke.log"
             interaction = FakeInteraction(command_name="ask", channel_id=222)
             interaction.followup = FailingFollowup(fail_after=1)
             interaction.channel = FakeTarget()
             with EnvPatch("CODEX_DISCORD_LOG_PATH", str(log_path)):
-                await bot.send_followup_chunks(
-                    interaction,
-                    "x" * 4100,
-                    title="Steering",
-                    exit_code=1,
-                    log_prefix="button_response",
-                )
+                with self.assertRaisesRegex(RuntimeError, "followup unavailable"):
+                    await bot.send_followup_chunks(
+                        interaction,
+                        "x" * 4100,
+                        title="Steering",
+                        exit_code=1,
+                        log_prefix="button_response",
+                    )
             log_text = log_path.read_text(encoding="utf-8")
 
         self.assertEqual(len(interaction.followup.messages), 1)
-        self.assertGreater(len(interaction.channel.messages), 0)
-        fallback_text = "\n".join(content for content, _view in interaction.channel.messages)
-        self.assertIn("posting remaining response here", fallback_text)
+        self.assertEqual(interaction.channel.messages, [])
+        self.assertIn("button_response_failed command=ask title='Steering' exit=1", log_text)
         self.assertIn("sent=1", log_text)
+        self.assertIn("error=followup unavailable", log_text)
+        self.assertNotIn("button_response_fallback_sent", log_text)
 
-    async def test_send_direct_followup_falls_back_to_channel_with_view(self) -> None:
+    async def test_send_direct_followup_surfaces_send_failure_with_view(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             log_path = Path(temp_dir) / "discord-smoke.log"
             interaction = FakeInteraction(command_name="ask", channel_id=222)
@@ -3408,23 +3701,117 @@ class DiscordBotHelperTests(unittest.IsolatedAsyncioTestCase):
             interaction.channel = FakeTarget()
             view = object()
             with EnvPatch("CODEX_DISCORD_LOG_PATH", str(log_path)):
-                await bot.send_direct_followup(
-                    interaction,
-                    "button view",
-                    view=view,
-                    log_prefix="button_followup",
-                    context="steer_busy_failure",
-                )
+                with self.assertRaisesRegex(RuntimeError, "followup unavailable"):
+                    await bot.send_direct_followup(
+                        interaction,
+                        "button view",
+                        view=view,
+                        log_prefix="button_followup",
+                        context="steer_busy_failure",
+                    )
             log_text = log_path.read_text(encoding="utf-8")
 
         self.assertEqual(interaction.followup.messages, [])
-        self.assertEqual(len(interaction.channel.messages), 1)
-        content, sent_view = interaction.channel.messages[0]
-        self.assertIn("Discord follow-up delivery failed; posting response here.", content)
-        self.assertIn("button view", content)
-        self.assertIs(sent_view, view)
+        self.assertEqual(interaction.channel.messages, [])
         self.assertIn("button_followup_failed command=ask context=steer_busy_failure", log_text)
-        self.assertIn("button_followup_fallback_sent command=ask context=steer_busy_failure", log_text)
+        self.assertIn("error=followup unavailable", log_text)
+        self.assertNotIn("button_followup_fallback_sent", log_text)
+
+    async def test_send_direct_followup_omits_empty_view_keyword(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            log_path = Path(temp_dir) / "discord-smoke.log"
+            interaction = FakeInteraction(command_name="ask", channel_id=222)
+            interaction.followup = NoViewKeywordFollowup()
+            interaction.channel = FakeTarget()
+            with EnvPatch("CODEX_DISCORD_LOG_PATH", str(log_path)):
+                await bot.send_direct_followup(
+                    interaction,
+                    "ignored",
+                    log_prefix="button_followup",
+                    context="ignore",
+                )
+            log_text = log_path.read_text(encoding="utf-8")
+
+        self.assertEqual(interaction.followup.messages, ["ignored"])
+        self.assertEqual(interaction.followup.kwargs, [{}])
+        self.assertEqual(interaction.channel.messages, [])
+        self.assertIn("button_followup_sent command=ask context=ignore", log_text)
+        self.assertNotIn("button_followup_failed command=ask context=ignore", log_text)
+
+    async def test_stop_marker_waits_for_discord_delivery_drain(self) -> None:
+        old_stop_request_path = bot.STOP_REQUEST_PATH
+        old_poll_seconds = bot.STOP_MARKER_POLL_SECONDS
+        old_drain_timeout = bot.STOP_MARKER_DRAIN_TIMEOUT_SECONDS
+
+        class FakeClient:
+            def __init__(self) -> None:
+                self.closed = False
+
+            def is_closed(self) -> bool:
+                return self.closed
+
+            async def close(self) -> None:
+                self.closed = True
+
+        try:
+            bot.ACTIVE_DISCORD_DELIVERIES.clear()
+            with tempfile.TemporaryDirectory() as temp_dir:
+                bot.STOP_REQUEST_PATH = Path(temp_dir) / ".codex_discord_bot.stop"
+                bot.STOP_MARKER_POLL_SECONDS = 0.01
+                bot.STOP_MARKER_DRAIN_TIMEOUT_SECONDS = 1.0
+                bot.STOP_REQUEST_PATH.write_text("1", encoding="ascii")
+                delivery_token = bot.begin_discord_delivery("test")
+                fake_client = FakeClient()
+                task = asyncio.create_task(bot.CodexDiscordBot.stop_marker_loop(fake_client))
+                await asyncio.sleep(0.05)
+
+                self.assertFalse(fake_client.closed)
+
+                bot.end_discord_delivery(delivery_token)
+                await asyncio.wait_for(task, timeout=1.0)
+
+            self.assertTrue(fake_client.closed)
+        finally:
+            bot.ACTIVE_DISCORD_DELIVERIES.clear()
+            bot.STOP_REQUEST_PATH = old_stop_request_path
+            bot.STOP_MARKER_POLL_SECONDS = old_poll_seconds
+            bot.STOP_MARKER_DRAIN_TIMEOUT_SECONDS = old_drain_timeout
+
+    def test_watchdog_graceful_stop_wait_exceeds_bot_drain_timeout(self) -> None:
+        watchdog_text = (bot.SCRIPT_DIR / "codex-discord-watchdog.ps1").read_text(encoding="utf-8")
+        match = re.search(r"\$GracefulStopTimeoutSeconds\s*=\s*(\d+)", watchdog_text)
+
+        self.assertIsNotNone(match)
+        timeout_seconds = int(match.group(1))
+        self.assertGreaterEqual(timeout_seconds, int(bot.STOP_MARKER_DRAIN_TIMEOUT_SECONDS) + 5)
+        self.assertIn(
+            "Wait-RuntimeBotExit -TimeoutSeconds $GracefulStopTimeoutSeconds",
+            watchdog_text,
+        )
+
+    async def test_process_message_sends_restart_notice_while_stopping(self) -> None:
+        client = SimpleNamespace(
+            enable_prefix_commands=True,
+            is_allowed_message_channel=lambda channel: True,
+            is_allowed_user=lambda user_id: True,
+        )
+        message = FakeMessage(content="please run", channel_id=333)
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            log_path = Path(temp_dir) / "discord-smoke.log"
+            with EnvPatch("CODEX_DISCORD_LOG_PATH", str(log_path)):
+                bot.set_discord_delivery_stopping("unit")
+                await bot.CodexDiscordBot.process_discord_message(
+                    client,
+                    message,
+                    source="gateway",
+                )
+            log_text = log_path.read_text(encoding="utf-8")
+
+        self.assertEqual(len(message.channel.messages), 1)
+        self.assertIn("Discord bot is restarting", message.channel.messages[0][0])
+        self.assertIn("message_rejected reason=bot_stopping", log_text)
+        self.assertIn("context=restart_notice", log_text)
 
     async def test_on_message_logs_received_before_empty_content_ignore(self) -> None:
         client = SimpleNamespace(
@@ -4114,6 +4501,108 @@ class DiscordBotHelperTests(unittest.IsolatedAsyncioTestCase):
             bot.handle_prefix_command = original_handle_prefix_command
             bot.is_thread_runner_busy = original_is_thread_runner_busy
             bot.get_busy_state_for_thread = original_get_busy_state
+
+    async def test_prefix_interview_wraps_request_for_deep_interview(self) -> None:
+        original_get_mirrored = bot.get_mirrored_codex_thread_id
+        original_handle_plain_ask = bot.handle_plain_ask
+        calls: list[tuple[object, str, str | None]] = []
+
+        async def fake_handle_plain_ask(message, prompt, *, target_thread_id=None):
+            calls.append((message, prompt, target_thread_id))
+
+        try:
+            bot.get_mirrored_codex_thread_id = lambda channel_id: "thread-1"
+            bot.handle_plain_ask = fake_handle_plain_ask
+            message = FakeMessage(content="!interview build a dashboard", channel_id=222)
+
+            with tempfile.TemporaryDirectory() as temp_dir:
+                log_path = Path(temp_dir) / "discord-smoke.log"
+                with EnvPatch("CODEX_DISCORD_LOG_PATH", str(log_path)):
+                    await bot.handle_prefix_command(SimpleNamespace(), message, "interview build a dashboard")
+                log_text = log_path.read_text(encoding="utf-8")
+
+            self.assertEqual(len(calls), 1)
+            source_message, prompt, target_thread_id = calls[0]
+            self.assertIs(source_message, message)
+            self.assertEqual(target_thread_id, "thread-1")
+            self.assertIn("Run a Gajae-style deep interview before implementation.", prompt)
+            self.assertIn("Round 0: enumerate 1-6 top-level components", prompt)
+            self.assertIn("Deep Interview threshold: 0.05 (source: default)", prompt)
+            self.assertIn("ontology stability", prompt)
+            self.assertIn("User request:\nbuild a dashboard", prompt)
+            self.assertIn("prefix_interview channel=222", log_text)
+            self.assertIn("target=thread-1", log_text)
+        finally:
+            bot.get_mirrored_codex_thread_id = original_get_mirrored
+            bot.handle_plain_ask = original_handle_plain_ask
+
+    async def test_prefix_github_triage_wraps_request_for_upstream_skill(self) -> None:
+        original_get_mirrored = bot.get_mirrored_codex_thread_id
+        original_handle_plain_ask = bot.handle_plain_ask
+        calls: list[tuple[object, str, str | None]] = []
+
+        async def fake_handle_plain_ask(message, prompt, *, target_thread_id=None):
+            calls.append((message, prompt, target_thread_id))
+
+        try:
+            bot.get_mirrored_codex_thread_id = lambda channel_id: "thread-1"
+            bot.handle_plain_ask = fake_handle_plain_ask
+            message = FakeMessage(content="!triage current repo", channel_id=222)
+
+            with tempfile.TemporaryDirectory() as temp_dir:
+                log_path = Path(temp_dir) / "discord-smoke.log"
+                with EnvPatch("CODEX_DISCORD_LOG_PATH", str(log_path)):
+                    await bot.handle_prefix_command(SimpleNamespace(), message, "triage current repo")
+                log_text = log_path.read_text(encoding="utf-8")
+
+            self.assertEqual(len(calls), 1)
+            source_message, prompt, target_thread_id = calls[0]
+            self.assertIs(source_message, message)
+            self.assertEqual(target_thread_id, "thread-1")
+            self.assertIn("$codex-discord-harness:github-project-triage", prompt)
+            self.assertIn("Do not run deep-interview", prompt)
+            self.assertIn("User request:\ncurrent repo", prompt)
+            self.assertIn("prefix_github_triage channel=222", log_text)
+        finally:
+            bot.get_mirrored_codex_thread_id = original_get_mirrored
+            bot.handle_plain_ask = original_handle_plain_ask
+
+    async def test_prefix_maintainer_orchestrator_wraps_request_for_upstream_skill(self) -> None:
+        original_get_mirrored = bot.get_mirrored_codex_thread_id
+        original_handle_plain_ask = bot.handle_plain_ask
+        calls: list[tuple[object, str, str | None]] = []
+
+        async def fake_handle_plain_ask(message, prompt, *, target_thread_id=None):
+            calls.append((message, prompt, target_thread_id))
+
+        try:
+            bot.get_mirrored_codex_thread_id = lambda channel_id: "thread-1"
+            bot.handle_plain_ask = fake_handle_plain_ask
+            message = FakeMessage(content="!orchestrate inspect queue", channel_id=222)
+
+            with tempfile.TemporaryDirectory() as temp_dir:
+                log_path = Path(temp_dir) / "discord-smoke.log"
+                with EnvPatch("CODEX_DISCORD_LOG_PATH", str(log_path)):
+                    await bot.handle_prefix_command(SimpleNamespace(), message, "orchestrate inspect queue")
+                log_text = log_path.read_text(encoding="utf-8")
+
+            self.assertEqual(len(calls), 1)
+            _source_message, prompt, target_thread_id = calls[0]
+            self.assertEqual(target_thread_id, "thread-1")
+            self.assertIn("$codex-discord-harness:maintainer-orchestrator", prompt)
+            self.assertIn("Do not run deep-interview", prompt)
+            self.assertIn("User request:\ninspect queue", prompt)
+            self.assertIn("prefix_maintainer_orchestrator channel=222", log_text)
+        finally:
+            bot.get_mirrored_codex_thread_id = original_get_mirrored
+            bot.handle_plain_ask = original_handle_plain_ask
+
+    async def test_prefix_maintainer_orchestrator_requires_request(self) -> None:
+        message = FakeMessage(content="!orchestrate", channel_id=222)
+
+        await bot.handle_prefix_command(SimpleNamespace(), message, "orchestrate")
+
+        self.assertEqual(message.channel.messages[-1][0], "Usage: !orchestrate <request>")
 
     async def test_on_message_project_parent_response_is_chunked(self) -> None:
         original_get_mirrored = bot.get_mirrored_codex_thread_id
@@ -6026,7 +6515,7 @@ class DiscordBotHelperTests(unittest.IsolatedAsyncioTestCase):
             bot.get_mirrored_codex_thread_id = original_get_mirrored
             bot.prime_session_mirror_cursor_for_target = original_prime_cursor
 
-    async def test_ask_stream_live_without_final_sends_fallback(self) -> None:
+    async def test_ask_stream_live_without_final_reports_error(self) -> None:
         original_resolve_target_ref = bot.resolve_target_ref
         original_run_ask_stream = bot.run_ask_stream
         try:
@@ -6056,9 +6545,10 @@ class DiscordBotHelperTests(unittest.IsolatedAsyncioTestCase):
 
             sent = [content for content, _view in message.channel.messages]
             self.assertNotIn("Codex turn finished.", sent)
-            self.assertTrue(any("Ask finished" in content for content in sent))
+            self.assertTrue(any("Ask failed" in content for content in sent))
+            self.assertTrue(any("ERROR: Codex stream completed without a final answer." in content for content in sent))
             self.assertTrue(any("[ready]" in content for content in sent))
-            self.assertIn("ask_stream_no_final_fallback target=thread-1", log_text)
+            self.assertIn("ask_stream_no_final_error target=thread-1", log_text)
         finally:
             bot.resolve_target_ref = original_resolve_target_ref
             bot.run_ask_stream = original_run_ask_stream
@@ -6481,7 +6971,7 @@ class DiscordBotHelperTests(unittest.IsolatedAsyncioTestCase):
             bot.snapshot_ask_prompt_delivery_state = original_snapshot
             bot.wait_for_mirrored_busy_delegation_settle = original_wait_settle
 
-    async def test_busy_choice_send_falls_back_when_view_send_fails(self) -> None:
+    async def test_busy_choice_send_reports_view_send_error(self) -> None:
         original_build_context_warning = bot.build_context_warning
         try:
             bot.build_context_warning = lambda target_thread_id: ""
@@ -6504,11 +6994,13 @@ class DiscordBotHelperTests(unittest.IsolatedAsyncioTestCase):
 
             self.assertFalse(sent_with_view)
             self.assertGreaterEqual(len(channel.messages), 1)
-            fallback_text = "\n".join(content for content, view in channel.messages if view is None)
-            self.assertIn("Codex app is still processing this mapped thread.", fallback_text)
-            self.assertIn("Discord could not attach steering buttons.", fallback_text)
+            error_text = "\n".join(content for content, view in channel.messages if view is None)
+            self.assertIn("Busy choice failed", error_text)
+            self.assertIn("ERROR: RuntimeError: view rejected", error_text)
+            self.assertNotIn("Codex app is still processing this mapped thread.", error_text)
+            self.assertNotIn("Discord could not attach steering buttons.", error_text)
             self.assertIn("busy_choice_send_failed reason=late_busy_failure", log_text)
-            self.assertIn("busy_choice_fallback_sent reason=late_busy_failure", log_text)
+            self.assertIn("busy_choice_error_sent reason=late_busy_failure", log_text)
             self.assertNotIn("busy_choice_sent reason=late_busy_failure", log_text)
         finally:
             bot.build_context_warning = original_build_context_warning
@@ -7534,7 +8026,7 @@ class DiscordBotHelperTests(unittest.IsolatedAsyncioTestCase):
             bot.get_interactive_state_for_thread = original_get_interactive_state
             bot.resolve_target_ref = original_resolve_target_ref
 
-    async def test_steer_now_busy_status_falls_back_when_followup_fails(self) -> None:
+    async def test_steer_now_busy_status_surfaces_followup_failure(self) -> None:
         original_run_steering_prompt = bot.run_steering_prompt
         original_build_context_warning = bot.build_context_warning
         original_get_interactive_state = bot.get_interactive_state_for_thread
@@ -7562,18 +8054,16 @@ class DiscordBotHelperTests(unittest.IsolatedAsyncioTestCase):
                 interaction.channel = FakeTarget()
 
                 with EnvPatch("CODEX_DISCORD_LOG_PATH", str(log_path)):
-                    await button.callback(interaction)
+                    with self.assertRaisesRegex(RuntimeError, "followup unavailable"):
+                        await button.callback(interaction)
                 log_text = log_path.read_text(encoding="utf-8")
 
             self.assertEqual(interaction.followup.messages, [])
-            self.assertEqual(len(interaction.channel.messages), 1)
-            content, fallback_view = interaction.channel.messages[0]
-            self.assertIn("Discord follow-up delivery failed; posting response here.", content)
-            self.assertIn("Codex app did not accept this steering message yet.", content)
-            self.assertIsNone(fallback_view)
+            self.assertEqual(interaction.channel.messages, [])
             self.assertIn("button_response_failed command=ask title='Steering'", log_text)
-            self.assertIn("button_response_fallback_sent command=ask title='Steering'", log_text)
-            self.assertIn("steer_busy_status_sent reason=steer_busy_failure exit=1 target=thread-1", log_text)
+            self.assertIn("error=followup unavailable", log_text)
+            self.assertNotIn("button_response_fallback_sent", log_text)
+            self.assertNotIn("steer_busy_status_sent reason=steer_busy_failure", log_text)
             self.assertNotIn("busy_choice_sent reason=steer_busy_failure", log_text)
         finally:
             bot.run_steering_prompt = original_run_steering_prompt
@@ -7866,6 +8356,8 @@ class DiscordBotHelperTests(unittest.IsolatedAsyncioTestCase):
             channel.messages,
             [("Queued ask failed. Check codex_discord_bot.log.", None)],
         )
+        self.assertIn("context=thread_runner_job_failed", log_text)
+        self.assertIn("discord_delivery_sent", log_text)
         self.assertIn("thread_runner_job_failure_reported target=thread-1", log_text)
 
     async def test_run_prompt_flow_chunks_long_context_warning(self) -> None:
@@ -8217,7 +8709,11 @@ class DiscordBotHelperTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(commands.parse_mirror_action("list").limit)
         self.assertEqual(commands.parse_mirror_action("check 7").limit, 7)
         self.assertEqual(commands.parse_bridge_sync_limit("bridge", "bad 1").usage, "Usage: !bridge sync [limit]")
-        self.assertEqual(commands.parse_mirror_action("sync bad").usage, "Usage: !mirror sync [limit]")
+        self.assertEqual(commands.parse_mirror_action("sync 7").usage, "Usage: !mirror sync")
+        self.assertEqual(
+            commands.parse_mirror_action("bad").usage,
+            "Usage: !mirror sync | !mirror list [limit] | !mirror check [limit]",
+        )
         self.assertEqual(commands.parse_mirror_action("doctor").subcommand, "check")
 
     async def test_archive_list_alias_routes_to_archived_list(self) -> None:
@@ -8412,6 +8908,112 @@ class DiscordBotHelperTests(unittest.IsolatedAsyncioTestCase):
             bot.mirror_single_codex_thread = original_mirror_single
             bot.bridge.choose_thread = original_choose_thread
 
+    async def test_new_thread_preferred_channel_resolve_failure_does_not_mirror(self) -> None:
+        original_resolve_cwd = bot.resolve_discord_new_thread_cwd
+        original_resolve_project_channel = bot.resolve_discord_new_thread_project_channel_id
+        original_run_bridge_command = bot.run_bridge_command
+        original_mirror_single = bot.mirror_single_codex_thread
+        original_choose_thread = bot.bridge.choose_thread
+        mirror_calls: list[tuple[str, int | None]] = []
+        try:
+            bot.resolve_discord_new_thread_cwd = lambda channel_id: r"C:\taxlab"
+
+            def fake_run_bridge_command(argv):
+                return 0, "target_thread: thread-new\ncwd: C:\\taxlab"
+
+            async def fake_mirror_single_codex_thread(
+                fake_bot,
+                thread_id,
+                *,
+                preferred_project_channel_id=None,
+            ):
+                mirror_calls.append((thread_id, preferred_project_channel_id))
+                return SimpleNamespace(id=999)
+
+            bot.resolve_discord_new_thread_project_channel_id = (
+                lambda channel_id, project_key: (_ for _ in ()).throw(RuntimeError("bad route"))
+            )
+            bot.bridge.choose_thread = lambda thread_id, ref: bot.bridge.ThreadInfo(
+                id=thread_id,
+                title="new",
+                cwd=r"C:\taxlab",
+                updated_at=1,
+                rollout_path="",
+                model="",
+                reasoning_effort="",
+                tokens_used=0,
+            )
+            bot.run_bridge_command = fake_run_bridge_command
+            bot.mirror_single_codex_thread = fake_mirror_single_codex_thread
+
+            with tempfile.TemporaryDirectory() as temp_dir:
+                log_path = Path(temp_dir) / "discord-smoke.log"
+                with EnvPatch("CODEX_DISCORD_LOG_PATH", str(log_path)):
+                    exit_code, output = await bot.run_discord_new_thread(
+                        SimpleNamespace(),
+                        222,
+                        "start here",
+                    )
+                log_text = log_path.read_text(encoding="utf-8")
+
+            self.assertEqual(exit_code, 0)
+            self.assertEqual(mirror_calls, [])
+            self.assertIn("Mirror update failed: RuntimeError: bad route", output)
+            self.assertIn("new_thread_mirror_failed", log_text)
+            self.assertNotIn("new_thread_preferred_channel_resolve_failed", log_text)
+        finally:
+            bot.resolve_discord_new_thread_cwd = original_resolve_cwd
+            bot.resolve_discord_new_thread_project_channel_id = original_resolve_project_channel
+            bot.run_bridge_command = original_run_bridge_command
+            bot.mirror_single_codex_thread = original_mirror_single
+            bot.bridge.choose_thread = original_choose_thread
+
+    async def test_mirror_single_codex_thread_surfaces_missing_preferred_project_channel(self) -> None:
+        original_get_mirror_guild = bot.get_mirror_guild
+        original_get_category = bot.get_or_create_mirror_category
+        original_choose_thread = bot.bridge.choose_thread
+
+        class FakeGuild:
+            def get_channel(self, channel_id: int):
+                return None
+
+            async def fetch_channel(self, channel_id: int):
+                raise RuntimeError("channel boom")
+
+        async def fake_get_mirror_guild(fake_bot):
+            return FakeGuild()
+
+        async def fake_get_category(guild):
+            return SimpleNamespace(id=999)
+
+        try:
+            bot.get_mirror_guild = fake_get_mirror_guild
+            bot.get_or_create_mirror_category = fake_get_category
+            bot.bridge.choose_thread = lambda thread_id, ref: bot.bridge.ThreadInfo(
+                id=thread_id,
+                title="new",
+                cwd=r"C:\taxlab",
+                updated_at=1,
+                rollout_path="",
+                model="",
+                reasoning_effort="",
+                tokens_used=0,
+            )
+
+            with self.assertRaisesRegex(
+                RuntimeError,
+                r"Preferred mirror project channel 777 .*RuntimeError: channel boom",
+            ):
+                await bot.mirror_single_codex_thread(
+                    SimpleNamespace(),
+                    "thread-new",
+                    preferred_project_channel_id=777,
+                )
+        finally:
+            bot.get_mirror_guild = original_get_mirror_guild
+            bot.get_or_create_mirror_category = original_get_category
+            bot.bridge.choose_thread = original_choose_thread
+
     async def test_new_thread_failure_does_not_mirror(self) -> None:
         original_resolve_cwd = bot.resolve_discord_new_thread_cwd
         original_run_bridge_command = bot.run_bridge_command
@@ -8599,6 +9201,116 @@ class DiscordBotHelperTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("target_source=mirror target=thread-1", log_text)
             self.assertIn("prompt_len=10", log_text)
             self.assertIn("slash_ask_ack_sent command=ask channel=222", log_text)
+        finally:
+            bot.get_mirrored_codex_thread_id = original_get_mirrored
+            bot.handle_plain_ask = original_handle_plain_ask
+
+    async def test_slash_interview_wraps_request_for_deep_interview(self) -> None:
+        original_get_mirrored = bot.get_mirrored_codex_thread_id
+        original_handle_plain_ask = bot.handle_plain_ask
+        calls: list[tuple[object, str, str | None]] = []
+
+        async def fake_handle_plain_ask(message, prompt, *, target_thread_id=None):
+            calls.append((message, prompt, target_thread_id))
+
+        try:
+            bot.get_mirrored_codex_thread_id = lambda channel_id: "thread-1"
+            bot.handle_plain_ask = fake_handle_plain_ask
+            interaction = FakeInteraction(command_name="interview", channel_id=222)
+            interaction.channel = FakeTarget()
+
+            with tempfile.TemporaryDirectory() as temp_dir:
+                log_path = Path(temp_dir) / "discord-smoke.log"
+                with EnvPatch("CODEX_DISCORD_LOG_PATH", str(log_path)):
+                    await bot.handle_slash_interview(interaction, "build a dashboard")
+                log_text = log_path.read_text(encoding="utf-8")
+
+            self.assertEqual(interaction.followup.messages, ["Interview handling posted in this channel."])
+            self.assertEqual(interaction.followup.kwargs, [{"ephemeral": True}])
+            self.assertEqual(len(calls), 1)
+            source_message, prompt, target_thread_id = calls[0]
+            self.assertEqual(target_thread_id, "thread-1")
+            self.assertIs(source_message.channel, interaction.channel)
+            self.assertIn("Run a Gajae-style deep interview before implementation.", prompt)
+            self.assertIn("Round 0: enumerate 1-6 top-level components", prompt)
+            self.assertIn("Deep Interview threshold: 0.05 (source: default)", prompt)
+            self.assertIn("challenge modes", prompt)
+            self.assertIn("User request:\nbuild a dashboard", prompt)
+            self.assertIn("slash_interview_dispatch command=interview channel=222", log_text)
+            self.assertIn("target_source=mirror target=thread-1", log_text)
+        finally:
+            bot.get_mirrored_codex_thread_id = original_get_mirrored
+            bot.handle_plain_ask = original_handle_plain_ask
+
+    async def test_slash_github_triage_wraps_request_for_upstream_skill(self) -> None:
+        original_get_mirrored = bot.get_mirrored_codex_thread_id
+        original_handle_plain_ask = bot.handle_plain_ask
+        calls: list[tuple[object, str, str | None]] = []
+
+        async def fake_handle_plain_ask(message, prompt, *, target_thread_id=None):
+            calls.append((message, prompt, target_thread_id))
+
+        try:
+            bot.get_mirrored_codex_thread_id = lambda channel_id: "thread-1"
+            bot.handle_plain_ask = fake_handle_plain_ask
+            interaction = FakeInteraction(command_name="github_triage", channel_id=222)
+            interaction.channel = FakeTarget()
+
+            with tempfile.TemporaryDirectory() as temp_dir:
+                log_path = Path(temp_dir) / "discord-smoke.log"
+                with EnvPatch("CODEX_DISCORD_LOG_PATH", str(log_path)):
+                    await bot.handle_slash_github_triage(interaction, "current repo")
+                log_text = log_path.read_text(encoding="utf-8")
+
+            self.assertEqual(interaction.followup.messages, ["GitHub triage handling posted in this channel."])
+            self.assertEqual(interaction.followup.kwargs, [{"ephemeral": True}])
+            self.assertEqual(len(calls), 1)
+            source_message, prompt, target_thread_id = calls[0]
+            self.assertEqual(target_thread_id, "thread-1")
+            self.assertIs(source_message.channel, interaction.channel)
+            self.assertIn("$codex-discord-harness:github-project-triage", prompt)
+            self.assertIn("Do not run deep-interview", prompt)
+            self.assertIn("User request:\ncurrent repo", prompt)
+            self.assertIn("slash_github_triage_dispatch command=github_triage channel=222", log_text)
+        finally:
+            bot.get_mirrored_codex_thread_id = original_get_mirrored
+            bot.handle_plain_ask = original_handle_plain_ask
+
+    async def test_slash_maintainer_orchestrator_wraps_request_for_upstream_skill(self) -> None:
+        original_get_mirrored = bot.get_mirrored_codex_thread_id
+        original_handle_plain_ask = bot.handle_plain_ask
+        calls: list[tuple[object, str, str | None]] = []
+
+        async def fake_handle_plain_ask(message, prompt, *, target_thread_id=None):
+            calls.append((message, prompt, target_thread_id))
+
+        try:
+            bot.get_mirrored_codex_thread_id = lambda channel_id: "thread-1"
+            bot.handle_plain_ask = fake_handle_plain_ask
+            interaction = FakeInteraction(command_name="maintainer_orchestrator", channel_id=222)
+            interaction.channel = FakeTarget()
+
+            with tempfile.TemporaryDirectory() as temp_dir:
+                log_path = Path(temp_dir) / "discord-smoke.log"
+                with EnvPatch("CODEX_DISCORD_LOG_PATH", str(log_path)):
+                    await bot.handle_slash_maintainer_orchestrator(interaction, "inspect queue")
+                log_text = log_path.read_text(encoding="utf-8")
+
+            self.assertEqual(
+                interaction.followup.messages,
+                ["Maintainer orchestrator handling posted in this channel."],
+            )
+            self.assertEqual(interaction.followup.kwargs, [{"ephemeral": True}])
+            self.assertEqual(len(calls), 1)
+            _source_message, prompt, target_thread_id = calls[0]
+            self.assertEqual(target_thread_id, "thread-1")
+            self.assertIn("$codex-discord-harness:maintainer-orchestrator", prompt)
+            self.assertIn("Do not run deep-interview", prompt)
+            self.assertIn("User request:\ninspect queue", prompt)
+            self.assertIn(
+                "slash_maintainer_orchestrator_dispatch command=maintainer_orchestrator channel=222",
+                log_text,
+            )
         finally:
             bot.get_mirrored_codex_thread_id = original_get_mirrored
             bot.handle_plain_ask = original_handle_plain_ask
@@ -8794,6 +9506,142 @@ class DiscordBotHelperTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(bot.resolve_discord_new_thread_cwd(333), str(project_path))
             finally:
                 bot.MIRROR_DB_PATH = old_db_path
+
+    def test_normalize_project_key_surfaces_normalization_error(self) -> None:
+        class BrokenBridge:
+            @staticmethod
+            def normalize_workspace_path(path: str) -> str:
+                raise ValueError(f"bad path: {path}")
+
+        with self.assertRaisesRegex(ValueError, r"bad path: C:\\bad"):
+            bot.discord_projects.normalize_project_key(
+                r"C:\bad",
+                bridge_module=BrokenBridge(),
+                projectless_chat_key=bot.CODEX_PROJECTLESS_CHAT_KEY,
+            )
+
+    def test_store_mirror_helpers_merge_project_aliases_and_read_thread_rows(self) -> None:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp_dir:
+            db_path = Path(temp_dir) / "mirror.sqlite"
+            discord_store.init_mirror_db(db_path)
+            with sqlite3.connect(db_path) as conn:
+                conn.execute(
+                    """
+                    INSERT INTO mirror_projects (
+                        project_key, project_name, discord_channel_id, updated_at
+                    ) VALUES (?, ?, ?, ?)
+                    """,
+                    ("alias", "taxlab", 111, 1.0),
+                )
+                conn.execute(
+                    """
+                    INSERT INTO mirror_threads (
+                        codex_thread_id, project_key, thread_title,
+                        discord_channel_id, discord_thread_id, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    ("thread-1", "alias", "title", 111, 222, 1.0),
+                )
+
+            merged = discord_store.upsert_mirror_project(
+                db_path,
+                "canonical",
+                "taxlab",
+                333,
+                project_keys_match_func=lambda left, right: left == "alias" and right == "canonical",
+                now=2.0,
+            )
+            discord_store.upsert_mirror_thread(
+                db_path,
+                "thread-2",
+                "canonical",
+                "title 2",
+                333,
+                444,
+                now=3.0,
+            )
+
+            with sqlite3.connect(db_path) as conn:
+                project_rows = conn.execute(
+                    "SELECT project_key, discord_channel_id FROM mirror_projects ORDER BY project_key"
+                ).fetchall()
+                thread_rows = conn.execute(
+                    "SELECT codex_thread_id, project_key FROM mirror_threads ORDER BY codex_thread_id"
+                ).fetchall()
+
+            self.assertEqual(merged, ["alias"])
+            self.assertEqual(project_rows, [("canonical", 333)])
+            self.assertEqual(
+                thread_rows,
+                [("thread-1", "canonical"), ("thread-2", "canonical")],
+            )
+            self.assertEqual(
+                discord_store.find_mirror_project_row_by_key(
+                    db_path,
+                    "canonical",
+                    project_keys_match_func=lambda left, right: left == right,
+                ),
+                (333, "canonical"),
+            )
+            self.assertEqual(
+                discord_store.get_mirror_thread_row_by_codex_thread_id(db_path, "thread-2"),
+                (333, 444),
+            )
+
+    def test_store_mirror_cleanup_helpers_prune_stale_rows(self) -> None:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp_dir:
+            db_path = Path(temp_dir) / "mirror.sqlite"
+            discord_store.init_mirror_db(db_path)
+            with sqlite3.connect(db_path) as conn:
+                conn.executemany(
+                    """
+                    INSERT INTO mirror_projects (
+                        project_key, project_name, discord_channel_id, updated_at
+                    ) VALUES (?, ?, ?, ?)
+                    """,
+                    [
+                        ("canonical", "taxlab", 111, 1.0),
+                        ("stale-project", "old", 333, 1.0),
+                    ],
+                )
+                conn.executemany(
+                    """
+                    INSERT INTO mirror_threads (
+                        codex_thread_id, project_key, thread_title,
+                        discord_channel_id, discord_thread_id, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    [
+                        ("thread-1", "canonical", "current", 111, 222, 1.0),
+                        ("thread-stale", "stale-project", "old", 333, 444, 1.0),
+                    ],
+                )
+
+            self.assertEqual(
+                discord_store.get_stale_mirror_thread_rows(db_path, {"thread-1"}),
+                [("thread-stale", 444, "old")],
+            )
+            self.assertEqual(
+                discord_store.get_stale_mirror_project_rows(db_path, {"canonical"}),
+                [("stale-project", "old", 333)],
+            )
+
+            discord_store.delete_stale_mirror_rows(db_path, {"thread-1"}, {"canonical"})
+
+            with sqlite3.connect(db_path) as conn:
+                project_rows = conn.execute(
+                    "SELECT project_key FROM mirror_projects ORDER BY project_key"
+                ).fetchall()
+                thread_rows = conn.execute(
+                    "SELECT codex_thread_id FROM mirror_threads ORDER BY codex_thread_id"
+                ).fetchall()
+
+            self.assertEqual(project_rows, [("canonical",)])
+            self.assertEqual(thread_rows, [("thread-1",)])
+            self.assertEqual(
+                discord_store.get_remaining_mirror_discord_ids(db_path),
+                ({222}, [111]),
+            )
 
     def test_new_thread_project_channel_prefers_invoking_thread_parent(self) -> None:
         old_db_path = bot.MIRROR_DB_PATH
@@ -9041,6 +9889,119 @@ class DiscordBotHelperTests(unittest.IsolatedAsyncioTestCase):
             bot.MIRROR_DB_PATH = old_db_path
             bot.discord.TextChannel = original_text_channel
 
+    async def test_get_or_create_project_channel_merges_normalized_project_key_alias(self) -> None:
+        old_db_path = bot.MIRROR_DB_PATH
+        original_text_channel = bot.discord.TextChannel
+
+        class FakeTextChannel:
+            def __init__(self) -> None:
+                self.id = 111
+                self.name = "codex-taxlab"
+                self.topic = "Codex project mirror: taxlab"
+                self.category_id = 999
+
+        class FakeGuild:
+            def __init__(self, channel: FakeTextChannel) -> None:
+                self.text_channels = [channel]
+
+            def get_channel(self, channel_id: int):
+                return self.text_channels[0] if channel_id == 111 else None
+
+            async def fetch_channel(self, channel_id: int):
+                raise AssertionError("cached alias channel should be used")
+
+        try:
+            bot.discord.TextChannel = FakeTextChannel
+            with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp_dir:
+                bot.MIRROR_DB_PATH = Path(temp_dir) / "mirror.sqlite"
+                bot.init_mirror_db()
+                alias_key = r"\\?\C:\taxlab"
+                canonical_key = bot.normalize_project_key(r"C:\taxlab")
+                with sqlite3.connect(bot.MIRROR_DB_PATH) as conn:
+                    conn.execute(
+                        """
+                        INSERT INTO mirror_projects (
+                            project_key, project_name, discord_channel_id, updated_at
+                        ) VALUES (?, ?, ?, ?)
+                        """,
+                        (alias_key, "taxlab", 111, 1.0),
+                    )
+                    conn.execute(
+                        """
+                        INSERT INTO mirror_threads (
+                            codex_thread_id, project_key, thread_title,
+                            discord_channel_id, discord_thread_id, updated_at
+                        ) VALUES (?, ?, ?, ?, ?, ?)
+                        """,
+                        ("thread-1", alias_key, "title", 111, 222, 1.0),
+                    )
+
+                existing = FakeTextChannel()
+                channel = await bot.get_or_create_project_channel(
+                    FakeGuild(existing),
+                    SimpleNamespace(id=999),
+                    r"C:\taxlab",
+                    "taxlab",
+                )
+
+                self.assertIs(channel, existing)
+                with sqlite3.connect(bot.MIRROR_DB_PATH) as conn:
+                    project_rows = conn.execute(
+                        "SELECT project_key, discord_channel_id FROM mirror_projects"
+                    ).fetchall()
+                    thread_row = conn.execute(
+                        "SELECT project_key FROM mirror_threads WHERE codex_thread_id = ?",
+                        ("thread-1",),
+                    ).fetchone()
+                self.assertEqual(project_rows, [(canonical_key, 111)])
+                self.assertEqual(thread_row, (canonical_key,))
+        finally:
+            bot.MIRROR_DB_PATH = old_db_path
+            bot.discord.TextChannel = original_text_channel
+
+    async def test_get_or_create_project_channel_surfaces_missing_cached_channel(self) -> None:
+        old_db_path = bot.MIRROR_DB_PATH
+
+        class FakeGuild:
+            text_channels: list[object] = []
+
+            def get_channel(self, channel_id: int):
+                return None
+
+            async def fetch_channel(self, channel_id: int):
+                raise RuntimeError("boom")
+
+            async def create_text_channel(self, *args, **kwargs):
+                raise AssertionError("missing cached channel should not create a replacement")
+
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp_dir:
+            bot.MIRROR_DB_PATH = Path(temp_dir) / "mirror.sqlite"
+            try:
+                bot.init_mirror_db()
+                canonical_key = bot.normalize_project_key(r"C:\taxlab")
+                with sqlite3.connect(bot.MIRROR_DB_PATH) as conn:
+                    conn.execute(
+                        """
+                        INSERT INTO mirror_projects (
+                            project_key, project_name, discord_channel_id, updated_at
+                        ) VALUES (?, ?, ?, ?)
+                        """,
+                        (canonical_key, "taxlab", 111, 1.0),
+                    )
+
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    r"Stored mirror project channel 111 .*RuntimeError: boom",
+                ):
+                    await bot.get_or_create_project_channel(
+                        FakeGuild(),
+                        SimpleNamespace(id=999),
+                        r"C:\taxlab",
+                        "taxlab",
+                    )
+            finally:
+                bot.MIRROR_DB_PATH = old_db_path
+
     async def test_get_or_create_thread_channel_reuses_existing_thread_by_name(self) -> None:
         old_db_path = bot.MIRROR_DB_PATH
         original_thread = bot.discord.Thread
@@ -9181,6 +10142,61 @@ class DiscordBotHelperTests(unittest.IsolatedAsyncioTestCase):
             bot.MIRROR_DB_PATH = old_db_path
             bot.discord.Thread = original_thread
             bot.bridge.get_thread_ui_name = original_get_thread_ui_name
+
+    async def test_get_or_create_thread_channel_surfaces_missing_cached_thread(self) -> None:
+        old_db_path = bot.MIRROR_DB_PATH
+
+        class FakeGuild:
+            def get_thread(self, thread_id: int):
+                return None
+
+            async def fetch_channel(self, thread_id: int):
+                raise RuntimeError("thread boom")
+
+        class FakeProjectChannel:
+            id = 111
+            threads: list[object] = []
+            guild = FakeGuild()
+
+            async def create_thread(self, *args, **kwargs):
+                raise AssertionError("missing cached thread should not create a replacement")
+
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp_dir:
+            bot.MIRROR_DB_PATH = Path(temp_dir) / "mirror.sqlite"
+            try:
+                bot.init_mirror_db()
+                with sqlite3.connect(bot.MIRROR_DB_PATH) as conn:
+                    conn.execute(
+                        """
+                        INSERT INTO mirror_threads (
+                            codex_thread_id, project_key, thread_title,
+                            discord_channel_id, discord_thread_id, updated_at
+                        ) VALUES (?, ?, ?, ?, ?, ?)
+                        """,
+                        ("thread-1", r"c:\taxlab", "old title", 111, 222, 1.0),
+                    )
+                codex_thread = bot.bridge.ThreadInfo(
+                    id="thread-1",
+                    title="Fallback title",
+                    cwd=str(Path(temp_dir)),
+                    updated_at=1,
+                    rollout_path=str(Path(temp_dir) / "thread.jsonl"),
+                    model="gpt",
+                    reasoning_effort="high",
+                    tokens_used=1,
+                )
+
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    r"Stored mirror thread 222 .*RuntimeError: thread boom",
+                ):
+                    await bot.get_or_create_thread_channel(
+                        codex_thread,
+                        r"c:\taxlab",
+                        FakeProjectChannel(),
+                    )
+            finally:
+                bot.MIRROR_DB_PATH = old_db_path
 
     async def test_delete_stale_project_channels_deletes_mirror_text_channel(self) -> None:
         original_text_channel = bot.discord.TextChannel
@@ -9612,6 +10628,35 @@ class DiscordBotHelperTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual([item["kind"] for item in items], ["final"])
         self.assertEqual([item["text"] for item in items], ["done"])
+
+    def test_collect_session_mirror_items_surfaces_aborted_event_details(self) -> None:
+        events = [
+            {
+                "timestamp": "1",
+                "type": "event_msg",
+                "payload": {
+                    "type": "turn_aborted",
+                    "turn_id": "turn-1",
+                    "reason": "interrupted",
+                    "duration_ms": 123,
+                },
+            },
+        ]
+
+        items = bot.collect_session_mirror_items(
+            "thread-1",
+            events,
+            seen_agent_messages={},
+            seen_user_messages={},
+        )
+
+        self.assertEqual([item["kind"] for item in items], ["aborted"])
+        self.assertEqual(items[0]["phase"], "turn_aborted")
+        self.assertIn("Codex turn aborted.", items[0]["text"])
+        self.assertIn("reason=interrupted", items[0]["text"])
+        self.assertIn("turn_id=turn-1", items[0]["text"])
+        self.assertIn("duration_ms=123", items[0]["text"])
+        self.assertEqual(bot.format_session_mirror_text(items[0]), items[0]["text"])
 
     async def test_mirror_session_target_sends_new_session_items_and_updates_cursor(self) -> None:
         original_choose_thread = bridge.choose_thread

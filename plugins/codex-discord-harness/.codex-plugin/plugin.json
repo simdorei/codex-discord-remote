@@ -1,6 +1,6 @@
 {
   "name": "codex-discord-harness",
-  "version": "0.1.0",
+  "version": "0.1.0+codex.20260612042001",
   "description": "Operate, QA, and recover a local Codex Discord Harness runtime.",
   "author": {
     "name": "simdorei"
@@ -9,7 +9,7 @@
   "interface": {
     "displayName": "Codex Discord Harness",
     "shortDescription": "Operate and QA the local Discord bridge for Codex.",
-    "longDescription": "Codex Discord Harness bundles reusable workflows for checking bot health, restarting the watchdog, running smoke QA, and debugging Discord mirror, archive, and steering issues.",
+    "longDescription": "Codex Discord Harness bundles reusable workflows for checking bot health, restarting the watchdog, running smoke QA, running deep interview clarification, running vendored GitHub triage and maintainer orchestration skills, and debugging Discord mirror, archive, and steering issues.",
     "developerName": "simdorei",
     "category": "Productivity",
     "capabilities": [

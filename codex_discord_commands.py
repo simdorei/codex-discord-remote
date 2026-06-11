@@ -182,12 +182,9 @@ def parse_mirror_action(arg: str) -> MirrorAction:
     subcommand = (subcommand or "sync").lower().strip()
     subarg = subarg.strip()
     if subcommand == "sync":
-        if not subarg:
-            return MirrorAction("sync")
-        limit = parse_required_bounded_int(subarg, default=1, minimum=1, maximum=100)
-        if limit is None:
-            return MirrorAction(None, usage="Usage: !mirror sync [limit]")
-        return MirrorAction("sync", limit=limit)
+        if subarg:
+            return MirrorAction(None, usage="Usage: !mirror sync")
+        return MirrorAction("sync")
     if subcommand == "list":
         if not subarg:
             return MirrorAction("list")
@@ -202,4 +199,4 @@ def parse_mirror_action(arg: str) -> MirrorAction:
         if limit is None:
             return MirrorAction(None, usage="Usage: !mirror check [limit]")
         return MirrorAction("check", limit=limit)
-    return MirrorAction(None, usage="Usage: !mirror sync [limit] | !mirror list [limit] | !mirror check [limit]")
+    return MirrorAction(None, usage="Usage: !mirror sync | !mirror list [limit] | !mirror check [limit]")

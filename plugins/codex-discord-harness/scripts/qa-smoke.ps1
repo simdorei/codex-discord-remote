@@ -22,10 +22,16 @@ try {
         codex_app_server_transport.py `
         codex_desktop_bridge.py `
         codex_discord_bot.py `
+        codex_discord_commands.py `
         codex_discord_help.py `
+        codex_discord_mirror_status.py `
+        codex_discord_projects.py `
         codex_discord_runner.py `
+        codex_discord_runtime.py `
+        codex_discord_session_mirror.py `
         codex_discord_steering.py `
         codex_discord_store.py `
+        codex_discord_thread_state.py `
         tests\test_codex_discord_bot.py `
         tests\test_mirror_sync_cleanup.py
 

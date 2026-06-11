@@ -27,11 +27,26 @@ def get_project_key(thread: object, *, bridge_module: object, projectless_chat_k
     if cwd:
         if is_codex_projectless_chat_cwd(cwd, bridge_module=bridge_module):
             return projectless_chat_key
-        try:
-            return bridge_module.normalize_workspace_path(cwd)
-        except Exception:
-            return cwd.lower()
+        return normalize_project_key(
+            cwd,
+            bridge_module=bridge_module,
+            projectless_chat_key=projectless_chat_key,
+        )
     return f"projectless:{bridge_module.get_thread_workspace_name(thread)}"
+
+
+def normalize_project_key(
+    project_key: str | None,
+    *,
+    bridge_module: object,
+    projectless_chat_key: str,
+) -> str:
+    value = str(project_key or "").strip()
+    if not value:
+        return ""
+    if value == projectless_chat_key or value.startswith("projectless:"):
+        return value
+    return bridge_module.normalize_workspace_path(value)
 
 
 def get_project_name(thread: object, *, bridge_module: object) -> str:
@@ -169,12 +184,15 @@ def project_keys_match(
         return False
     if left_value == projectless_chat_key or right_value == projectless_chat_key:
         return False
-    try:
-        return bridge_module.normalize_workspace_path(left_value) == bridge_module.normalize_workspace_path(
-            right_value
-        )
-    except Exception:
-        return left_value.lower() == right_value.lower()
+    return normalize_project_key(
+        left_value,
+        bridge_module=bridge_module,
+        projectless_chat_key=projectless_chat_key,
+    ) == normalize_project_key(
+        right_value,
+        bridge_module=bridge_module,
+        projectless_chat_key=projectless_chat_key,
+    )
 
 
 def resolve_discord_new_thread_project_channel_id(

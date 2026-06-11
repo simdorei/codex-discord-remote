@@ -23,9 +23,9 @@ class MirrorSyncCleanupTests(unittest.IsolatedAsyncioTestCase):
             tokens_used=1,
         )
 
-    async def test_sync_codex_mirror_removes_db_rows_when_no_active_threads(self) -> None:
+    async def test_sync_codex_mirror_removes_db_rows_when_db_root_has_no_active_threads(self) -> None:
         old_db_path = bot.MIRROR_DB_PATH
-        old_load_recent_threads = bot.bridge.load_recent_threads
+        old_load_user_root_threads = bot.bridge.load_user_root_threads
         old_log_path = os.environ.get("CODEX_DISCORD_LOG_PATH")
 
         class FakeGuild:
@@ -62,7 +62,7 @@ class MirrorSyncCleanupTests(unittest.IsolatedAsyncioTestCase):
                         ("stale-thread", "stale-project", "stale", 111, 222, 1.0),
                     )
 
-                bot.bridge.load_recent_threads = lambda limit: []
+                bot.bridge.load_user_root_threads = lambda limit=0: []
                 guild = FakeGuild()
                 fake_bot = SimpleNamespace(
                     guild_id=1,
@@ -71,13 +71,14 @@ class MirrorSyncCleanupTests(unittest.IsolatedAsyncioTestCase):
                     get_guild=lambda guild_id: guild,
                 )
 
-                output = await bot.sync_codex_mirror(fake_bot, limit=30)
+                output = await bot.sync_codex_mirror(fake_bot)
 
                 with sqlite3.connect(bot.MIRROR_DB_PATH) as conn:
                     thread_rows = conn.execute("SELECT codex_thread_id FROM mirror_threads").fetchall()
                     project_rows = conn.execute("SELECT project_key FROM mirror_projects").fetchall()
 
             self.assertIn("Mirror sync complete.", output)
+            self.assertIn("cleanup_scope: full_db_root", output)
             self.assertIn("threads: 0", output)
             self.assertIn("stale_threads_removed: 1", output)
             self.assertIn("stale_projects_removed: 1", output)
@@ -85,13 +86,13 @@ class MirrorSyncCleanupTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(project_rows, [])
         finally:
             bot.MIRROR_DB_PATH = old_db_path
-            bot.bridge.load_recent_threads = old_load_recent_threads
+            bot.bridge.load_user_root_threads = old_load_user_root_threads
             if old_log_path is None:
                 os.environ.pop("CODEX_DISCORD_LOG_PATH", None)
             else:
                 os.environ["CODEX_DISCORD_LOG_PATH"] = old_log_path
 
-    async def test_sync_codex_mirror_removes_rows_outside_requested_limit(self) -> None:
+    async def test_sync_codex_mirror_keeps_rows_outside_requested_limit(self) -> None:
         old_db_path = bot.MIRROR_DB_PATH
         old_load_recent_threads = bot.bridge.load_recent_threads
         old_filter_mirrorable_threads = bot.filter_mirrorable_threads
@@ -178,9 +179,10 @@ class MirrorSyncCleanupTests(unittest.IsolatedAsyncioTestCase):
                     ).fetchall()
 
             self.assertEqual(load_calls, [7])
+            self.assertIn("cleanup_scope: limited_sync_no_prune", output)
             self.assertIn("threads: 1", output)
-            self.assertIn("stale_threads_removed: 1", output)
-            self.assertEqual(rows, [("scoped-thread",)])
+            self.assertIn("stale_threads_removed: 0", output)
+            self.assertEqual(rows, [("hidden-active-thread",), ("scoped-thread",)])
         finally:
             bot.MIRROR_DB_PATH = old_db_path
             bot.bridge.load_recent_threads = old_load_recent_threads

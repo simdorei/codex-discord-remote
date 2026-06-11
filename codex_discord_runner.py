@@ -175,13 +175,18 @@ async def report_thread_runner_job_failed(
     job: object,
     target_thread_id: str | None,
     *,
+    send_text_func,
     log_func,
 ) -> None:
     channel = job.get("channel") if isinstance(job, dict) else None
     if channel is None or not hasattr(channel, "send"):
         return
     try:
-        await channel.send("Queued ask failed. Check codex_discord_bot.log.")
+        await send_text_func(
+            channel,
+            "Queued ask failed. Check codex_discord_bot.log.",
+            context="thread_runner_job_failed",
+        )
         log_func(f"thread_runner_job_failure_reported target={target_thread_id or '-'}")
     except Exception:
         log_func("thread_runner_job_failure_report_failed\n" + traceback.format_exc())
@@ -194,6 +199,7 @@ async def thread_runner_loop(
     wait_for_idle_func,
     run_prompt_and_send_func,
     report_job_failed_func,
+    send_text_func,
     log_func,
     runners: dict[str, dict[str, object]] = THREAD_RUNNERS,
     runners_lock: object = THREAD_RUNNERS_LOCK,
@@ -233,17 +239,21 @@ async def thread_runner_loop(
                         job_target_thread_id,
                     )
                     if busy_state != "idle":
-                        await channel.send(
+                        await send_text_func(
+                            channel,
                             f"Queued ask waiting for `{busy_ref or job_target_thread_id or 'selected'}` "
-                            f"to become idle. Current state: {busy_state}."
+                            f"to become idle. Current state: {busy_state}.",
+                            context="thread_runner_waiting",
                         )
                         busy_state, _busy_thread_id, busy_ref = await wait_for_idle_func(
                             job_target_thread_id,
                         )
                         if busy_state != "idle":
-                            await channel.send(
+                            await send_text_func(
+                                channel,
                                 f"Queued ask is still blocked for `{busy_ref or job_target_thread_id or 'selected'}`. "
-                                f"Current state: {busy_state}."
+                                f"Current state: {busy_state}.",
+                                context="thread_runner_still_blocked",
                             )
                             continue
                 await run_prompt_and_send_func(

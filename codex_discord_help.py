@@ -20,6 +20,9 @@ def build_help(*, qa_commands_enabled: bool) -> str:
         "/bridge_sync",
         "/new",
         "/ask",
+        "/interview",
+        "/github_triage",
+        "/maintainer_orchestrator",
         "/ask_ipc",
     ]
     lines = [
@@ -41,7 +44,7 @@ def build_help(*, qa_commands_enabled: bool) -> str:
         "!runners",
         "!retract [ref]  (remove your latest queued ask)",
         "!bridge sync [limit]",
-        "!mirror sync [limit]",
+        "!mirror sync",
         "!mirror list [limit]",
         "!mirror check [limit]",
         "!approval",
@@ -50,6 +53,9 @@ def build_help(*, qa_commands_enabled: bool) -> str:
         "!confirm_delete_archive <ref>",
         "!new <prompt>  (create a new Codex thread with the first prompt)",
         "!ask <prompt>",
+        "!interview <request>  (Gajae-style clarify before implementation)",
+        "!triage [request]  (GitHub issue/PR triage workflow)",
+        "!orchestrate <request>  (maintainer orchestrator workflow)",
         "",
         "Plain messages in mirrored Discord threads are sent to that Codex thread.",
     ]

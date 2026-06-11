@@ -43,6 +43,7 @@ The installer:
 
 - installs Python dependencies from `requirements.txt`
 - creates `.env` from `.env.example` when `.env` is missing
+- installs the local Codex plugin marketplace and `codex-discord-harness` plugin so bundled skills are available
 
 To preview what the installer would do:
 
@@ -50,10 +51,12 @@ To preview what the installer would do:
 .\install.ps1 -DryRun
 ```
 
+Use `.\install.ps1 -SkipCodexPlugin` only when you want to skip Codex plugin registration.
+
 ## Install The Codex Plugin
 
 The repository includes a local Codex plugin marketplace at `.agents\plugins\marketplace.json`.
-Install it from the repository root:
+The installer registers it automatically. To install or reinstall the plugin manually from the repository root:
 
 ```powershell
 codex plugin marketplace add .
@@ -73,6 +76,9 @@ Expected entries include:
 - plugin: `codex-discord-harness@codex-discord-harness`
 
 Restart Codex after installing the plugin so the bundled skills are loaded into new sessions.
+Bundled skills include `discord-harness`, `discord-harness-qa`, `deep-interview`, `github-project-triage`, and `maintainer-orchestrator`. `deep-interview` is a Gajae Code style clarification-first workflow with ambiguity scoring, work-structure locking, ontology tracking, internal fragment prompts, and explicit approval gating. `/interview` and `!interview` start that workflow through Discord.
+
+The `github-project-triage` and `maintainer-orchestrator` skills are vendored from `steipete/agent-scripts` under the MIT License. They are preserved close to upstream and may contain upstream-specific assumptions. Use `/github_triage`, `!triage`, `/maintainer_orchestrator`, or `!orchestrate` when you explicitly want those workflows.
 
 Useful plugin-backed scripts can also be run directly from the repository:
 
@@ -81,6 +87,8 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\plugins\codex-discord-
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\plugins\codex-discord-harness\scripts\restart.ps1
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\plugins\codex-discord-harness\scripts\qa-smoke.ps1 -SkipUnitTests
 ```
+
+`restart.ps1` refuses to write the restart marker while any DB-root Codex thread is not `idle`.
 
 ## Configure
 
@@ -160,7 +168,7 @@ py -3 .\send_discord_attachment.py --channel-id 123456789012345678 --content-fil
 
 Registered Discord slash commands:
 
-- /help, /list, /archived_list, /use, /status, /doctor, /where, /context, /usage, /runners, /retract, /mirror_check, /bridge_sync, /new, /ask (legacy alias: /ask_ipc)
+- /help, /list, /archived_list, /use, /status, /doctor, /where, /context, /usage, /runners, /retract, /mirror_check, /bridge_sync, /new, /ask, /interview, /github_triage, /maintainer_orchestrator (legacy alias: /ask_ipc)
 
 Common `!` commands:
 
@@ -183,7 +191,7 @@ Common `!` commands:
 | `!runners` | Shows Discord runner queues. |
 | `!retract [ref]` | Removes your latest queued ask for the mapped/current Codex thread or supplied ref. Active asks are not interrupted. |
 | `!bridge sync [limit]` | Refreshes local bridge state and Discord mirror state. Without a limit, it uses DB-root user threads. |
-| `!mirror sync [limit]` | Syncs Discord mirror project/thread channels. Without a limit, it uses DB-root user threads. |
+| `!mirror sync` | Syncs Discord mirror project/thread channels using DB-root user threads. |
 | `!mirror list [limit]` | Lists mirror mappings. Without a limit, it uses DB-root user threads. |
 | `!mirror check [limit]` | Checks mirror mappings and stale rows. Without a limit, it uses DB-root user threads. |
 | `!approval` | Re-sends the pending approval controls for the mapped/current Codex thread when one exists. |
@@ -192,6 +200,9 @@ Common `!` commands:
 | `!confirm_delete_archive <ref>` | Permanently deletes the archived thread after previewing. |
 | `!new <prompt>` | Creates a new Codex thread with the first prompt. |
 | `!ask <prompt>` | Sends a prompt to the mapped Codex thread, or selected thread outside mirrors. |
+| `!interview <request>` | Sends the request as a Gajae-style deep interview so Codex confirms work structure, scores ambiguity, and waits for approval before implementation. |
+| `!triage [request]` | Sends the request to the vendored `github-project-triage` skill. Without a request, it asks for current GitHub project triage. |
+| `!orchestrate <request>` | Sends the request to the vendored `maintainer-orchestrator` skill. Requires an explicit request because it coordinates higher-risk maintainer workflows. |
 
 ## Interop With Other Discord Tools
 
@@ -224,10 +235,10 @@ Steering is handled by Codex Desktop, not by a Discord-side global busy gate.
 ## Transport Policy
 
 - Discord ask and steering delivery use a resident `codex app-server` client by default. The bot starts one app-server connection at startup and reuses it for `turn/start`, `turn/steer`, and `turn/interrupt`-style control instead of launching a bridge subprocess for each message.
-- App-server approval and request-user-input prompts are cached as server requests. Discord approval/input replies answer the same app-server JSON-RPC request id first, then fall back to the legacy IPC approval path only when no resident request is pending.
+- App-server approval and request-user-input prompts are cached as server requests. Discord approval/input replies answer the same app-server JSON-RPC request id; missing resident requests are surfaced as explicit errors instead of silently substituting another path.
 - Mapped ask output is mirrored from the local Codex session file after cursor priming, so Discord does not also stream a second copy of the answer.
 - Background session mirroring still tails archive-recommended threads. Backlog is not dropped; it is caught up in bounded event batches so a stale cursor does not flood Discord in one poll. Active mapped Discord asks can still temporarily allow mirrored output for that target.
-- Legacy IPC/UI/subprocess delivery is disabled for ask/steer by default. Set `CODEX_DISCORD_APP_SERVER_TRANSPORT=0` to force legacy behavior, or `CODEX_DISCORD_APP_SERVER_LEGACY_FALLBACK=1` to allow fallback after resident app-server delivery failure.
+- Legacy IPC/UI/subprocess delivery is not used as a silent fallback for ask/steer. Resident app-server delivery failures are surfaced as explicit errors.
 - Sidecar transport remains available for non-ask helper operations that still need it, such as archive and local maintenance commands.
 
 ## Validation

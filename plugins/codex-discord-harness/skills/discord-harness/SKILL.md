@@ -13,6 +13,8 @@ Use this skill for the `codex-discord-harness` repository and its local Windows 
 - Keep Discord bot tokens, guild IDs, channel IDs, and user-specific paths in `.env` or local state; do not hard-code secrets into plugin files.
 - Prefer repo scripts and tests over ad hoc shell commands.
 - Do not open extra Discord Web tabs for QA when an existing usable Discord tab/window is available.
+- The plugin also packages `deep-interview`, `github-project-triage`, and `maintainer-orchestrator` skills.
+- The bot exposes `/interview` and `!interview` for the clarification-first workflow, `/github_triage` and `!triage` for GitHub queue triage, and `/maintainer_orchestrator` and `!orchestrate` for maintainer orchestration.
 
 ## First Checks
 
@@ -36,3 +38,11 @@ Use this skill for the `codex-discord-harness` repository and its local Windows 
 - `scripts/restart.ps1`: request bot restart through `.codex_discord_bot.restart` and run the watchdog.
 - `scripts/qa-smoke.ps1`: run deploy-oriented smoke checks.
 
+## Interview Workflow
+
+- For vague, broad, risky, or under-specified implementation requests, use the packaged `deep-interview` skill before coding.
+- In Discord, use `/interview <request>` or `!interview <request>` to wrap the request in the Gajae-style clarification prompt.
+- The interview must stop at a pending-approval ticket and wait for explicit user approval before implementation.
+- GitHub triage and maintainer orchestration are separate workflows, not interview aliases.
+- In Discord, use `/github_triage [prompt]` or `!triage [request]` to run the vendored `github-project-triage` skill.
+- In Discord, use `/maintainer_orchestrator <prompt>` or `!orchestrate <request>` to run the vendored `maintainer-orchestrator` skill.

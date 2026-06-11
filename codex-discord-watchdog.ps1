@@ -8,12 +8,14 @@ $ErrorActionPreference = 'Stop'
 
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $BotScript = Join-Path $ScriptDir 'codex_discord_bot.py'
+$BridgePath = Join-Path $ScriptDir 'codex_desktop_bridge.py'
 $RuntimeLockPath = Join-Path $ScriptDir '.codex_discord_bot.runtime.lock'
 $RestartRequestPath = Join-Path $ScriptDir '.codex_discord_bot.restart'
 $StopRequestPath = Join-Path $ScriptDir '.codex_discord_bot.stop'
 $DisablePath = Join-Path $ScriptDir '.codex_discord_bot.disabled'
 $HeadlessLauncher = Join-Path $ScriptDir 'codex-discord-bot-headless.vbs'
 $LauncherLogPath = Join-Path $ScriptDir 'discord_launcher.log'
+$GracefulStopTimeoutSeconds = 30
 $Sha256 = [Security.Cryptography.SHA256]::Create()
 try {
     $ScriptDirHash = $Sha256.ComputeHash([Text.Encoding]::UTF8.GetBytes($ScriptDir.ToLowerInvariant()))
@@ -97,7 +99,7 @@ function Test-RuntimeMutexHeld {
 }
 
 function Wait-RuntimeBotExit {
-    param([int]$TimeoutSeconds = 8)
+    param([int]$TimeoutSeconds = $GracefulStopTimeoutSeconds)
 
     for ($i = 0; $i -lt $TimeoutSeconds; $i++) {
         Start-Sleep -Seconds 1
@@ -116,7 +118,7 @@ function Request-GracefulRuntimeStop {
         return $false
     }
     Write-LauncherLog "watchdog_graceful_stop_requested marker=$StopRequestPath"
-    if (Wait-RuntimeBotExit -TimeoutSeconds 8) {
+    if (Wait-RuntimeBotExit -TimeoutSeconds $GracefulStopTimeoutSeconds) {
         Remove-Item -LiteralPath $StopRequestPath -Force -ErrorAction SilentlyContinue
         Write-LauncherLog "watchdog_graceful_stop_done marker=$StopRequestPath"
         return $true
@@ -193,6 +195,36 @@ function Test-BotProcessAlive {
     return $false
 }
 
+function Assert-CodexThreadsIdleForRestart {
+    if (-not (Test-Path -LiteralPath $BridgePath)) {
+        throw "Cannot verify Codex thread state before restart; bridge script not found: $BridgePath"
+    }
+
+    $bridgeOutput = & py -3 $BridgePath list --db-root --limit 0 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        throw "Cannot verify Codex thread state before restart.`n$($bridgeOutput -join "`n")"
+    }
+
+    $busyLines = @()
+    foreach ($line in $bridgeOutput) {
+        if ($line -notmatch '\|') {
+            continue
+        }
+        $parts = [string]$line -split '\|'
+        if ($parts.Count -lt 3) {
+            continue
+        }
+        $state = $parts[2].Trim()
+        if ($state -and $state -ne 'idle') {
+            $busyLines += ([string]$line).Trim()
+        }
+    }
+
+    if ($busyLines.Count -gt 0) {
+        throw "Refusing to restart Codex Discord bot because Codex threads are not idle.`n$($busyLines -join "`n")"
+    }
+}
+
 if (-not (Test-Path -LiteralPath $BotScript)) {
     Write-LauncherLog "watchdog_error reason=bot_script_missing script=$BotScript"
     exit 1
@@ -222,6 +254,13 @@ if (Test-Path -LiteralPath $RestartRequestPath) {
     if ($DryRun) {
         Write-Output "restart_requested"
         exit 0
+    }
+    try {
+        Assert-CodexThreadsIdleForRestart
+    } catch {
+        Remove-Item -LiteralPath $RestartRequestPath -Force -ErrorAction SilentlyContinue
+        Write-LauncherLog "watchdog_restart_refused error=$($_.Exception.Message)"
+        throw
     }
     Write-LauncherLog "watchdog_restart_requested marker=$RestartRequestPath"
     Remove-Item -LiteralPath $RestartRequestPath -Force -ErrorAction SilentlyContinue
