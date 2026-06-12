@@ -3884,15 +3884,94 @@ async def send_interactive_prompt(
         return
 
 
+def cleanup_archived_session_mirror_state(owner: object | None, codex_thread_id: str) -> dict[str, int]:
+    counts = discord_store.delete_archived_mirror_state(MIRROR_DB_PATH, codex_thread_id)
+    state = get_session_mirror_state()
+    key = normalize_runner_key(codex_thread_id)
+    active_output_targets = int(key in state.active_output_targets)
+    pending_cursor_targets = int(key in state.pending_cursor_targets)
+    deactivate_session_mirror_output_target(codex_thread_id)
+
+    archive_skip_logged = 0
+    seen_agent_messages = 0
+    seen_user_messages = 0
+    if owner is not None:
+        skip_logged = getattr(owner, "_session_mirror_archive_skip_logged", None)
+        if skip_logged is not None:
+            archive_skip_logged = int(codex_thread_id in skip_logged)
+            skip_logged.discard(codex_thread_id)
+        seen_agent = getattr(owner, "_session_mirror_seen_agent_messages", None)
+        if seen_agent is not None:
+            seen_agent_messages = int(seen_agent.pop(codex_thread_id, None) is not None)
+        seen_user = getattr(owner, "_session_mirror_seen_user_messages", None)
+        if seen_user is not None:
+            seen_user_messages = int(seen_user.pop(codex_thread_id, None) is not None)
+
+    return {
+        **counts,
+        "active_output_targets": active_output_targets,
+        "pending_cursor_targets": pending_cursor_targets,
+        "archive_skip_logged": archive_skip_logged,
+        "seen_agent_messages": seen_agent_messages,
+        "seen_user_messages": seen_user_messages,
+    }
+
+
+def cleanup_archive_mirror_after_bridge_command(
+    owner: object | None,
+    argv: list[str],
+    exit_code: int,
+    output: str,
+) -> str | None:
+    if exit_code != 0 or not argv or argv[0] != "archive":
+        return None
+    archived_thread_id = parse_bridge_output_value(output, "archived_thread")
+    if not archived_thread_id:
+        log_line(
+            "archive_mirror_cleanup_skipped reason=no_archived_thread "
+            f"argv={format_log_argv(argv)}"
+        )
+        return None
+    try:
+        counts = cleanup_archived_session_mirror_state(owner, archived_thread_id)
+    except Exception as exc:
+        log_line(
+            f"archive_mirror_cleanup_failed target={archived_thread_id} "
+            f"error_type={type(exc).__name__}\n"
+            + traceback.format_exc()
+        )
+        return f"Mirror cleanup warning: {type(exc).__name__}: {exc}"
+    log_line(
+        f"archive_mirror_cleanup_done target={archived_thread_id} "
+        f"mirror_rows={counts['mirror_threads']} "
+        f"offsets={counts['session_mirror_offsets']} "
+        f"active={counts['active_output_targets']} "
+        f"pending={counts['pending_cursor_targets']} "
+        f"seen_agent={counts['seen_agent_messages']} "
+        f"seen_user={counts['seen_user_messages']}"
+    )
+    return None
+
+
 async def run_bridge_and_send(
     target: discord.abc.Messageable,
     argv: list[str],
     title: str,
     failure_title: str | None = None,
+    archive_cleanup_owner: object | None = None,
 ) -> tuple[int, str]:
     exit_code, output = await asyncio.to_thread(run_bridge_command, argv)
+    cleanup_warning = cleanup_archive_mirror_after_bridge_command(
+        archive_cleanup_owner,
+        argv,
+        exit_code,
+        output,
+    )
     prefix = title if exit_code == 0 else f"{failure_title or title} failed (exit {exit_code})"
-    text = f"{prefix}\n\n{output or '(no output)'}"
+    display_output = output or "(no output)"
+    if cleanup_warning:
+        display_output = f"{display_output}\n\n{cleanup_warning}"
+    text = f"{prefix}\n\n{display_output}"
     chunks = split_delivery_chunks(text)
     log_line(
         f"bridge_command_done title={title!r} exit={exit_code} "
@@ -7349,7 +7428,12 @@ async def handle_prefix_command(bot: CodexDiscordBot, message: discord.Message, 
         if bridge_action.usage:
             await send_chunks(message.channel, bridge_action.usage, context="prefix_bridge_usage")
             return
-        await run_bridge_and_send(message.channel, bridge_action.argv or [], bridge_action.title)
+        await run_bridge_and_send(
+            message.channel,
+            bridge_action.argv or [],
+            bridge_action.title,
+            archive_cleanup_owner=bot,
+        )
         return
     if command == "doctor":
         await send_chunks(

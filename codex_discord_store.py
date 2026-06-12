@@ -595,6 +595,23 @@ def delete_stale_mirror_rows(
             conn.execute("DELETE FROM mirror_projects")
 
 
+def delete_archived_mirror_state(db_path: Path, codex_thread_id: str) -> dict[str, int]:
+    init_mirror_db(db_path)
+    with sqlite3.connect(db_path) as conn:
+        mirror_threads = conn.execute(
+            "DELETE FROM mirror_threads WHERE codex_thread_id = ?",
+            (str(codex_thread_id),),
+        ).rowcount
+        session_mirror_offsets = conn.execute(
+            "DELETE FROM codex_session_mirror_offsets WHERE codex_thread_id = ?",
+            (str(codex_thread_id),),
+        ).rowcount
+    return {
+        "mirror_threads": int(mirror_threads or 0),
+        "session_mirror_offsets": int(session_mirror_offsets or 0),
+    }
+
+
 def get_remaining_mirror_discord_ids(db_path: Path) -> tuple[set[int], list[int]]:
     init_mirror_db(db_path)
     with sqlite3.connect(db_path) as conn:

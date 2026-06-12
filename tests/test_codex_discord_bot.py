@@ -4727,6 +4727,220 @@ class DiscordBotHelperTests(unittest.IsolatedAsyncioTestCase):
             bot.run_bridge_command = original_run_bridge_command
             bot.DISCORD_CHUNK_MARKERS_ENABLED = original_chunk_markers
 
+    async def test_archive_bridge_success_cleans_exact_mirror_state(self) -> None:
+        original_run_bridge_command = bot.run_bridge_command
+        try:
+            with sqlite3.connect(bot.MIRROR_DB_PATH) as conn:
+                conn.execute(
+                    "INSERT INTO mirror_projects "
+                    "(project_key, project_name, discord_channel_id, updated_at) "
+                    "VALUES (?, ?, ?, ?)",
+                    ("project", "Project", 111, 1.0),
+                )
+                conn.execute(
+                    "INSERT INTO mirror_threads "
+                    "(codex_thread_id, project_key, thread_title, "
+                    "discord_channel_id, discord_thread_id, updated_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    ("thread-1", "project", "Archived", 111, 222, 1.0),
+                )
+                conn.execute(
+                    "INSERT INTO codex_session_mirror_offsets "
+                    "(codex_thread_id, rollout_path, cursor, updated_at) "
+                    "VALUES (?, ?, ?, ?)",
+                    ("thread-1", "thread-1.jsonl", 42, 1.0),
+                )
+                conn.execute(
+                    "INSERT INTO codex_session_mirror_events "
+                    "(event_digest, codex_thread_id, created_at) "
+                    "VALUES (?, ?, ?)",
+                    ("digest-1", "thread-1", 1.0),
+                )
+
+            bot.activate_pending_session_mirror_output_target("thread-1")
+            owner = SimpleNamespace(
+                _session_mirror_archive_skip_logged={"thread-1"},
+                _session_mirror_seen_agent_messages={"thread-1": {"agent": 1.0}},
+                _session_mirror_seen_user_messages={"thread-1": {"user": 1.0}},
+            )
+            bot.run_bridge_command = lambda argv: (
+                0,
+                "archived_thread: thread-1\ntitle: Archived",
+            )
+            target = FakeTarget()
+
+            exit_code, output = await bot.run_bridge_and_send(
+                target,
+                ["archive", "--thread-id", "thread-1"],
+                "Archive",
+                archive_cleanup_owner=owner,
+            )
+
+            with sqlite3.connect(bot.MIRROR_DB_PATH) as conn:
+                mirror_rows = conn.execute(
+                    "SELECT codex_thread_id FROM mirror_threads WHERE codex_thread_id = ?",
+                    ("thread-1",),
+                ).fetchall()
+                offset_rows = conn.execute(
+                    "SELECT codex_thread_id FROM codex_session_mirror_offsets WHERE codex_thread_id = ?",
+                    ("thread-1",),
+                ).fetchall()
+                project_rows = conn.execute("SELECT project_key FROM mirror_projects").fetchall()
+                event_rows = conn.execute("SELECT event_digest FROM codex_session_mirror_events").fetchall()
+
+            self.assertEqual(exit_code, 0)
+            self.assertEqual(output, "archived_thread: thread-1\ntitle: Archived")
+            self.assertEqual(target.messages, [("Archive\n\narchived_thread: thread-1\ntitle: Archived", None)])
+            self.assertEqual(mirror_rows, [])
+            self.assertEqual(offset_rows, [])
+            self.assertEqual(project_rows, [("project",)])
+            self.assertEqual(event_rows, [("digest-1",)])
+            self.assertFalse(bot.is_active_session_mirror_output_target("thread-1"))
+            self.assertFalse(bot.is_pending_session_mirror_cursor_target("thread-1"))
+            self.assertEqual(owner._session_mirror_archive_skip_logged, set())
+            self.assertEqual(owner._session_mirror_seen_agent_messages, {})
+            self.assertEqual(owner._session_mirror_seen_user_messages, {})
+            log_text = bot.get_log_path().read_text(encoding="utf-8")
+            self.assertIn("archive_mirror_cleanup_done target=thread-1", log_text)
+            self.assertIn("mirror_rows=1", log_text)
+            self.assertIn("offsets=1", log_text)
+        finally:
+            bot.run_bridge_command = original_run_bridge_command
+
+    async def test_archive_bridge_failure_does_not_cleanup_mirror_state(self) -> None:
+        original_run_bridge_command = bot.run_bridge_command
+        try:
+            with sqlite3.connect(bot.MIRROR_DB_PATH) as conn:
+                conn.execute(
+                    "INSERT INTO mirror_threads "
+                    "(codex_thread_id, project_key, thread_title, "
+                    "discord_channel_id, discord_thread_id, updated_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    ("thread-1", "project", "Archived", 111, 222, 1.0),
+                )
+                conn.execute(
+                    "INSERT INTO codex_session_mirror_offsets "
+                    "(codex_thread_id, rollout_path, cursor, updated_at) "
+                    "VALUES (?, ?, ?, ?)",
+                    ("thread-1", "thread-1.jsonl", 42, 1.0),
+                )
+
+            bot.activate_session_mirror_output_target("thread-1")
+            owner = SimpleNamespace(
+                _session_mirror_archive_skip_logged={"thread-1"},
+                _session_mirror_seen_agent_messages={"thread-1": {"agent": 1.0}},
+                _session_mirror_seen_user_messages={"thread-1": {"user": 1.0}},
+            )
+            bot.run_bridge_command = lambda argv: (1, "archive failed")
+            target = FakeTarget()
+
+            await bot.run_bridge_and_send(
+                target,
+                ["archive", "--thread-id", "thread-1"],
+                "Archive",
+                archive_cleanup_owner=owner,
+            )
+
+            with sqlite3.connect(bot.MIRROR_DB_PATH) as conn:
+                mirror_rows = conn.execute("SELECT codex_thread_id FROM mirror_threads").fetchall()
+                offset_rows = conn.execute("SELECT codex_thread_id FROM codex_session_mirror_offsets").fetchall()
+
+            self.assertEqual(target.messages, [("Archive failed (exit 1)\n\narchive failed", None)])
+            self.assertEqual(mirror_rows, [("thread-1",)])
+            self.assertEqual(offset_rows, [("thread-1",)])
+            self.assertTrue(bot.is_active_session_mirror_output_target("thread-1"))
+            self.assertEqual(owner._session_mirror_archive_skip_logged, {"thread-1"})
+            self.assertEqual(owner._session_mirror_seen_agent_messages, {"thread-1": {"agent": 1.0}})
+            self.assertEqual(owner._session_mirror_seen_user_messages, {"thread-1": {"user": 1.0}})
+        finally:
+            bot.run_bridge_command = original_run_bridge_command
+
+    async def test_archive_bridge_success_without_archived_thread_skips_cleanup(self) -> None:
+        original_run_bridge_command = bot.run_bridge_command
+        try:
+            with sqlite3.connect(bot.MIRROR_DB_PATH) as conn:
+                conn.execute(
+                    "INSERT INTO mirror_threads "
+                    "(codex_thread_id, project_key, thread_title, "
+                    "discord_channel_id, discord_thread_id, updated_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    ("thread-1", "project", "Archived", 111, 222, 1.0),
+                )
+                conn.execute(
+                    "INSERT INTO codex_session_mirror_offsets "
+                    "(codex_thread_id, rollout_path, cursor, updated_at) "
+                    "VALUES (?, ?, ?, ?)",
+                    ("thread-1", "thread-1.jsonl", 42, 1.0),
+                )
+
+            bot.activate_pending_session_mirror_output_target("thread-1")
+            owner = SimpleNamespace(
+                _session_mirror_archive_skip_logged={"thread-1"},
+                _session_mirror_seen_agent_messages={"thread-1": {"agent": 1.0}},
+                _session_mirror_seen_user_messages={"thread-1": {"user": 1.0}},
+            )
+            bot.run_bridge_command = lambda argv: (0, "title: Archived")
+            target = FakeTarget()
+
+            await bot.run_bridge_and_send(
+                target,
+                ["archive", "--thread-id", "thread-1"],
+                "Archive",
+                archive_cleanup_owner=owner,
+            )
+
+            with sqlite3.connect(bot.MIRROR_DB_PATH) as conn:
+                mirror_rows = conn.execute("SELECT codex_thread_id FROM mirror_threads").fetchall()
+                offset_rows = conn.execute("SELECT codex_thread_id FROM codex_session_mirror_offsets").fetchall()
+
+            self.assertEqual(target.messages, [("Archive\n\ntitle: Archived", None)])
+            self.assertEqual(mirror_rows, [("thread-1",)])
+            self.assertEqual(offset_rows, [("thread-1",)])
+            self.assertTrue(bot.is_active_session_mirror_output_target("thread-1"))
+            self.assertTrue(bot.is_pending_session_mirror_cursor_target("thread-1"))
+            self.assertEqual(owner._session_mirror_archive_skip_logged, {"thread-1"})
+            log_text = bot.get_log_path().read_text(encoding="utf-8")
+            self.assertIn("archive_mirror_cleanup_skipped reason=no_archived_thread", log_text)
+        finally:
+            bot.run_bridge_command = original_run_bridge_command
+
+    async def test_archive_bridge_cleanup_failure_warns_without_blocking_response(self) -> None:
+        original_run_bridge_command = bot.run_bridge_command
+        original_delete_archived_mirror_state = bot.discord_store.delete_archived_mirror_state
+        try:
+            def fail_cleanup(db_path, codex_thread_id):
+                raise RuntimeError("cleanup unavailable")
+
+            bot.run_bridge_command = lambda argv: (0, "archived_thread: thread-1")
+            bot.discord_store.delete_archived_mirror_state = fail_cleanup
+            target = FakeTarget()
+
+            exit_code, output = await bot.run_bridge_and_send(
+                target,
+                ["archive", "--thread-id", "thread-1"],
+                "Archive",
+                archive_cleanup_owner=SimpleNamespace(),
+            )
+
+            self.assertEqual(exit_code, 0)
+            self.assertEqual(output, "archived_thread: thread-1")
+            self.assertEqual(
+                target.messages,
+                [
+                    (
+                        "Archive\n\narchived_thread: thread-1\n\n"
+                        "Mirror cleanup warning: RuntimeError: cleanup unavailable",
+                        None,
+                    )
+                ],
+            )
+            log_text = bot.get_log_path().read_text(encoding="utf-8")
+            self.assertIn("archive_mirror_cleanup_failed target=thread-1 error_type=RuntimeError", log_text)
+            self.assertIn("RuntimeError: cleanup unavailable", log_text)
+        finally:
+            bot.run_bridge_command = original_run_bridge_command
+            bot.discord_store.delete_archived_mirror_state = original_delete_archived_mirror_state
+
     def test_context_usage_detects_inferred_compaction_drop(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             session_path = Path(temp_dir) / "session.jsonl"
@@ -8720,7 +8934,7 @@ class DiscordBotHelperTests(unittest.IsolatedAsyncioTestCase):
         original_run_bridge_and_send = bot.run_bridge_and_send
         calls: list[tuple[list[str], str]] = []
 
-        async def fake_run_bridge_and_send(target, argv, title, failure_title=None):
+        async def fake_run_bridge_and_send(target, argv, title, failure_title=None, **kwargs):
             calls.append((argv, title))
             await target.send("ok")
             return 0, "ok"
@@ -8753,7 +8967,7 @@ class DiscordBotHelperTests(unittest.IsolatedAsyncioTestCase):
                 tokens_used=1,
             )
 
-        async def fake_run_bridge_and_send(target, argv, title, failure_title=None):
+        async def fake_run_bridge_and_send(target, argv, title, failure_title=None, **kwargs):
             calls.append((argv, title))
             await target.send("ok")
             return 0, "ok"
@@ -8797,7 +9011,7 @@ class DiscordBotHelperTests(unittest.IsolatedAsyncioTestCase):
             tokens_used=1,
         )
 
-        async def fake_run_bridge_and_send(target, argv, title, failure_title=None):
+        async def fake_run_bridge_and_send(target, argv, title, failure_title=None, **kwargs):
             calls.append((argv, title))
             await target.send("ok")
             return 0, "ok"
@@ -8823,7 +9037,7 @@ class DiscordBotHelperTests(unittest.IsolatedAsyncioTestCase):
         original_run_bridge_and_send = bot.run_bridge_and_send
         calls: list[tuple[list[str], str]] = []
 
-        async def fake_run_bridge_and_send(target, argv, title, failure_title=None):
+        async def fake_run_bridge_and_send(target, argv, title, failure_title=None, **kwargs):
             calls.append((argv, title))
             await target.send("ok")
             return 0, "ok"
