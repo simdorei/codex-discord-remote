@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from codex_discord_attachment_metadata import sanitize_attachment_filename
+from codex_discord_delivery_runtime import is_attachment_source_allowed
 import codex_discord_session_mirror_item_builders as item_builders
 import codex_discord_session_mirror_item_events as item_events
 from codex_discord_session_mirror_item_append import (
@@ -27,6 +29,20 @@ INTERNAL_RESPONSE_USER_PREFIXES = (
 )
 CODEX_IMAGE_OUTPUT_TEXT = "Codex image output"
 CODEX_IMAGE_OUTPUT_FILENAME = "codex-image-output.png"
+CODEX_FILE_OUTPUT_TEXT = "Codex file output"
+CODEX_FILE_OUTPUT_FILENAME = "codex-file-output.bin"
+CODEX_FILE_OUTPUT_PART_TYPES = frozenset({"file", "input_file", "output_file"})
+CODEX_FILE_DATA_FIELDS = ("file_data", "data_url", "file_url", "url")
+CODEX_FILE_PATH_FIELDS = ("file_path", "path")
+CODEX_FILE_NAME_FIELDS = ("filename", "download_name", "name")
+
+
+def _first_string_field(payload: dict[str, JsonValue], field_names: tuple[str, ...]) -> str:
+    for field_name in field_names:
+        value = payload.get(field_name)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return ""
 
 
 def _append_image_item(
@@ -49,7 +65,48 @@ def _append_image_item(
     item["attachment_filename"] = CODEX_IMAGE_OUTPUT_FILENAME
 
 
-def _collect_function_output_images(
+def _safe_attachment_filename(filename: str) -> str:
+    return sanitize_attachment_filename(filename or CODEX_FILE_OUTPUT_FILENAME, 1)
+
+
+def _file_attachment_source(payload: dict[str, JsonValue]) -> str:
+    attachment_source = _first_string_field(payload, CODEX_FILE_DATA_FIELDS)
+    if attachment_source and is_attachment_source_allowed(attachment_source):
+        return attachment_source
+    if attachment_source:
+        return ""
+    attachment_source = _first_string_field(payload, CODEX_FILE_PATH_FIELDS)
+    if attachment_source and is_attachment_source_allowed(attachment_source):
+        return attachment_source
+    return ""
+
+
+def _append_file_item(
+    ctx: CollectionContext,
+    items: list[SessionMirrorItem],
+    event: SessionEvent,
+    attachment_source: str,
+    filename: str,
+) -> None:
+    source_filename = filename
+    if not source_filename and not attachment_source.startswith("data:"):
+        source_filename = attachment_source
+    safe_filename = _safe_attachment_filename(source_filename)
+    _append_item(
+        ctx,
+        items,
+        event,
+        kind="file",
+        role="assistant",
+        phase="tool_file",
+        text=f"{CODEX_FILE_OUTPUT_TEXT}: {safe_filename}",
+    )
+    item = items[-1]
+    item["attachment_url"] = attachment_source
+    item["attachment_filename"] = safe_filename
+
+
+def _collect_function_output_attachments(
     ctx: CollectionContext,
     items: list[SessionMirrorItem],
     event: SessionEvent,
@@ -61,6 +118,18 @@ def _collect_function_output_images(
         if not isinstance(part, dict):
             continue
         if part.get("type") != "input_image":
+            part_type = str(part.get("type") or "")
+            if part_type not in CODEX_FILE_OUTPUT_PART_TYPES:
+                continue
+            attachment_source = _file_attachment_source(part)
+            if attachment_source:
+                _append_file_item(
+                    ctx,
+                    items,
+                    event,
+                    attachment_source,
+                    _first_string_field(part, CODEX_FILE_NAME_FIELDS),
+                )
             continue
         image_url = part.get("image_url")
         if isinstance(image_url, str) and image_url.startswith("data:image/"):
@@ -80,7 +149,7 @@ def _collect_function_item(
             _append_item(ctx, items, event, kind="interactive", role="assistant", phase="interactive", text=notice)
         return True
     if payload_type == "function_call_output":
-        _collect_function_output_images(ctx, items, event, payload.get("output"))
+        _collect_function_output_attachments(ctx, items, event, payload.get("output"))
         output_text = str(payload.get("output") or "").strip()
         if output_text and "rejected by user" in output_text.lower():
             _append_item(

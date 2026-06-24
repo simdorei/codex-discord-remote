@@ -4,7 +4,9 @@ import base64
 import binascii
 from collections.abc import Callable
 from dataclasses import dataclass
+from pathlib import Path
 from typing import TypeVar
+from urllib.parse import unquote, urlparse
 
 import codex_discord_delivery as discord_delivery
 import codex_discord_delivery_state as discord_delivery_state
@@ -19,6 +21,9 @@ class AttachmentDataUrlError(ValueError):
     pass
 
 
+CODEX_SESSION_MIRROR_ATTACHMENT_DIR = Path(__file__).resolve().parent / ".codex-remote-attachments"
+
+
 def decode_data_url_attachment(data_url: str) -> bytes:
     header, separator, payload = data_url.partition(",")
     if separator != "," or ";base64" not in header:
@@ -27,6 +32,64 @@ def decode_data_url_attachment(data_url: str) -> bytes:
         return base64.b64decode(payload, validate=True)
     except binascii.Error as exc:
         raise AttachmentDataUrlError("attachment data URL has invalid base64 payload") from exc
+
+
+def _attachment_source_path(attachment_source: str) -> Path:
+    source = attachment_source.strip()
+    if source.startswith("file://"):
+        parsed = urlparse(source)
+        if parsed.netloc:
+            raise AttachmentDataUrlError("attachment file URL must be local")
+        raw_path = unquote(parsed.path)
+        if len(raw_path) >= 3 and raw_path[0] == "/" and raw_path[2] == ":":
+            raw_path = raw_path[1:]
+        return Path(raw_path)
+    if "://" in source:
+        raise AttachmentDataUrlError("attachment source must be a data URL or local output file")
+    return Path(source)
+
+
+def _resolve_attachment_output_path(attachment_source: str) -> Path:
+    path = _attachment_source_path(attachment_source)
+    raw_path = str(path)
+    if raw_path.startswith(("\\\\", "//")):
+        raise AttachmentDataUrlError("attachment source must not be a network path")
+    try:
+        resolved = path.resolve(strict=True)
+    except OSError as exc:
+        raise AttachmentDataUrlError(f"attachment source is not a file: {attachment_source}") from exc
+    output_root = CODEX_SESSION_MIRROR_ATTACHMENT_DIR.resolve()
+    try:
+        _ = resolved.relative_to(output_root)
+    except ValueError as exc:
+        raise AttachmentDataUrlError(
+            f"attachment source must be under {CODEX_SESSION_MIRROR_ATTACHMENT_DIR}"
+        ) from exc
+    if not resolved.is_file():
+        raise AttachmentDataUrlError(f"attachment source is not a file: {attachment_source}")
+    return resolved
+
+
+def is_attachment_source_allowed(attachment_source: str) -> bool:
+    source = attachment_source.strip()
+    if source.startswith("data:"):
+        return True
+    try:
+        _ = _resolve_attachment_output_path(source)
+    except AttachmentDataUrlError:
+        return False
+    return True
+
+
+def read_attachment_source_bytes(attachment_source: str) -> bytes:
+    source = attachment_source.strip()
+    if source.startswith("data:"):
+        return decode_data_url_attachment(source)
+    path = _resolve_attachment_output_path(source)
+    try:
+        return path.read_bytes()
+    except OSError as exc:
+        raise AttachmentDataUrlError(f"attachment source could not be read: {source}") from exc
 
 
 @dataclass(frozen=True, slots=True)
@@ -129,7 +192,7 @@ class DiscordDeliveryRuntime:
             target,
             content,
             filename,
-            decode_data_url_attachment(attachment_url),
+            read_attachment_source_bytes(attachment_url),
             log_func=self.log,
             context=context,
             allow_during_stop=allow_during_stop,

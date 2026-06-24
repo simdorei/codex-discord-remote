@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
+from tempfile import TemporaryDirectory
 import unittest
 
 import codex_discord_delivery as delivery
+import codex_discord_delivery_runtime as delivery_runtime
 import codex_discord_delivery_interactions as delivery_interactions
 from codex_discord_text import DISCORD_MAX_LEN
 
@@ -48,6 +51,26 @@ class FakeInteraction:
 
 
 class DiscordDeliveryTests(unittest.IsolatedAsyncioTestCase):
+    def test_read_attachment_source_bytes_supports_data_url(self) -> None:
+        payload = delivery_runtime.read_attachment_source_bytes("data:text/plain;base64,aGVsbG8=")
+
+        self.assertEqual(payload, b"hello")
+
+    def test_read_attachment_source_bytes_rejects_local_file_path(self) -> None:
+        with self.assertRaises(delivery_runtime.AttachmentDataUrlError):
+            _ = delivery_runtime.read_attachment_source_bytes("C:/tmp/report.txt")
+
+    def test_read_attachment_source_bytes_supports_local_output_file_path(self) -> None:
+        output_root = delivery_runtime.CODEX_SESSION_MIRROR_ATTACHMENT_DIR
+        output_root.mkdir(parents=True, exist_ok=True)
+        with TemporaryDirectory(dir=output_root) as temp_dir:
+            attachment_path = Path(temp_dir) / "report.txt"
+            _ = attachment_path.write_bytes(b"hello file")
+
+            payload = delivery_runtime.read_attachment_source_bytes(str(attachment_path))
+
+        self.assertEqual(payload, b"hello file")
+
     def test_interaction_helpers_are_reexported_from_delivery_module(self) -> None:
         self.assertIs(
             delivery.send_interaction_response_tracked,
