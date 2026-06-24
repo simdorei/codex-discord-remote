@@ -71,6 +71,7 @@ class CodexBridgeSessionMirrorEventModule(Protocol):
         thread: ThreadInfo,
         context_usage: ThreadContextUsage | None,
     ) -> bool: ...
+    def is_thread_busy(self, session_path: Path) -> bool: ...
     def read_new_session_events(
         self,
         session_path: Path,

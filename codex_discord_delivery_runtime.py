@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import base64
+import binascii
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TypeVar
@@ -11,6 +13,20 @@ SentMessageT = TypeVar("SentMessageT")
 GetRetryDelaysFunc = Callable[[], tuple[float, ...]]
 GetBoolFunc = Callable[[], bool]
 SetBoolFunc = Callable[[bool], None]
+
+
+class AttachmentDataUrlError(ValueError):
+    pass
+
+
+def decode_data_url_attachment(data_url: str) -> bytes:
+    header, separator, payload = data_url.partition(",")
+    if separator != "," or ";base64" not in header:
+        raise AttachmentDataUrlError("attachment data URL must be base64 encoded")
+    try:
+        return base64.b64decode(payload, validate=True)
+    except binascii.Error as exc:
+        raise AttachmentDataUrlError("attachment data URL has invalid base64 payload") from exc
 
 
 @dataclass(frozen=True, slots=True)
@@ -95,6 +111,28 @@ class DiscordDeliveryRuntime:
             self.state,
             target,
             log_func=self.log,
+        )
+
+    async def send_attachment(
+        self,
+        target: discord_delivery.AttachmentTarget[SentMessageT],
+        content: str,
+        attachment_url: str,
+        filename: str,
+        *,
+        context: str = "send_attachment",
+        allow_during_stop: bool = False,
+    ) -> SentMessageT:
+        self.sync_legacy_config()
+        return await discord_delivery.send_attachment_bytes(
+            self.state,
+            target,
+            content,
+            filename,
+            decode_data_url_attachment(attachment_url),
+            log_func=self.log,
+            context=context,
+            allow_during_stop=allow_during_stop,
         )
 
     async def send_message_tracked(

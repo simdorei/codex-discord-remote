@@ -124,6 +124,7 @@ class BotServiceWiringRuntime:
         self._set("wait_for_discord_delivery_drain", runtime.wait_for_drain)
         self._set("split_delivery_chunks", runtime.split_chunks)
         self._set("send_chunks", runtime.send_chunks)
+        self._set("send_session_mirror_attachment", runtime.send_attachment)
         self._set("send_discord_restarting_notice", runtime.send_restarting_notice)
         self._set("send_message_tracked", runtime.send_message_tracked)
         self._set("send_interaction_response_tracked", runtime.send_interaction_response_tracked)

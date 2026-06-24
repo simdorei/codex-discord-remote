@@ -63,6 +63,7 @@ class BotSessionMirrorAdapterRuntime:
                 self._module_func("send_interactive_prompt"),
             ),
             send_chunks=self.send_chunks,
+            send_attachment=self.send_attachment,
             collect_session_mirror_items=cast(
                 discord_session_mirror_target.SessionMirrorItemCollector[JsonEvent],
                 self._module_func("collect_session_mirror_items"),
@@ -109,6 +110,26 @@ class BotSessionMirrorAdapterRuntime:
         )(
             channel,
             content,
+            context=context,
+        )
+
+    async def send_attachment(
+        self,
+        channel: MessageableChannel,
+        content: str,
+        attachment_url: str,
+        filename: str,
+        *,
+        context: str,
+    ) -> None:
+        await cast(
+            discord_session_mirror_item_delivery.SessionMirrorAttachmentSender[MessageableChannel],
+            self._module_func("send_session_mirror_attachment"),
+        )(
+            channel,
+            content,
+            attachment_url,
+            filename,
             context=context,
         )
 

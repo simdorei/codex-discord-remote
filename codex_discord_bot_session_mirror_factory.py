@@ -26,6 +26,8 @@ class SessionMirrorEventsBridge(Protocol):
 
     def should_recommend_archive(self, thread: ThreadInfo, usage: ThreadContextUsage) -> bool: ...
 
+    def is_thread_busy(self, session_path: Path) -> bool: ...
+
 
 def make_session_mirror_runtime(
     *,
@@ -41,6 +43,7 @@ def make_session_mirror_runtime(
     parse_interactive_notice: discord_session_mirror_item_delivery.ParseInteractiveNotice,
     send_interactive_prompt: discord_session_mirror_item_delivery.SessionMirrorInteractiveSender[ChannelT],
     send_chunks: discord_session_mirror_item_delivery.SessionMirrorChunkSender[ChannelT],
+    send_attachment: discord_session_mirror_item_delivery.SessionMirrorAttachmentSender[ChannelT],
     collect_session_mirror_items: discord_session_mirror_target.SessionMirrorItemCollector[JsonEvent],
     get_archive_skip_logged: Callable[[session_mirror_runtime.SessionMirrorOwner[ChannelT]], set[str]],
     resolve_target_ref: Callable[[str], tuple[str | None, str]],
@@ -82,6 +85,7 @@ def make_session_mirror_runtime(
             parse_interactive_notice=parse_interactive_notice,
             send_interactive_prompt=send_interactive_prompt,
             send_chunks=send_chunks,
+            send_attachment=send_attachment,
             format_session_mirror_text=format_session_mirror_delivery_text,
             parse_session_mirror_target=discord_session_mirror.parse_session_mirror_target,
             choose_thread=lambda thread_id, cwd: events_bridge.choose_thread(thread_id, cwd),
@@ -108,6 +112,7 @@ def make_session_mirror_runtime(
             deactivate_session_mirror_output_target=deactivate_session_mirror_output_target,
             log=log,
             send_typing_pulse=send_typing_pulse or session_mirror_runtime.noop_send_typing_pulse,
+            is_thread_busy=lambda session_path: events_bridge.is_thread_busy(session_path),
         )
     )
 

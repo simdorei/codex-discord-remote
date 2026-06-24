@@ -28,11 +28,24 @@ class SessionMirrorChunkSender(Protocol[ChannelT_contra]):
     def __call__(self, channel: ChannelT_contra, content: str, *, context: str) -> Awaitable[None]: ...
 
 
+class SessionMirrorAttachmentSender(Protocol[ChannelT_contra]):
+    def __call__(
+        self,
+        channel: ChannelT_contra,
+        content: str,
+        attachment_url: str,
+        filename: str,
+        *,
+        context: str,
+    ) -> Awaitable[None]: ...
+
+
 @dataclass(frozen=True, slots=True)
 class SessionMirrorItemDeliveryDeps(Generic[ChannelT]):
     parse_interactive_notice: ParseInteractiveNotice
     send_interactive_prompt: SessionMirrorInteractiveSender[ChannelT]
     send_chunks: SessionMirrorChunkSender[ChannelT]
+    send_attachment: SessionMirrorAttachmentSender[ChannelT]
     format_session_mirror_text: FormatSessionMirrorText
 
 
@@ -46,6 +59,16 @@ async def send_session_mirror_item(
 ) -> None:
     kind = item.get("kind") or ""
     text = item.get("text") or ""
+    attachment_url = item.get("attachment_url") or ""
+    if attachment_url:
+        await deps.send_attachment(
+            channel,
+            deps.format_session_mirror_text(item),
+            attachment_url,
+            item.get("attachment_filename") or "codex-image-output.png",
+            context=f"session_mirror:{kind or 'unknown'}:{target_thread_id}",
+        )
+        return
     if kind == "interactive":
         state, prompt, options = deps.parse_interactive_notice(text)
         if state:

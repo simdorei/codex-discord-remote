@@ -73,6 +73,7 @@ class SessionMirrorRuntimeDeps(Generic[ChannelT]):
     parse_interactive_notice: discord_session_mirror_item_delivery.ParseInteractiveNotice
     send_interactive_prompt: discord_session_mirror_item_delivery.SessionMirrorInteractiveSender[ChannelT]
     send_chunks: discord_session_mirror_item_delivery.SessionMirrorChunkSender[ChannelT]
+    send_attachment: discord_session_mirror_item_delivery.SessionMirrorAttachmentSender[ChannelT]
     format_session_mirror_text: discord_session_mirror_item_delivery.FormatSessionMirrorText
     parse_session_mirror_target: Callable[
         [SessionMirrorTargetMapping],
@@ -97,6 +98,7 @@ class SessionMirrorRuntimeDeps(Generic[ChannelT]):
     deactivate_session_mirror_output_target: Callable[[str], None]
     log: LogFunc
     send_typing_pulse: Callable[[ChannelT, str], Awaitable[None]] = noop_send_typing_pulse
+    is_thread_busy: Callable[[Path], bool] = lambda session_path: True
 
 
 @dataclass(frozen=True, slots=True)
@@ -172,6 +174,7 @@ class SessionMirrorRuntime(Generic[ChannelT]):
                 parse_interactive_notice=self.deps.parse_interactive_notice,
                 send_interactive_prompt=self.deps.send_interactive_prompt,
                 send_chunks=self.deps.send_chunks,
+                send_attachment=self.deps.send_attachment,
                 format_session_mirror_text=self.deps.format_session_mirror_text,
             ),
         )
@@ -210,6 +213,7 @@ class SessionMirrorRuntime(Generic[ChannelT]):
             claim_session_mirror_event=self.deps.claim_session_mirror_event,
             deactivate_session_mirror_output_target=self.deps.deactivate_session_mirror_output_target,
             send_typing_pulse=self.deps.send_typing_pulse,
+            is_thread_busy=self.deps.is_thread_busy,
             log=self.deps.log,
         )
         await discord_session_mirror_target.mirror_session_target(target, deps=deps)

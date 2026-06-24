@@ -11,6 +11,7 @@ This repository is Windows-only in practice. The bot, watchdog, tray launcher, a
 - Maps Discord channels and threads to local Codex threads.
 - Sends plain Discord messages directly into the mapped Codex thread.
 - Mirrors Codex approval/input/follow-up choices back into Discord when the app exposes them.
+- Mirrors Codex app image outputs, such as `view_image` screenshots, back to Discord as real image attachments.
 - Avoids Discord-side global busy prompts while serializing cross-target Codex app turns so one thread does not abort another.
 - Supports slash commands, `!` commands, startup diagnostics, history polling, and a tray/watchdog launcher.
 - Can be used alongside other Discord bots or Discord-based CLIs. For example, you can ask a separate Discord CLI/bot to do work in a project thread, then mention the Codex bridge in the same Discord thread to inspect, steer, or continue the local Codex-side work.
@@ -95,6 +96,12 @@ Registered Discord slash commands:
 Common `!` commands include `!help`, `!list`, `!archived_list`, `!use`, `!open`, `!open_abort`, `!stop`, `!status`, `!settings`, `!setting`, `!doctor`, `!discover_codex`, `!restart_codex`, `!reset_pc`, `!chatid`, `!where`, `!context`, `!usage`, `!runners`, `!resources`, `!system`, `!retract`, `!bridge`, `!mirror`, `!approval`, `!archive`, `!delete_archive`, `!confirm_delete_archive`, `!new`, `!ask`, `!interview`, `!triage`, and `!orchestrate`.
 
 Numeric refs follow the same DB-root numbering as `!list`.
+
+## Mirror Behavior
+
+- Mapped Discord threads follow the matching Codex app thread directly. A plain Discord message in that mapped thread is sent to the mapped Codex thread, not to the currently selected Codex app tab.
+- Codex app text output is mirrored as Discord text. Codex app image output is mirrored as a Discord attachment, so a `view_image` result should appear as an uploaded image rather than only a file path.
+- `STOP REPLY` means the Codex app's current-reply stop button: it stops the active response generation in that Codex thread. It is different from Discord `!stop`, which is a harness command.
 
 ## Configure
 

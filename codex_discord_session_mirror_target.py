@@ -54,6 +54,11 @@ async def noop_send_typing_pulse(channel: object, target_thread_id: str, context
     _ = context
 
 
+def default_thread_busy(session_path: Path) -> bool:
+    _ = session_path
+    return True
+
+
 @dataclass(frozen=True, slots=True)
 class SessionMirrorTargetDeps(Generic[ThreadT, ContextUsageT, EventT, ChannelT]):
     parse_session_mirror_target: Callable[
@@ -83,6 +88,7 @@ class SessionMirrorTargetDeps(Generic[ThreadT, ContextUsageT, EventT, ChannelT])
     deactivate_session_mirror_output_target: Callable[[str], None]
     log: Callable[[str], None]
     send_typing_pulse: Callable[[ChannelT, str, str], Awaitable[None]] = noop_send_typing_pulse
+    is_thread_busy: Callable[[Path], bool] = default_thread_busy
 
 
 async def _update_cursor(
@@ -136,6 +142,26 @@ async def _send_typing_pulse_if_busy(
         return
     await deps.send_typing_pulse(channel, codex_thread_id, "session_mirror_busy")
     deps.log(f"session_mirror_typing_pulse target={codex_thread_id} channel={discord_thread_id}")
+
+
+async def _deactivate_output_target_if_idle(
+    deps: SessionMirrorTargetDeps[ThreadT, ContextUsageT, EventT, ChannelT],
+    codex_thread_id: str,
+) -> bool:
+    if not deps.is_active_output_target(codex_thread_id):
+        return False
+    try:
+        codex_thread = await asyncio.to_thread(deps.choose_thread, codex_thread_id, None)
+    except Exception:  # noqa: BROAD_EXCEPT_OK - mirror loop already logs unavailable threads upstream.
+        return False
+    session_path = Path(deps.get_thread_rollout_path(codex_thread))
+    if not session_path.exists():
+        return False
+    if await asyncio.to_thread(deps.is_thread_busy, session_path):
+        return False
+    await asyncio.to_thread(deps.deactivate_session_mirror_output_target, codex_thread_id)
+    deps.log(f"session_mirror_output_deactivated_idle target={codex_thread_id}")
+    return True
 
 
 async def mirror_session_target(
@@ -193,6 +219,8 @@ async def mirror_session_target(
         ),
     )
     if prepared_items is None:
+        if await _deactivate_output_target_if_idle(deps, codex_thread_id):
+            return
         await _send_typing_pulse_if_busy(deps, codex_thread_id, discord_thread_id)
         return
 

@@ -204,6 +204,32 @@ class SessionMirrorItemCollectionTests(unittest.TestCase):
         self.assertEqual(items[2]["phase"], "approval_rejected")
         self.assertIn("[approval_rejected]", items[2]["text"])
 
+    def test_collect_session_mirror_items_preserves_tool_image_outputs(self) -> None:
+        events: list[JsonEvent] = [
+            {
+                "timestamp": "1",
+                "type": "response_item",
+                "payload": {
+                    "type": "function_call_output",
+                    "output": [
+                        {
+                            "type": "input_image",
+                            "image_url": "data:image/png;base64,aGVsbG8=",
+                        }
+                    ],
+                },
+            }
+        ]
+
+        items = _collect_items(events)
+
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]["kind"], "image")
+        self.assertEqual(items[0]["role"], "assistant")
+        self.assertEqual(items[0]["phase"], "tool_image")
+        self.assertEqual(items[0]["attachment_url"], "data:image/png;base64,aGVsbG8=")
+        self.assertEqual(items[0]["attachment_filename"], "codex-image-output.png")
+
 
 class SessionMirrorItemAppendTests(unittest.TestCase):
     def test_append_user_if_new_skips_discord_echo_and_remembers_text(self) -> None:

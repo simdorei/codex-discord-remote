@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import io
+
 import discord
 from typing import Protocol, TypeVar
 
@@ -48,6 +50,14 @@ class TrackedMessageTarget(Protocol[SentMessageT_co]):
 
     async def send(self, content: str, **kwargs: DiscordMessageView | None) -> SentMessageT_co: ...
 
+
+class AttachmentTarget(Protocol[SentMessageT_co]):
+    @property
+    def id(self) -> DiscordIdValue: ...
+
+    async def send(self, content: str, *, file: discord.File) -> SentMessageT_co: ...
+
+
 __all__ = [
     "DISCORD_CHUNK_MARKERS_ENABLED",
     "DISCORD_RESTARTING_ERROR",
@@ -64,6 +74,7 @@ __all__ = [
     "get_messageable_id",
     "is_discord_delivery_stopping",
     "send_chunks",
+    "send_attachment_bytes",
     "send_direct_followup",
     "send_discord_restarting_notice",
     "send_followup_chunks",
@@ -150,6 +161,63 @@ async def send_discord_restarting_notice(
         context="restart_notice",
         allow_during_stop=True,
     )
+
+
+async def send_attachment_bytes(
+    state: DiscordDeliveryState,
+    target: AttachmentTarget[SentMessageT],
+    content: str,
+    filename: str,
+    attachment_bytes: bytes,
+    *,
+    log_func: LogFunc,
+    context: str = "send_attachment",
+    allow_during_stop: bool = False,
+) -> SentMessageT:
+    target_id = get_messageable_id(target)
+    safe_context = format_discord_command_label(context, limit=120)
+    safe_filename = format_discord_command_label(filename, limit=120)
+    delivery_id = build_delivery_id(f"{safe_context}:{safe_filename}:{len(attachment_bytes)}:{content}")
+    delivery_token = begin_discord_delivery(
+        state,
+        f"attachment:{delivery_id}:{target_id}:{safe_context}",
+        log_func=log_func,
+        allow_during_stop=allow_during_stop,
+    )
+    try:
+        log_func(
+            f"discord_attachment_start id={delivery_id} context={safe_context} "
+            + f"target={target_id} filename={safe_filename} bytes={len(attachment_bytes)} "
+            + f"text_len={format_log_text_len(content)}"
+        )
+        attempts = len(state.retry_delays_seconds) + 1
+        for attempt in range(1, attempts + 1):
+            try:
+                file = discord.File(io.BytesIO(attachment_bytes), filename=filename)
+                sent_message = await target.send(content, file=file)
+                log_func(
+                    f"discord_attachment_sent id={delivery_id} context={safe_context} "
+                    + f"target={target_id} message={getattr(sent_message, 'id', '-') or '-'} "
+                    + f"filename={safe_filename} bytes={len(attachment_bytes)}"
+                )
+                return sent_message
+            except (discord.DiscordException, OSError, RuntimeError) as exc:
+                if attempt >= attempts:
+                    log_func(
+                        f"discord_attachment_failed id={delivery_id} context={safe_context} "
+                        + f"target={target_id} attempt={attempt} filename={safe_filename} "
+                        + f"bytes={len(attachment_bytes)} error_type={type(exc).__name__}"
+                    )
+                    raise
+                log_func(
+                    f"discord_attachment_retry id={delivery_id} context={safe_context} "
+                    + f"target={target_id} attempt={attempt} filename={safe_filename} "
+                    + f"bytes={len(attachment_bytes)} error_type={type(exc).__name__}"
+                )
+                await sleep_discord_delivery_retry(state.retry_delays_seconds[attempt - 1])
+    finally:
+        end_discord_delivery(state, delivery_token)
+    raise RuntimeError("unreachable send_attachment_bytes retry loop")
 
 
 async def send_message_tracked(

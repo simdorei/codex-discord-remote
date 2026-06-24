@@ -12,6 +12,7 @@ from codex_discord_session_mirror_item_append import (
     append_item as _append_item,
     append_user_if_new as _append_user_if_new,
 )
+from codex_session_events import JsonValue
 from codex_discord_session_mirror_item_builders import (
     SessionEvent,
     SessionMirrorItem,
@@ -24,6 +25,46 @@ INTERNAL_RESPONSE_USER_PREFIXES = (
     "<environment_context",
     "<codex_internal_context",
 )
+CODEX_IMAGE_OUTPUT_TEXT = "Codex image output"
+CODEX_IMAGE_OUTPUT_FILENAME = "codex-image-output.png"
+
+
+def _append_image_item(
+    ctx: CollectionContext,
+    items: list[SessionMirrorItem],
+    event: SessionEvent,
+    image_url: str,
+) -> None:
+    _append_item(
+        ctx,
+        items,
+        event,
+        kind="image",
+        role="assistant",
+        phase="tool_image",
+        text=CODEX_IMAGE_OUTPUT_TEXT,
+    )
+    item = items[-1]
+    item["attachment_url"] = image_url
+    item["attachment_filename"] = CODEX_IMAGE_OUTPUT_FILENAME
+
+
+def _collect_function_output_images(
+    ctx: CollectionContext,
+    items: list[SessionMirrorItem],
+    event: SessionEvent,
+    output: JsonValue,
+) -> None:
+    if not isinstance(output, list):
+        return
+    for part in output:
+        if not isinstance(part, dict):
+            continue
+        if part.get("type") != "input_image":
+            continue
+        image_url = part.get("image_url")
+        if isinstance(image_url, str) and image_url.startswith("data:image/"):
+            _append_image_item(ctx, items, event, image_url)
 
 
 def _collect_function_item(
@@ -39,6 +80,7 @@ def _collect_function_item(
             _append_item(ctx, items, event, kind="interactive", role="assistant", phase="interactive", text=notice)
         return True
     if payload_type == "function_call_output":
+        _collect_function_output_images(ctx, items, event, payload.get("output"))
         output_text = str(payload.get("output") or "").strip()
         if output_text and "rejected by user" in output_text.lower():
             _append_item(
