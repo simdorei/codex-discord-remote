@@ -18,9 +18,14 @@ tray = fso.BuildPath(scriptDir, "codex-discord-tray.ps1")
 logPath = fso.BuildPath(scriptDir, "discord_launcher.log")
 stamp = Year(Now) & "-" & Pad2(Month(Now)) & "-" & Pad2(Day(Now)) & "T" & Pad2(Hour(Now)) & ":" & Pad2(Minute(Now)) & ":" & Pad2(Second(Now))
 
+On Error Resume Next
 Set logFile = fso.OpenTextFile(logPath, 8, True)
-logFile.WriteLine "[" & stamp & "] headless_launch target=" & target
-logFile.Close
+If Err.Number = 0 Then
+    logFile.WriteLine "[" & stamp & "] headless_launch target=" & target
+    logFile.Close
+End If
+Err.Clear
+On Error GoTo 0
 
 shell.Run """" & target & """", 0, False
 If fso.FileExists(tray) Then

@@ -2,412 +2,124 @@
 
 from __future__ import annotations
 
+from asyncio import CancelledError  # noqa: ANYIO_OK
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
-import hashlib
-import time
-from typing import Callable
+
+from codex_discord_session_mirror_item_builders import (
+    SessionEvent,
+    SessionMirrorItem,
+    SessionPayload,
+    TextDigestFunc,
+    format_aborted_event_text,
+    format_session_mirror_text,
+    has_recent_session_text,
+    make_session_mirror_event_digest,
+    make_session_mirror_item,
+    make_text_digest,
+    remember_recent_session_text,
+)
+from codex_discord_session_mirror_item_append import (
+    BuildInteractiveNoticeFunc,
+    ExtractMessageTextFunc,
+    SkipDiscordOriginPromptFunc,
+)
+from codex_discord_session_mirror_item_collection import (
+    collect_session_mirror_items,
+)
+
+SessionMirrorTargetValue = str | int | bytes | bytearray | None
+SessionMirrorTargetMapping = Mapping[str, SessionMirrorTargetValue]
+LoadSessionMirrorTargets = Callable[[], Awaitable[Sequence[SessionMirrorTargetMapping]]]
+MirrorSessionTarget = Callable[[SessionMirrorTargetMapping], Awaitable[None]]
+LogFunc = Callable[[str], None]
+SleepFunc = Callable[[float], Awaitable[None]]
+SetLastAtFunc = Callable[[str], None]
+NowIsoFunc = Callable[[], str]
+TracebackFormatter = Callable[[], str]
+
+__all__ = (
+    "BuildInteractiveNoticeFunc",
+    "ExtractMessageTextFunc",
+    "SessionEvent",
+    "SessionMirrorLoopDeps",
+    "SessionMirrorItem",
+    "SessionMirrorState",
+    "SessionMirrorTarget",
+    "SessionMirrorTargetMapping",
+    "SessionMirrorTargetValue",
+    "SessionPayload",
+    "SkipDiscordOriginPromptFunc",
+    "TextDigestFunc",
+    "collect_session_mirror_items",
+    "format_aborted_event_text",
+    "format_session_mirror_text",
+    "has_recent_session_text",
+    "make_session_mirror_event_digest",
+    "make_session_mirror_item",
+    "make_text_digest",
+    "parse_session_mirror_target",
+    "remember_recent_session_text",
+    "session_mirror_loop",
+)
+
+@dataclass(frozen=True, slots=True)
+class SessionMirrorTarget:
+    codex_thread_id: str
+    discord_thread_id: int
 
 
-TextDigestFunc = Callable[..., str]
-SkipDiscordOriginPromptFunc = Callable[[str | None, str], bool]
-BuildInteractiveNoticeFunc = Callable[[dict], str | None]
-ExtractMessageTextFunc = Callable[[dict], str]
-
-ABORTED_PAYLOAD_TYPES = {"turn_aborted", "task_aborted", "task_cancelled"}
-
-
-@dataclass
+@dataclass(slots=True)  # noqa: MUTABLE_OK
 class SessionMirrorState:
+    """Mutable tracking state for session mirror output cursors."""
+
     active_output_targets: dict[str, float] = field(default_factory=dict)
     pending_cursor_targets: set[str] = field(default_factory=set)
 
 
-def make_text_digest(*parts: object) -> str:
-    digest = hashlib.sha256()
-    for part in parts:
-        digest.update(str(part or "").encode("utf-8", errors="replace"))
-        digest.update(b"\0")
-    return digest.hexdigest()
+@dataclass(frozen=True, slots=True)
+class SessionMirrorLoopDeps:
+    poll_seconds: float
+    is_closed: Callable[[], bool]
+    set_last_at: SetLastAtFunc
+    now_iso: NowIsoFunc
+    load_targets: LoadSessionMirrorTargets
+    mirror_session_target: MirrorSessionTarget
+    delivery_exceptions: tuple[type[BaseException], ...]
+    format_traceback: TracebackFormatter
+    sleep: SleepFunc
+    log: LogFunc
 
 
-def remember_recent_session_text(
-    seen: dict[str, float],
-    text: str,
-    *,
-    ttl_seconds: float,
-    now_func: Callable[[], float] = time.monotonic,
-    make_text_digest_func: TextDigestFunc = make_text_digest,
-) -> None:
-    current = now_func()
-    expired = [
-        digest
-        for digest, seen_at in seen.items()
-        if current - seen_at > ttl_seconds
-    ]
-    for digest in expired:
-        seen.pop(digest, None)
-    seen[make_text_digest_func(text.strip())] = current
+async def session_mirror_loop(deps: SessionMirrorLoopDeps) -> None:
+    while not deps.is_closed():
+        try:
+            deps.set_last_at(deps.now_iso())
+            for target in await deps.load_targets():
+                await deps.mirror_session_target(target)
+        except CancelledError:
+            raise
+        except deps.delivery_exceptions:
+            deps.log("session_mirror_cycle_failed\n" + deps.format_traceback())
+        await deps.sleep(deps.poll_seconds)
 
 
-def has_recent_session_text(
-    seen: dict[str, float],
-    text: str,
-    *,
-    ttl_seconds: float,
-    now_func: Callable[[], float] = time.monotonic,
-    make_text_digest_func: TextDigestFunc = make_text_digest,
-) -> bool:
-    current = now_func()
-    digest = make_text_digest_func(text.strip())
-    seen_at = seen.get(digest)
-    if seen_at is None:
-        return False
-    if current - seen_at > ttl_seconds:
-        seen.pop(digest, None)
-        return False
-    return True
-
-
-def make_session_mirror_event_digest(
-    codex_thread_id: str,
-    event: dict,
-    kind: str,
-    role: str,
-    phase: str,
-    text: str,
-    *,
-    make_text_digest_func: TextDigestFunc = make_text_digest,
-) -> str:
-    payload = event.get("payload") or {}
-    payload_type = payload.get("type") if isinstance(payload, dict) else ""
-    return make_text_digest_func(
-        "session-mirror",
-        codex_thread_id,
-        event.get("timestamp") or "",
-        event.get("type") or "",
-        payload_type or "",
-        kind,
-        role,
-        phase,
-        text,
-    )
-
-
-def make_session_mirror_item(
-    codex_thread_id: str,
-    event: dict,
-    *,
-    kind: str,
-    role: str,
-    phase: str,
-    text: str,
-    make_text_digest_func: TextDigestFunc = make_text_digest,
-) -> dict[str, str]:
-    clean_text = str(text or "").strip()
-    return {
-        "digest": make_session_mirror_event_digest(
-            codex_thread_id,
-            event,
-            kind,
-            role,
-            phase,
-            clean_text,
-            make_text_digest_func=make_text_digest_func,
-        ),
-        "kind": kind,
-        "role": role,
-        "phase": phase,
-        "text": clean_text,
-    }
-
-
-def format_aborted_event_text(payload: dict) -> str:
-    payload_type = str(payload.get("type") or "aborted").strip()
-    if payload_type == "task_cancelled":
-        headline = "Codex task cancelled."
-    elif payload_type == "task_aborted":
-        headline = "Codex task aborted."
+def parse_session_mirror_target(target: Mapping[str, SessionMirrorTargetValue]) -> SessionMirrorTarget | None:
+    codex_thread_id = str(target.get("codex_thread_id") or "")
+    if not codex_thread_id:
+        return None
+    raw_discord_thread_id = target.get("discord_thread_id")
+    if isinstance(raw_discord_thread_id, bytes | bytearray):
+        discord_thread_id_text = bytes(raw_discord_thread_id).decode("ascii", errors="ignore")
     else:
-        headline = "Codex turn aborted."
-
-    details: list[str] = []
-    reason = str(payload.get("reason") or "").strip()
-    if reason:
-        details.append(f"reason={reason}")
-    turn_id = str(payload.get("turn_id") or "").strip()
-    if turn_id:
-        details.append(f"turn_id={turn_id}")
-    task_id = str(payload.get("task_id") or "").strip()
-    if task_id:
-        details.append(f"task_id={task_id}")
-    duration_ms = payload.get("duration_ms")
-    if duration_ms is not None:
-        details.append(f"duration_ms={duration_ms}")
-
-    if not details:
-        return headline
-    return f"{headline}\nDetails: {', '.join(details)}"
-
-
-def collect_session_mirror_items(
-    codex_thread_id: str,
-    events: list[dict],
-    *,
-    seen_agent_messages: dict[str, float],
-    seen_user_messages: dict[str, float],
-    should_skip_discord_origin_prompt_func: SkipDiscordOriginPromptFunc,
-    build_interactive_notice_func: BuildInteractiveNoticeFunc,
-    extract_message_text_func: ExtractMessageTextFunc,
-    recent_text_ttl_seconds: float,
-    make_text_digest_func: TextDigestFunc = make_text_digest,
-) -> list[dict[str, str]]:
-    items: list[dict[str, str]] = []
-    for event in events:
-        payload = event.get("payload") or {}
-        if not isinstance(payload, dict):
-            continue
-
-        event_type = str(event.get("type") or "")
-        payload_type = str(payload.get("type") or "")
-        if event_type == "event_msg":
-            if payload_type == "agent_message":
-                phase = str(payload.get("phase") or "commentary")
-                text = str(payload.get("message") or "").strip()
-                if not text:
-                    continue
-                if phase == "final_answer":
-                    if has_recent_session_text(
-                        seen_agent_messages,
-                        text,
-                        ttl_seconds=recent_text_ttl_seconds,
-                        make_text_digest_func=make_text_digest_func,
-                    ):
-                        continue
-                    remember_recent_session_text(
-                        seen_agent_messages,
-                        text,
-                        ttl_seconds=recent_text_ttl_seconds,
-                        make_text_digest_func=make_text_digest_func,
-                    )
-                    items.append(
-                        make_session_mirror_item(
-                            codex_thread_id,
-                            event,
-                            kind="final",
-                            role="assistant",
-                            phase=phase,
-                            text=text,
-                            make_text_digest_func=make_text_digest_func,
-                        )
-                    )
-                    continue
-                remember_recent_session_text(
-                    seen_agent_messages,
-                    text,
-                    ttl_seconds=recent_text_ttl_seconds,
-                    make_text_digest_func=make_text_digest_func,
-                )
-                items.append(
-                    make_session_mirror_item(
-                        codex_thread_id,
-                        event,
-                        kind="commentary",
-                        role="assistant",
-                        phase=phase,
-                        text=text,
-                        make_text_digest_func=make_text_digest_func,
-                    )
-                )
-                continue
-            if payload_type == "user_message":
-                text = str(payload.get("message") or "").strip()
-                if not text:
-                    continue
-                if should_skip_discord_origin_prompt_func(codex_thread_id, text):
-                    remember_recent_session_text(
-                        seen_user_messages,
-                        text,
-                        ttl_seconds=recent_text_ttl_seconds,
-                        make_text_digest_func=make_text_digest_func,
-                    )
-                    continue
-                if has_recent_session_text(
-                    seen_user_messages,
-                    text,
-                    ttl_seconds=recent_text_ttl_seconds,
-                    make_text_digest_func=make_text_digest_func,
-                ):
-                    continue
-                remember_recent_session_text(
-                    seen_user_messages,
-                    text,
-                    ttl_seconds=recent_text_ttl_seconds,
-                    make_text_digest_func=make_text_digest_func,
-                )
-                items.append(
-                    make_session_mirror_item(
-                        codex_thread_id,
-                        event,
-                        kind="user",
-                        role="user",
-                        phase="input",
-                        text=text,
-                        make_text_digest_func=make_text_digest_func,
-                    )
-                )
-                continue
-            if payload_type in ABORTED_PAYLOAD_TYPES:
-                items.append(
-                    make_session_mirror_item(
-                        codex_thread_id,
-                        event,
-                        kind="aborted",
-                        role="assistant",
-                        phase=payload_type,
-                        text=format_aborted_event_text(payload),
-                        make_text_digest_func=make_text_digest_func,
-                    )
-                )
-                continue
-            continue
-
-        if event_type != "response_item":
-            continue
-
-        if payload_type == "function_call":
-            notice = build_interactive_notice_func(payload)
-            if notice:
-                items.append(
-                    make_session_mirror_item(
-                        codex_thread_id,
-                        event,
-                        kind="interactive",
-                        role="assistant",
-                        phase="interactive",
-                        text=notice,
-                        make_text_digest_func=make_text_digest_func,
-                    )
-                )
-            continue
-
-        if payload_type == "function_call_output":
-            output_text = str(payload.get("output") or "").strip()
-            if output_text and "rejected by user" in output_text.lower():
-                items.append(
-                    make_session_mirror_item(
-                        codex_thread_id,
-                        event,
-                        kind="commentary",
-                        role="assistant",
-                        phase="approval_rejected",
-                        text="[approval_rejected]\nCommand approval was rejected by user.",
-                        make_text_digest_func=make_text_digest_func,
-                    )
-                )
-            continue
-
-        if payload_type != "message":
-            continue
-        text = extract_message_text_func(payload)
-        if not text:
-            continue
-        role = str(payload.get("role") or "?")
-        phase = str(payload.get("phase") or "")
-        if role == "assistant" and phase == "commentary":
-            if has_recent_session_text(
-                seen_agent_messages,
-                text,
-                ttl_seconds=recent_text_ttl_seconds,
-                make_text_digest_func=make_text_digest_func,
-            ):
-                continue
-            remember_recent_session_text(
-                seen_agent_messages,
-                text,
-                ttl_seconds=recent_text_ttl_seconds,
-                make_text_digest_func=make_text_digest_func,
-            )
-            items.append(
-                make_session_mirror_item(
-                    codex_thread_id,
-                    event,
-                    kind="commentary",
-                    role=role,
-                    phase=phase,
-                    text=text,
-                    make_text_digest_func=make_text_digest_func,
-                )
-            )
-            continue
-        if role == "assistant" and phase == "final_answer":
-            if has_recent_session_text(
-                seen_agent_messages,
-                text,
-                ttl_seconds=recent_text_ttl_seconds,
-                make_text_digest_func=make_text_digest_func,
-            ):
-                continue
-            remember_recent_session_text(
-                seen_agent_messages,
-                text,
-                ttl_seconds=recent_text_ttl_seconds,
-                make_text_digest_func=make_text_digest_func,
-            )
-            items.append(
-                make_session_mirror_item(
-                    codex_thread_id,
-                    event,
-                    kind="final",
-                    role=role,
-                    phase=phase,
-                    text=text,
-                    make_text_digest_func=make_text_digest_func,
-                )
-            )
-            continue
-        if role == "user":
-            if should_skip_discord_origin_prompt_func(codex_thread_id, text):
-                remember_recent_session_text(
-                    seen_user_messages,
-                    text,
-                    ttl_seconds=recent_text_ttl_seconds,
-                    make_text_digest_func=make_text_digest_func,
-                )
-                continue
-            if has_recent_session_text(
-                seen_user_messages,
-                text,
-                ttl_seconds=recent_text_ttl_seconds,
-                make_text_digest_func=make_text_digest_func,
-            ):
-                continue
-            remember_recent_session_text(
-                seen_user_messages,
-                text,
-                ttl_seconds=recent_text_ttl_seconds,
-                make_text_digest_func=make_text_digest_func,
-            )
-            items.append(
-                make_session_mirror_item(
-                    codex_thread_id,
-                    event,
-                    kind="user",
-                    role=role,
-                    phase=phase or "input",
-                    text=text,
-                    make_text_digest_func=make_text_digest_func,
-                )
-            )
-    return items
-
-
-def format_session_mirror_text(item: dict[str, str]) -> str:
-    kind = item.get("kind") or ""
-    text = item.get("text") or ""
-    if kind == "commentary":
-        return f"In progress\n\n{text}"
-    if kind == "user":
-        return f"Codex app user\n\n{text}"
-    if kind == "aborted":
-        return text or "Codex turn aborted."
-    return text
+        discord_thread_id_text = str(raw_discord_thread_id or 0)
+    try:
+        discord_thread_id = int(discord_thread_id_text)
+    except (TypeError, ValueError):
+        return None
+    if not discord_thread_id:
+        return None
+    return SessionMirrorTarget(
+        codex_thread_id=codex_thread_id,
+        discord_thread_id=discord_thread_id,
+    )

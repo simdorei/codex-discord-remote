@@ -2,60 +2,72 @@
 
 from __future__ import annotations
 
-import asyncio
+import asyncio  # noqa: ANYIO_OK
 import time
 import traceback
+from collections.abc import Awaitable, Callable
+from typing import TypeAlias, cast
 
 from codex_discord_runtime import normalize_runner_key
+from codex_discord_runner_queue import (
+    THREAD_RUNNERS,
+    THREAD_RUNNERS_LOCK,
+    QueueItem,
+    QueueJob,
+    GetThreadRunnerFunc,
+    NormalizeRunnerKeyFunc,
+    RunnerMap,
+    enqueue_thread_ask,
+    get_thread_runner,
+    is_thread_runner_busy,
+    retract_thread_ask,
+)
+
+BusyState: TypeAlias = tuple[str, str | None, str]
+GetBusyStateFunc: TypeAlias = Callable[[str | None], BusyState]
+MonotonicFunc: TypeAlias = Callable[[], float]
+SleepFunc: TypeAlias = Callable[[float], Awaitable[None]]
+ToThreadBusyStateFunc: TypeAlias = Callable[[GetBusyStateFunc, str | None], Awaitable[BusyState]]
+SendTextFunc: TypeAlias = Callable[..., Awaitable[int]]
+LogFunc: TypeAlias = Callable[[str], None]
+WaitForIdleFunc: TypeAlias = Callable[[str | None], Awaitable[BusyState]]
+RunPromptAndSendFunc: TypeAlias = Callable[..., Awaitable[None]]
+ReportJobFailedFunc: TypeAlias = Callable[[QueueItem, str | None], Awaitable[None]]
+
+__all__ = (
+    "THREAD_RUNNERS",
+    "THREAD_RUNNERS_LOCK",
+    "enqueue_thread_ask",
+    "get_thread_runner",
+    "is_thread_runner_busy",
+    "retract_thread_ask",
+    "wait_for_codex_thread_idle",
+    "report_thread_runner_job_failed",
+    "thread_runner_loop",
+)
 
 
-THREAD_RUNNERS_LOCK = asyncio.Lock()
-THREAD_RUNNERS: dict[str, dict[str, object]] = {}
+class ThreadRunnerJobInvalidError(RuntimeError):
+    pass
 
 
-async def get_thread_runner(
+async def _to_thread_busy_state(
+    func: GetBusyStateFunc,
     target_thread_id: str | None,
-    *,
-    runners: dict[str, dict[str, object]] = THREAD_RUNNERS,
-    runners_lock: object = THREAD_RUNNERS_LOCK,
-    normalize_runner_key_func=normalize_runner_key,
-) -> dict[str, object]:
-    key = normalize_runner_key_func(target_thread_id)
-    async with runners_lock:
-        runner = runners.get(key)
-        if runner is None:
-            runner = {
-                "queue": asyncio.Queue(),
-                "task": None,
-                "active": False,
-                "target_thread_id": target_thread_id,
-            }
-            runners[key] = runner
-        return runner
-
-
-async def is_thread_runner_busy(
-    target_thread_id: str | None,
-    *,
-    get_thread_runner_func=get_thread_runner,
-) -> bool:
-    runner = await get_thread_runner_func(target_thread_id)
-    queue = runner["queue"]
-    return bool(runner.get("active")) or (
-        isinstance(queue, asyncio.Queue) and queue.qsize() > 0
-    )
+) -> BusyState:
+    return await asyncio.to_thread(func, target_thread_id)
 
 
 async def wait_for_codex_thread_idle(
     target_thread_id: str | None,
     *,
-    get_busy_state_func,
+    get_busy_state_func: GetBusyStateFunc,
     timeout_sec: float = 3600.0,
     poll_sec: float = 5.0,
-    monotonic_func=time.monotonic,
-    sleep_func=asyncio.sleep,
-    to_thread_func=asyncio.to_thread,
-) -> tuple[str, str | None, str]:
+    monotonic_func: MonotonicFunc = time.monotonic,
+    sleep_func: SleepFunc = asyncio.sleep,
+    to_thread_func: ToThreadBusyStateFunc = _to_thread_busy_state,
+) -> BusyState:
     deadline = monotonic_func() + timeout_sec
     last_state = "idle"
     last_thread_id: str | None = None
@@ -74,185 +86,91 @@ async def wait_for_codex_thread_idle(
     return last_state, last_thread_id, last_ref
 
 
-async def enqueue_thread_ask(
-    channel: object,
-    prompt: str,
-    target_thread_id: str | None,
-    *,
-    queued: bool = False,
-    ack_sent: bool = False,
-    source_message: object | None = None,
-    thread_runner_loop_func,
-    get_thread_runner_func=get_thread_runner,
-) -> int:
-    runner = await get_thread_runner_func(target_thread_id)
-    queue = runner["queue"]
-    if not isinstance(queue, asyncio.Queue):
-        raise RuntimeError("Thread runner queue is invalid.")
-    await queue.put(
-        {
-            "channel": channel,
-            "prompt": prompt,
-            "target_thread_id": target_thread_id,
-            "queued": queued,
-            "ack_sent": ack_sent,
-            "source_message": source_message,
-        }
-    )
-    task = runner.get("task")
-    if not isinstance(task, asyncio.Task) or task.done():
-        runner["task"] = asyncio.create_task(thread_runner_loop_func(target_thread_id))
-    return queue.qsize()
-
-
-async def retract_thread_ask(
-    target_thread_id: str | None,
-    *,
-    channel_id: int | None = None,
-    owner_user_id: int | None = None,
-    runners: dict[str, dict[str, object]] = THREAD_RUNNERS,
-    runners_lock: object = THREAD_RUNNERS_LOCK,
-    normalize_runner_key_func=normalize_runner_key,
-) -> dict[str, object]:
-    key = normalize_runner_key_func(target_thread_id)
-
-    def matches(job: object) -> bool:
-        if not isinstance(job, dict):
-            return False
-        if channel_id is not None:
-            channel = job.get("channel")
-            if int(getattr(channel, "id", 0) or 0) != int(channel_id):
-                return False
-        if owner_user_id is not None:
-            source_message = job.get("source_message")
-            author = getattr(source_message, "author", None)
-            if int(getattr(author, "id", 0) or 0) != int(owner_user_id):
-                return False
-        return True
-
-    async with runners_lock:
-        runner = runners.get(key)
-        if runner is None:
-            return {"removed": 0, "remaining": 0, "active": False, "target_key": key}
-        queue = runner.get("queue")
-        if not isinstance(queue, asyncio.Queue):
-            return {
-                "removed": 0,
-                "remaining": 0,
-                "active": bool(runner.get("active")),
-                "target_key": key,
-            }
-
-        drained: list[object] = []
-        while True:
-            try:
-                drained.append(queue.get_nowait())
-            except asyncio.QueueEmpty:
-                break
-
-        remove_index = -1
-        for index, job in enumerate(drained):
-            if matches(job):
-                remove_index = index
-
-        removed = 0
-        for index, job in enumerate(drained):
-            queue.task_done()
-            if index == remove_index:
-                removed += 1
-                continue
-            queue.put_nowait(job)
-
-        return {
-            "removed": removed,
-            "remaining": queue.qsize(),
-            "active": bool(runner.get("active")),
-            "target_key": key,
-        }
-
-
 async def report_thread_runner_job_failed(
-    job: object,
+    job: QueueItem,
     target_thread_id: str | None,
     *,
-    send_text_func,
-    log_func,
+    send_text_func: SendTextFunc,
+    log_func: LogFunc,
 ) -> None:
-    channel = job.get("channel") if isinstance(job, dict) else None
+    job_data = cast(QueueJob, job) if isinstance(job, dict) else {}
+    channel = job_data.get("channel")
     if channel is None or not hasattr(channel, "send"):
         return
     try:
-        await send_text_func(
+        _ = await send_text_func(
             channel,
             "Queued ask failed. Check codex_discord_bot.log.",
             context="thread_runner_job_failed",
         )
         log_func(f"thread_runner_job_failure_reported target={target_thread_id or '-'}")
-    except Exception:
+    except Exception:  # noqa: BROAD_EXCEPT_OK
         log_func("thread_runner_job_failure_report_failed\n" + traceback.format_exc())
 
 
 async def thread_runner_loop(
     target_thread_id: str | None,
     *,
-    get_busy_state_func,
-    wait_for_idle_func,
-    run_prompt_and_send_func,
-    report_job_failed_func,
-    send_text_func,
-    log_func,
-    runners: dict[str, dict[str, object]] = THREAD_RUNNERS,
-    runners_lock: object = THREAD_RUNNERS_LOCK,
-    normalize_runner_key_func=normalize_runner_key,
-    get_thread_runner_func=get_thread_runner,
-    to_thread_func=asyncio.to_thread,
+    get_busy_state_func: GetBusyStateFunc,
+    wait_for_idle_func: WaitForIdleFunc,
+    run_prompt_and_send_func: RunPromptAndSendFunc,
+    report_job_failed_func: ReportJobFailedFunc,
+    send_text_func: SendTextFunc,
+    log_func: LogFunc,
+    runners: RunnerMap = THREAD_RUNNERS,
+    runners_lock: asyncio.Lock = THREAD_RUNNERS_LOCK,
+    normalize_runner_key_func: NormalizeRunnerKeyFunc = normalize_runner_key,
+    get_thread_runner_func: GetThreadRunnerFunc = get_thread_runner,
+    to_thread_func: ToThreadBusyStateFunc = _to_thread_busy_state,
 ) -> None:
     key = normalize_runner_key_func(target_thread_id)
     while True:
         runner = await get_thread_runner_func(target_thread_id)
         queue = runner["queue"]
-        if not isinstance(queue, asyncio.Queue):
-            return
         try:
-            job = await asyncio.wait_for(queue.get(), timeout=5)
+            job: QueueItem = await asyncio.wait_for(queue.get(), timeout=5)
+            job_for_failure: QueueItem = job
         except asyncio.TimeoutError:
             async with runners_lock:
                 current = runners.get(key)
-                if current is runner and not bool(current.get("active")) and queue.empty():
-                    runners.pop(key, None)
+                if current is None or current is not runner:
+                    continue
+                if not current["active"] and queue.empty():
+                    _ = runners.pop(key, None)
                     return
             continue
 
         runner["active"] = True
         try:
             if not isinstance(job, dict):
-                raise RuntimeError("Thread runner job is invalid.")
-            channel = job.get("channel")
-            prompt = str(job.get("prompt") or "").strip()
-            job_target_thread_id = str(job.get("target_thread_id") or "").strip() or None
+                raise ThreadRunnerJobInvalidError("Thread runner job is invalid.")
+            job_data = cast(QueueJob, job)
+            channel = job_data.get("channel")
+            prompt = str(job_data.get("prompt") or "").strip()
+            job_target_thread_id = str(job_data.get("target_thread_id") or "").strip() or None
             if prompt and hasattr(channel, "send"):
-                queued = bool(job.get("queued"))
-                ack_sent = bool(job.get("ack_sent"))
+                queued = bool(job_data.get("queued"))
+                ack_sent = bool(job_data.get("ack_sent"))
                 if queued:
                     busy_state, _busy_thread_id, busy_ref = await to_thread_func(
                         get_busy_state_func,
                         job_target_thread_id,
                     )
                     if busy_state != "idle":
-                        await send_text_func(
+                        busy_label = busy_ref or job_target_thread_id or "selected"
+                        _ = await send_text_func(
                             channel,
-                            f"Queued ask waiting for `{busy_ref or job_target_thread_id or 'selected'}` "
-                            f"to become idle. Current state: {busy_state}.",
+                            f"Queued ask waiting for `{busy_label}` to become idle. Current state: {busy_state}.",
                             context="thread_runner_waiting",
                         )
                         busy_state, _busy_thread_id, busy_ref = await wait_for_idle_func(
                             job_target_thread_id,
                         )
                         if busy_state != "idle":
-                            await send_text_func(
+                            busy_label = busy_ref or job_target_thread_id or "selected"
+                            _ = await send_text_func(
                                 channel,
-                                f"Queued ask is still blocked for `{busy_ref or job_target_thread_id or 'selected'}`. "
-                                f"Current state: {busy_state}.",
+                                f"Queued ask is still blocked for `{busy_label}`. Current state: {busy_state}.",
                                 context="thread_runner_still_blocked",
                             )
                             continue
@@ -261,12 +179,12 @@ async def thread_runner_loop(
                     prompt,
                     queued=queued,
                     ack_sent=ack_sent,
-                    source_message=job.get("source_message"),
+                    source_message=job_data.get("source_message"),
                     target_thread_id=job_target_thread_id,
                 )
-        except Exception:
+        except Exception:  # noqa: BROAD_EXCEPT_OK
             log_func("thread_runner_job_failed\n" + traceback.format_exc())
-            await report_job_failed_func(job, target_thread_id)
+            await report_job_failed_func(job_for_failure, target_thread_id)
         finally:
             runner["active"] = False
             queue.task_done()

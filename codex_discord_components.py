@@ -4,11 +4,50 @@ from __future__ import annotations
 
 import hashlib
 import re
+from collections.abc import Iterable
+from typing import Protocol, runtime_checkable
 
 
 BUSY_CHOICE_CUSTOM_ID_PREFIX = "codex_busy"
 APPROVAL_CUSTOM_ID_PREFIX = "codex_approval"
 INPUT_CHOICE_CUSTOM_ID_PREFIX = "codex_input"
+
+DiscordIdValue = int | str | bytes | bytearray
+
+
+class ComponentChildLike(Protocol):
+    @property
+    def custom_id(self) -> str | None: ...
+
+
+@runtime_checkable
+class ComponentChildrenContainer(Protocol):
+    @property
+    def children(self) -> Iterable[ComponentChildLike] | None: ...
+
+
+@runtime_checkable
+class ComponentComponentsContainer(Protocol):
+    @property
+    def components(self) -> Iterable[ComponentChildLike] | None: ...
+
+
+ComponentRowLike = ComponentChildrenContainer | ComponentComponentsContainer
+
+
+class ComponentMessageLike(Protocol):
+    @property
+    def components(self) -> Iterable[ComponentRowLike] | None: ...
+
+
+class PersistentComponentMessageLike(Protocol):
+    @property
+    def id(self) -> DiscordIdValue: ...
+
+
+class PersistentComponentInteractionLike(Protocol):
+    @property
+    def message(self) -> PersistentComponentMessageLike | None: ...
 
 
 def parse_busy_choice_custom_id(custom_id: str) -> tuple[str, str] | None:
@@ -19,7 +58,7 @@ def parse_busy_choice_custom_id(custom_id: str) -> tuple[str, str] | None:
     action = parts[2].strip()
     if not re.fullmatch(r"[0-9a-f]{24}", choice_id):
         return None
-    if action not in {"steer", "queue", "ignore"}:
+    if action not in {"steer", "queue", "stop", "ignore"}:
         return None
     return choice_id, action
 
@@ -28,23 +67,25 @@ def format_busy_choice_custom_id(choice_id: str, action: str) -> str:
     return f"{BUSY_CHOICE_CUSTOM_ID_PREFIX}:{choice_id}:{action}"
 
 
-def get_component_children(component: object) -> list[object]:
-    children = getattr(component, "children", None)
-    if children is None:
-        children = getattr(component, "components", None)
-    if children is None:
-        return []
-    try:
-        return list(children)
-    except TypeError:
-        return []
+def get_component_children(component: ComponentRowLike) -> list[ComponentChildLike]:
+    if isinstance(component, ComponentChildrenContainer) and component.children is not None:
+        try:
+            return list(component.children)
+        except TypeError:
+            return []
+    if isinstance(component, ComponentComponentsContainer) and component.components is not None:
+        try:
+            return list(component.components)
+        except TypeError:
+            return []
+    return []
 
 
-def get_busy_choice_custom_ids_from_message(message: object) -> list[str]:
+def get_busy_choice_custom_ids_from_message(message: ComponentMessageLike) -> list[str]:
     custom_ids: list[str] = []
-    for row in getattr(message, "components", None) or []:
+    for row in message.components or ():
         for child in get_component_children(row):
-            custom_id = getattr(child, "custom_id", None)
+            custom_id = child.custom_id
             if parse_busy_choice_custom_id(str(custom_id or "")):
                 custom_ids.append(str(custom_id))
     return custom_ids
@@ -90,7 +131,10 @@ def parse_input_choice_custom_id(custom_id: str) -> tuple[str, str] | None:
     return target_thread_id, value
 
 
-def get_persistent_component_claim_key(interaction: object, custom_id: str) -> str | None:
+def get_persistent_component_claim_key(
+    interaction: PersistentComponentInteractionLike,
+    custom_id: str,
+) -> str | None:
     parsed_approval = parse_approval_custom_id(custom_id)
     parsed_input = parse_input_choice_custom_id(custom_id)
     if parsed_approval:
@@ -99,8 +143,8 @@ def get_persistent_component_claim_key(interaction: object, custom_id: str) -> s
         kind = INPUT_CHOICE_CUSTOM_ID_PREFIX
     else:
         return None
-    message_id = getattr(getattr(interaction, "message", None), "id", None)
-    if message_id is None:
+    message = interaction.message
+    if message is None:
         return None
-    raw_key = f"{kind}:{int(message_id)}"
+    raw_key = f"{kind}:{int(message.id)}"
     return hashlib.sha256(raw_key.encode("utf-8")).hexdigest()

@@ -2,40 +2,50 @@
 
 from __future__ import annotations
 
+import argparse
 import io
 import os
 import subprocess
 import sys
+from collections.abc import Callable
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
+from types import TracebackType
+from typing import IO, Protocol, cast, runtime_checkable
+
+LineCallback = Callable[[str], None]
 
 
-class LineStream(io.TextIOBase):
-    def __init__(self, on_line):
-        self.on_line = on_line
-        self._buffer = ""
-        self._all: list[str] = []
-
-    def write(self, s: str) -> int:
-        if not s:
-            return 0
-        self._all.append(s)
-        self._buffer += s
-        while "\n" in self._buffer:
-            line, self._buffer = self._buffer.split("\n", 1)
-            self.on_line(line.rstrip("\r"))
-        return len(s)
-
-    def flush(self) -> None:
-        if self._buffer:
-            self.on_line(self._buffer.rstrip("\r"))
-            self._buffer = ""
-
-    def getvalue(self) -> str:
-        return "".join(self._all)
+class BridgeModule(Protocol):
+    def build_parser(self) -> argparse.ArgumentParser: ...
 
 
-def run_bridge_command(argv: list[str], *, bridge_module: object, stream_redirect_lock: object) -> tuple[int, str]:
+class RedirectLock(Protocol):
+    def __enter__(self) -> bool | None: ...
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        tb: TracebackType | None,
+        /,
+    ) -> bool | None: ...
+
+
+@runtime_checkable
+class CommandFunc(Protocol):
+    def __call__(self, args: argparse.Namespace) -> int | None: ...
+
+
+class MissingBridgeCommandHandlerError(RuntimeError):
+    pass
+
+
+def run_bridge_command(
+    argv: list[str],
+    *,
+    bridge_module: BridgeModule,
+    stream_redirect_lock: RedirectLock,
+) -> tuple[int, str]:
     parser = bridge_module.build_parser()
     stdout_buffer = io.StringIO()
     stderr_buffer = io.StringIO()
@@ -43,11 +53,14 @@ def run_bridge_command(argv: list[str], *, bridge_module: object, stream_redirec
     with stream_redirect_lock, redirect_stdout(stdout_buffer), redirect_stderr(stderr_buffer):
         try:
             args = parser.parse_args(argv)
-            result = args.func(args)
+            func = getattr(args, "func", None)
+            if not isinstance(func, CommandFunc):
+                raise MissingBridgeCommandHandlerError("missing bridge command handler")
+            result = func(args)
             exit_code = int(result or 0)
         except SystemExit as exc:
             exit_code = exc.code if isinstance(exc.code, int) else 1
-        except Exception as exc:
+        except Exception as exc:  # noqa: BROAD_EXCEPT_OK
             exit_code = 1
             print(f"ERROR: {exc}")
     output = stdout_buffer.getvalue()
@@ -79,7 +92,7 @@ def build_bridge_subprocess_env() -> dict[str, str]:
 
 def run_bridge_command_stream(
     argv: list[str],
-    on_line,
+    on_line: LineCallback,
     *,
     script_path: Path,
     cwd: Path,
@@ -88,7 +101,7 @@ def run_bridge_command_stream(
     output_parts: list[str] = []
     command = [sys.executable, str(script_path), *argv]
     try:
-        process = subprocess.Popen(
+        process: subprocess.Popen[str] = subprocess.Popen(
             command,
             cwd=str(cwd),
             env=env,
@@ -101,16 +114,18 @@ def run_bridge_command_stream(
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
         try:
-            if process.stdout is not None:
-                for raw_line in process.stdout:
+            stdout = cast(IO[str] | None, process.stdout)
+            if stdout is not None:
+                for raw_line in stdout:
                     output_parts.append(raw_line)
                     on_line(raw_line.rstrip("\r\n"))
         finally:
-            if process.stdout is not None:
-                process.stdout.close()
+            stdout = cast(IO[str] | None, process.stdout)
+            if stdout is not None:
+                stdout.close()
         exit_code = process.wait()
         return int(exit_code or 0), "".join(output_parts).strip()
-    except Exception as exc:
+    except Exception as exc:  # noqa: BROAD_EXCEPT_OK
         output = f"ERROR: {exc}"
         on_line(output)
         return 1, output

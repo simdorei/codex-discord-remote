@@ -1,0 +1,166 @@
+from __future__ import annotations
+
+from collections.abc import Callable
+
+from codex_discord_prefix_skill_prompts import (
+    DEEP_INTERVIEW_PROMPT_HEADER,
+    GITHUB_TRIAGE_PROMPT_HEADER,
+    MAINTAINER_ORCHESTRATOR_PROMPT_HEADER,
+    build_deep_interview_prompt,
+    build_github_triage_prompt,
+    build_maintainer_orchestrator_prompt,
+)
+from codex_discord_prefix_prompt_types import (
+    AuthorLike,
+    ChannelLike,
+    HandlePlainAskFunc,
+    MessageLike,
+    PrefixPromptCommandDeps,
+    SendChunksFunc,
+)
+
+__all__ = [
+    "DEEP_INTERVIEW_PROMPT_HEADER",
+    "GITHUB_TRIAGE_PROMPT_HEADER",
+    "MAINTAINER_ORCHESTRATOR_PROMPT_HEADER",
+    "ASK_COMMANDS",
+    "AuthorLike",
+    "ChannelLike",
+    "GITHUB_TRIAGE_COMMANDS",
+    "HandlePlainAskFunc",
+    "INTERVIEW_COMMANDS",
+    "MAINTAINER_ORCHESTRATOR_COMMANDS",
+    "MessageLike",
+    "PrefixPromptCommandDeps",
+    "SendChunksFunc",
+    "build_deep_interview_prompt",
+    "build_github_triage_prompt",
+    "build_maintainer_orchestrator_prompt",
+    "handle_prefix_prompt_command",
+]
+
+INTERVIEW_COMMANDS = {"interview", "deep_interview", "deep-interview"}
+GITHUB_TRIAGE_COMMANDS = {
+    "triage",
+    "github_triage",
+    "github-triage",
+    "github_project_triage",
+    "github-project-triage",
+}
+MAINTAINER_ORCHESTRATOR_COMMANDS = {
+    "orchestrate",
+    "maintainer",
+    "maintainer_orchestrator",
+    "maintainer-orchestrator",
+}
+ASK_COMMANDS = {"ask", "ask_ipc"}
+
+
+async def handle_prefix_prompt_command(
+    command: str,
+    arg: str,
+    message: MessageLike,
+    *,
+    deps: PrefixPromptCommandDeps,
+) -> bool:
+    if command in INTERVIEW_COMMANDS:
+        return await _handle_skill_prompt_command(
+            command,
+            arg,
+            message,
+            deps=deps,
+            usage_context="prefix_interview_usage",
+            log_context="prefix_interview",
+            requires_request=True,
+            build_prompt=build_deep_interview_prompt,
+        )
+    if command in GITHUB_TRIAGE_COMMANDS:
+        return await _handle_skill_prompt_command(
+            command,
+            arg,
+            message,
+            deps=deps,
+            usage_context="prefix_github_triage_usage",
+            log_context="prefix_github_triage",
+            requires_request=False,
+            build_prompt=build_github_triage_prompt,
+        )
+    if command in MAINTAINER_ORCHESTRATOR_COMMANDS:
+        return await _handle_skill_prompt_command(
+            command,
+            arg,
+            message,
+            deps=deps,
+            usage_context="prefix_maintainer_orchestrator_usage",
+            log_context="prefix_maintainer_orchestrator",
+            requires_request=True,
+            build_prompt=build_maintainer_orchestrator_prompt,
+        )
+    if command in ASK_COMMANDS:
+        return await _handle_ask_command(command, arg, message, deps=deps)
+    return False
+
+
+async def _handle_skill_prompt_command(
+    command: str,
+    arg: str,
+    message: MessageLike,
+    *,
+    deps: PrefixPromptCommandDeps,
+    usage_context: str,
+    log_context: str,
+    requires_request: bool,
+    build_prompt: Callable[[str], str],
+) -> bool:
+    if requires_request and not arg:
+        _ = await deps.send_chunks(
+            message.channel,
+            f"Usage: !{deps.format_discord_command_label(command)} <request>",
+            context=usage_context,
+        )
+        return True
+    target_thread_id = await _resolve_target_or_send_project_message(message, deps=deps)
+    if target_thread_id is None:
+        return True
+    log_message = (
+        f"{log_context} channel={message.channel.id} user={message.author.id} "
+        + f"target={target_thread_id or '-'} prompt_len={deps.format_log_text_len(arg)}"
+    )
+    deps.log_line(log_message)
+    await deps.handle_plain_ask(message, build_prompt(arg), target_thread_id=target_thread_id)
+    return True
+
+
+async def _handle_ask_command(
+    command: str,
+    arg: str,
+    message: MessageLike,
+    *,
+    deps: PrefixPromptCommandDeps,
+) -> bool:
+    if not arg:
+        _ = await deps.send_chunks(
+            message.channel,
+            f"Usage: !{command} <prompt>",
+            context="prefix_ask_usage",
+        )
+        return True
+    target_thread_id = await _resolve_target_or_send_project_message(message, deps=deps)
+    if target_thread_id is None:
+        return True
+    await deps.handle_plain_ask(message, arg, target_thread_id=target_thread_id)
+    return True
+
+
+async def _resolve_target_or_send_project_message(
+    message: MessageLike,
+    *,
+    deps: PrefixPromptCommandDeps,
+) -> str | None:
+    target_thread_id = deps.get_mirrored_codex_thread_id(message.channel.id)
+    if target_thread_id is not None:
+        return target_thread_id
+    project_message = deps.describe_mirrored_project_channel(message.channel.id)
+    if project_message:
+        _ = await deps.send_chunks(message.channel, project_message)
+    return None

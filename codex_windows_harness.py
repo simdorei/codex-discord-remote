@@ -9,73 +9,54 @@ is diagnostic only; Discord remains the frontend surface.
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, field
+import argparse
+from dataclasses import asdict, is_dataclass
 import json
 import shutil
 import subprocess
 import time
-from pathlib import Path
-from typing import Any
+from typing import cast
 
 import codex_desktop_bridge as bridge
+from codex_windows_harness_types import (
+    AskPreflight,
+    DesktopDiscoveryBridge,
+    DictExportable,
+    HarnessArgs,
+    HarnessRuntime,
+    HarnessThread,
+    JsonObject,
+    PrintableJsonData,
+    TargetThreadBridge,
+    ThreadLabelBridge,
+    ThreadRefBridge,
+    ThreadSnapshotBridge,
+)
+from codex_thread_models import ThreadInfo
 
 
 HARNESS_VERSION = "2026.06.05-1"
 
 
-@dataclass(frozen=True)
-class HarnessThread:
-    id: str
-    ref: str
-    title: str
-    cwd: str
-    state: str
-    updated_at: int
-
-
-@dataclass(frozen=True)
-class HarnessRuntime:
-    version: str
-    platform: str
-    codex_cli_path: str
-    codex_cli_status: str
-    codex_desktop_status: str
-
-
-@dataclass(frozen=True)
-class AskPreflight:
-    target_thread_id: str | None
-    target_ref: str
-    target_state: str
-    route: str
-    accepted: bool
-    can_steer: bool
-    not_sent_reason: str
-    events: list[dict[str, Any]] = field(default_factory=list)
-
-    def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
-
-
-def thread_ref(thread: bridge.ThreadInfo, *, bridge_module: object = bridge) -> str:
+def thread_ref(thread: ThreadInfo, *, bridge_module: ThreadRefBridge = bridge) -> str:
     try:
         return bridge_module.get_thread_workspace_ref(thread)
-    except Exception:
+    except Exception:  # noqa: BROAD_EXCEPT_OK
         return thread.id[:8]
 
 
-def thread_label(thread: bridge.ThreadInfo, *, bridge_module: object = bridge) -> str:
+def thread_label(thread: ThreadInfo, *, bridge_module: ThreadLabelBridge = bridge) -> str:
     try:
         return bridge_module.get_thread_label(thread)
-    except Exception:
+    except Exception:  # noqa: BROAD_EXCEPT_OK
         return thread.id[:8]
 
 
 def thread_snapshot(
-    thread: bridge.ThreadInfo,
+    thread: ThreadInfo,
     *,
     state: str,
-    bridge_module: object = bridge,
+    bridge_module: ThreadSnapshotBridge = bridge,
 ) -> HarnessThread:
     return HarnessThread(
         id=thread.id,
@@ -90,11 +71,11 @@ def thread_snapshot(
 def choose_target_thread(
     target_thread_id: str | None,
     *,
-    bridge_module: object = bridge,
-) -> tuple[bridge.ThreadInfo | None, str]:
+    bridge_module: TargetThreadBridge = bridge,
+) -> tuple[ThreadInfo | None, str]:
     try:
         thread = bridge_module.choose_thread(target_thread_id, None)
-    except Exception:
+    except Exception:  # noqa: BROAD_EXCEPT_OK
         if target_thread_id:
             return None, target_thread_id[:8]
         return None, ""
@@ -104,14 +85,14 @@ def choose_target_thread(
 def preflight_ask(
     target_thread_id: str | None,
     *,
-    bridge_module: object = bridge,
+    bridge_module: TargetThreadBridge = bridge,
     now: float | None = None,
 ) -> AskPreflight:
     checked_at = time.time() if now is None else now
     target_thread, target_ref = choose_target_thread(target_thread_id, bridge_module=bridge_module)
     resolved_target_id = target_thread.id if target_thread is not None else target_thread_id
     target_state = "not_checked"
-    events = [
+    events: list[JsonObject] = [
         {
             "type": "preflight_checked",
             "at": checked_at,
@@ -148,18 +129,18 @@ def probe_codex_cli(path: str | None = None) -> tuple[str, str]:
         )
     except PermissionError:
         return cli_path, "permission_denied"
-    except Exception:
+    except Exception:  # noqa: BROAD_EXCEPT_OK
         return cli_path, "unavailable"
     return cli_path, "ok" if completed.returncode == 0 else "unavailable"
 
 
-def get_runtime_status(*, bridge_module: object = bridge) -> HarnessRuntime:
+def get_runtime_status(*, bridge_module: DesktopDiscoveryBridge = bridge) -> HarnessRuntime:
     cli_path, cli_status = probe_codex_cli()
     desktop_status = "unknown"
     try:
         desktop_path, _desktop_source = bridge_module.discover_codex_desktop_executable()
         desktop_status = "available" if desktop_path is not None else "not_found"
-    except Exception:
+    except Exception:  # noqa: BROAD_EXCEPT_OK
         desktop_status = "unavailable"
     return HarnessRuntime(
         version=HARNESS_VERSION,
@@ -170,23 +151,22 @@ def get_runtime_status(*, bridge_module: object = bridge) -> HarnessRuntime:
     )
 
 
-def print_json(data: object) -> None:
-    if hasattr(data, "to_dict"):
+def print_json(data: PrintableJsonData) -> None:
+    if isinstance(data, DictExportable):
         data = data.to_dict()
-    elif hasattr(data, "__dataclass_fields__"):
-        data = asdict(data)
+    elif is_dataclass(data):
+        data = cast(JsonValue, asdict(data))
     print(json.dumps(data, ensure_ascii=False, indent=2))
 
 
 def main() -> int:
-    import argparse
-
     parser = argparse.ArgumentParser(description="Windows-local Codex frontend harness status/preflight.")
     subparsers = parser.add_subparsers(dest="command", required=True)
-    subparsers.add_parser("runtime")
+    _ = subparsers.add_parser("runtime")
     preflight_parser = subparsers.add_parser("preflight")
-    preflight_parser.add_argument("--thread-id", default=None)
-    args = parser.parse_args()
+    _ = preflight_parser.add_argument("--thread-id", default=None)
+    args = HarnessArgs(command="", thread_id=None)
+    _ = parser.parse_args(namespace=args)
 
     if args.command == "runtime":
         print_json(get_runtime_status())

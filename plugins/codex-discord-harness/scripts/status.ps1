@@ -16,6 +16,75 @@ $StopMarker = Join-Path $RepoRoot '.codex_discord_bot.stop'
 $LogPath = Join-Path $RepoRoot 'codex_discord_bot.log'
 $LauncherLogPath = Join-Path $RepoRoot 'discord_launcher.log'
 $BridgePath = Join-Path $RepoRoot 'codex_desktop_bridge.py'
+$CodexHome = $env:CODEX_HOME
+if ([string]::IsNullOrWhiteSpace($CodexHome)) {
+    $CodexHome = Join-Path $HOME '.codex'
+}
+$BridgeStatePath = $env:CODEX_BRIDGE_STATE
+if ([string]::IsNullOrWhiteSpace($BridgeStatePath)) {
+    $BridgeStatePath = Join-Path $CodexHome 'codex_desktop_bridge_state.json'
+}
+
+function Format-OptionalValue {
+    param([string]$Value)
+
+    if ([string]::IsNullOrWhiteSpace($Value)) {
+        return '-'
+    }
+    return $Value
+}
+
+function Write-CodexAppPackageUpdateStatus {
+    $currentVersion = $null
+    $versionStatus = 'Get-AppxPackage OpenAI.Codex'
+    try {
+        $package = Get-AppxPackage -Name OpenAI.Codex -ErrorAction Stop | Select-Object -First 1
+        if ($null -ne $package -and $null -ne $package.Version) {
+            $currentVersion = [string]$package.Version
+        }
+    } catch {
+        $versionStatus = $_.Exception.Message
+    }
+
+    $previousVersion = $null
+    $updateDetected = $false
+    if (-not [string]::IsNullOrWhiteSpace($currentVersion)) {
+        $state = [ordered]@{}
+        $utf8NoBom = [System.Text.UTF8Encoding]::new($false)
+        if (Test-Path -LiteralPath $BridgeStatePath) {
+            try {
+                $loaded = [System.IO.File]::ReadAllText($BridgeStatePath, $utf8NoBom) | ConvertFrom-Json
+                if ($loaded) {
+                    foreach ($property in $loaded.PSObject.Properties) {
+                        $state[$property.Name] = $property.Value
+                    }
+                }
+            } catch {
+                Write-Output "codex_app_package_version_state_error: $($_.Exception.Message)"
+                $state = $null
+            }
+        }
+        if ($null -ne $state) {
+            if ($state.Contains('codex_app_package_version')) {
+                $previousVersion = [string]$state['codex_app_package_version']
+            }
+            $updateDetected = -not [string]::IsNullOrWhiteSpace($previousVersion) -and $previousVersion -ne $currentVersion
+            $state['codex_app_package_version'] = $currentVersion
+            $stateDir = Split-Path -Parent $BridgeStatePath
+            if (-not [string]::IsNullOrWhiteSpace($stateDir)) {
+                New-Item -ItemType Directory -Force -Path $stateDir | Out-Null
+            }
+            $json = $state | ConvertTo-Json -Depth 20
+            [System.IO.File]::WriteAllText($BridgeStatePath, $json + [Environment]::NewLine, $utf8NoBom)
+        }
+    }
+
+    Write-Output "codex_app_package_version: $(Format-OptionalValue $currentVersion)"
+    Write-Output "codex_app_previous_package_version: $(Format-OptionalValue $previousVersion)"
+    Write-Output "codex_app_update_detected: $updateDetected"
+    Write-Output "codex_app_restart_recommended: $updateDetected"
+    Write-Output "codex_app_package_version_status: $versionStatus"
+}
 
 Write-Output "repo: $RepoRoot"
 
@@ -49,6 +118,8 @@ if (Test-Path -LiteralPath $StopMarker) {
 } else {
     Write-Output 'stop_marker: missing'
 }
+
+Write-CodexAppPackageUpdateStatus
 
 if (Test-Path -LiteralPath $LogPath) {
     Write-Output ''

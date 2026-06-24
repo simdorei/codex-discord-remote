@@ -2,12 +2,40 @@
 
 from __future__ import annotations
 
-import asyncio
+import asyncio  # noqa: ANYIO_OK
+from collections.abc import AsyncGenerator, Callable, Mapping
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
+from types import TracebackType
 import time
+from typing import Protocol, TypeAlias, TypedDict
 
 
-@dataclass
+class RunnerQueueLike(Protocol):
+    def qsize(self) -> int: ...
+
+
+class RunnerLockLike(Protocol):
+    async def __aenter__(self) -> None: ...
+
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_value: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> bool | None: ...
+
+
+class RunnerState(TypedDict, total=False):
+    queue: RunnerQueueLike
+    active: bool
+    target_thread_id: str | None
+
+
+ResolveTargetRefFunc: TypeAlias = Callable[[str | None], tuple[str | None, str]]
+
+
+@dataclass(slots=True)  # noqa: MUTABLE_OK
 class DiscordRuntimeState:
     steering_handoffs: dict[str, float] = field(default_factory=dict)
     active_discord_relay_generations: dict[str, int] = field(default_factory=dict)
@@ -28,7 +56,7 @@ def mark_steering_handoff(
     handoffs: dict[str, float],
     target_thread_id: str | None,
     *,
-    now_func=time.monotonic,
+    now_func: Callable[[], float] = time.monotonic,
 ) -> float:
     handoff_at = now_func()
     handoffs[normalize_runner_key(target_thread_id)] = handoff_at
@@ -58,11 +86,75 @@ def is_discord_relay_stale(
     return generations.get(normalize_runner_key(target_thread_id), 0) > generation
 
 
-async def build_runners_message(
-    runners: dict[str, dict[str, object]],
-    runners_lock: object,
+def get_codex_app_turn_condition(state: DiscordRuntimeState) -> asyncio.Condition:
+    if state.codex_app_turn_condition is None:
+        state.codex_app_turn_condition = asyncio.Condition()
+    return state.codex_app_turn_condition
+
+
+@asynccontextmanager
+async def codex_app_turn_slot(
+    state: DiscordRuntimeState,
+    target_thread_id: str | None,
     *,
-    resolve_target_ref_func,
+    log: Callable[[str], None],
+) -> AsyncGenerator[bool]:
+    key = normalize_runner_key(target_thread_id)
+    condition = get_codex_app_turn_condition(state)
+    waited = False
+    async with condition:
+        while state.codex_app_active_target_key not in {None, key}:
+            if not waited:
+                log(
+                    " ".join(
+                        [
+                            f"codex_app_turn_wait target={target_thread_id or '-'}",
+                            f"active={state.codex_app_active_target_key or '-'}",
+                        ]
+                    )
+                )
+                waited = True
+            _ = await condition.wait()
+        if state.codex_app_active_target_key is None:
+            state.codex_app_active_target_key = key
+            state.codex_app_active_target_count = 1
+        else:
+            state.codex_app_active_target_count += 1
+        if waited:
+            log(
+                " ".join(
+                    [
+                        f"codex_app_turn_wait_done target={target_thread_id or '-'}",
+                        f"count={state.codex_app_active_target_count}",
+                    ]
+                )
+            )
+
+    try:
+        yield waited
+    finally:
+        async with condition:
+            if state.codex_app_active_target_key == key:
+                state.codex_app_active_target_count = max(0, state.codex_app_active_target_count - 1)
+                if state.codex_app_active_target_count == 0:
+                    state.codex_app_active_target_key = None
+                    condition.notify_all()
+            else:
+                log(
+                    " ".join(
+                        [
+                            f"codex_app_turn_slot_mismatch target={target_thread_id or '-'}",
+                            f"active={state.codex_app_active_target_key or '-'}",
+                        ]
+                    )
+                )
+
+
+async def build_runners_message(
+    runners: Mapping[str, RunnerState],
+    runners_lock: RunnerLockLike,
+    *,
+    resolve_target_ref_func: ResolveTargetRefFunc,
 ) -> str:
     async with runners_lock:
         items = list(runners.items())
@@ -71,7 +163,7 @@ async def build_runners_message(
     lines = ["Discord runner queues"]
     for key, runner in items:
         queue = runner.get("queue")
-        queue_size = queue.qsize() if isinstance(queue, asyncio.Queue) else 0
+        queue_size = queue.qsize() if queue is not None else 0
         target_thread_id = str(runner.get("target_thread_id") or "").strip() or None
         _thread_id, target_ref = resolve_target_ref_func(target_thread_id)
         lines.append(

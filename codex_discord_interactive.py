@@ -66,3 +66,22 @@ def normalize_interactive_text_reply(
     if state == state_input:
         return stripped
     return None
+
+
+def infer_interactive_state_from_error(
+    output: str,
+    *,
+    state_none: str,
+    state_input: str,
+    state_approval: str,
+) -> str:
+    text = (output or "").lower()
+    if "waiting on an approval prompt" in text or "waiting for approval" in text:
+        return state_approval
+    if (
+        "waiting on a follow-up choice or input" in text
+        or "waiting on user input" in text
+        or "choice or input" in text
+    ):
+        return state_input
+    return state_none

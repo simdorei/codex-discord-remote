@@ -1,0 +1,162 @@
+from __future__ import annotations
+
+from collections.abc import Coroutine
+from pathlib import Path
+from typing import Protocol, cast
+import asyncio  # noqa: ANYIO_OK
+import re
+import tempfile
+import unittest
+from unittest import mock
+
+import codex_discord_bot as bot
+
+
+class RequestedExit(Exception):
+    pass
+
+
+class StopMarkerClient:
+    def __init__(self, *, close_delay: float = 0.0, mark_closed: bool = True) -> None:
+        self.closed: bool = False
+        self.close_calls: int = 0
+        self._close_delay: float = close_delay
+        self._mark_closed: bool = mark_closed
+
+    def is_closed(self) -> bool:
+        return self.closed
+
+    async def close(self) -> None:
+        self.close_calls += 1
+        if self._close_delay:
+            await asyncio.sleep(self._close_delay)
+        if self._mark_closed:
+            self.closed = True
+
+
+class StopMarkerLoop(Protocol):
+    def __call__(self, client: StopMarkerClient) -> Coroutine[None, None, None]: ...
+
+
+def _stop_marker_loop() -> StopMarkerLoop:
+    return cast(StopMarkerLoop, bot.CodexDiscordBot.stop_marker_loop)
+
+
+class DiscordStopMarkerLoopIntegrationTests(unittest.IsolatedAsyncioTestCase):
+    async def test_stop_marker_waits_for_discord_delivery_drain(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            marker_path = Path(temp_dir) / ".codex_discord_bot.stop"
+            _ = marker_path.write_text("1", encoding="ascii")
+            client = StopMarkerClient()
+            exit_calls: list[tuple[int, str]] = []
+
+            def exit_bot_process(exit_code: int, *, reason: str) -> None:
+                exit_calls.append((exit_code, reason))
+
+            try:
+                bot.ACTIVE_DISCORD_DELIVERIES.clear()
+                delivery_token = bot.begin_discord_delivery("test")
+                with (
+                    mock.patch.object(bot, "STOP_REQUEST_PATH", marker_path),
+                    mock.patch.object(bot, "STOP_MARKER_POLL_SECONDS", 0.01),
+                    mock.patch.object(bot, "STOP_MARKER_DRAIN_TIMEOUT_SECONDS", 1.0),
+                    mock.patch.object(bot, "STOP_MARKER_CLOSE_TIMEOUT_SECONDS", 1.0),
+                    mock.patch.object(bot, "exit_bot_process", exit_bot_process),
+                ):
+                    task = asyncio.create_task(_stop_marker_loop()(client))
+                    await asyncio.sleep(0.05)
+
+                    self.assertFalse(client.closed)
+
+                    bot.end_discord_delivery(delivery_token)
+                    await asyncio.wait_for(task, timeout=1.0)
+            finally:
+                bot.ACTIVE_DISCORD_DELIVERIES.clear()
+                bot.clear_discord_delivery_stopping()
+
+            self.assertTrue(client.closed)
+            self.assertEqual(exit_calls, [(0, "stop_marker_close_done")])
+
+    async def test_stop_marker_loop_closes_bot_and_removes_marker(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            marker_path = Path(temp_dir) / ".codex_discord_bot.stop"
+            _ = marker_path.write_text("1", encoding="ascii")
+            client = StopMarkerClient()
+            exit_calls: list[tuple[int, str]] = []
+
+            def exit_bot_process(exit_code: int, *, reason: str) -> None:
+                exit_calls.append((exit_code, reason))
+
+            try:
+                with (
+                    mock.patch.object(bot, "STOP_REQUEST_PATH", marker_path),
+                    mock.patch.object(bot, "STOP_MARKER_POLL_SECONDS", 0.01),
+                    mock.patch.object(bot, "exit_bot_process", exit_bot_process),
+                ):
+                    await asyncio.wait_for(_stop_marker_loop()(client), timeout=1)
+            finally:
+                bot.clear_discord_delivery_stopping()
+
+            self.assertEqual(client.close_calls, 1)
+            self.assertEqual(exit_calls, [(0, "stop_marker_close_done")])
+            self.assertFalse(marker_path.exists())
+
+    async def test_stop_marker_close_timeout_requests_process_exit(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            marker_path = Path(temp_dir) / ".codex_discord_bot.stop"
+            _ = marker_path.write_text("1", encoding="ascii")
+            client = StopMarkerClient(close_delay=1.0, mark_closed=False)
+            exit_calls: list[tuple[int, str]] = []
+
+            def exit_bot_process(exit_code: int, *, reason: str) -> None:
+                exit_calls.append((exit_code, reason))
+                raise RequestedExit()
+
+            try:
+                with (
+                    mock.patch.object(bot, "STOP_REQUEST_PATH", marker_path),
+                    mock.patch.object(bot, "STOP_MARKER_POLL_SECONDS", 0.01),
+                    mock.patch.object(bot, "STOP_MARKER_DRAIN_TIMEOUT_SECONDS", 0.01),
+                    mock.patch.object(bot, "STOP_MARKER_CLOSE_TIMEOUT_SECONDS", 0.01),
+                    mock.patch.object(bot, "exit_bot_process", exit_bot_process),
+                    self.assertRaises(RequestedExit),
+                ):
+                    await _stop_marker_loop()(client)
+            finally:
+                bot.clear_discord_delivery_stopping()
+
+            self.assertEqual(client.close_calls, 1)
+            self.assertEqual(exit_calls, [(0, "stop_marker_close_timeout")])
+            self.assertFalse(marker_path.exists())
+
+    def test_watchdog_graceful_stop_wait_exceeds_bot_drain_timeout(self) -> None:
+        watchdog_text = "\n".join(
+            [
+                (bot.SCRIPT_DIR / "codex-discord-watchdog.ps1").read_text(encoding="utf-8"),
+                (bot.SCRIPT_DIR / "codex-discord-watchdog-runtime.ps1").read_text(
+                    encoding="utf-8"
+                ),
+                (bot.SCRIPT_DIR / "codex-discord-watchdog-restart-runtime.ps1").read_text(
+                    encoding="utf-8"
+                ),
+            ]
+        )
+        match = re.search(r"\$GracefulStopTimeoutSeconds\s*=\s*(\d+)", watchdog_text)
+
+        if match is None:
+            self.fail("GracefulStopTimeoutSeconds setting missing")
+        timeout_seconds = int(match.group(1))
+        expected_minimum = int(
+            bot.STOP_MARKER_DRAIN_TIMEOUT_SECONDS
+            + bot.STOP_MARKER_CLOSE_TIMEOUT_SECONDS
+            + 5
+        )
+        self.assertGreaterEqual(timeout_seconds, expected_minimum)
+        self.assertIn(
+            "Wait-RuntimeBotExit -TimeoutSeconds $GracefulStopTimeoutSeconds",
+            watchdog_text,
+        )
+
+
+if __name__ == "__main__":
+    _ = unittest.main()

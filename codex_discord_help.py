@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 
-def build_help(*, qa_commands_enabled: bool) -> str:
+def build_help(*, qa_commands_enabled: bool, host_commands_enabled: bool = False) -> str:
     slash_commands = [
         "/help",
         "/list",
         "/archived_list",
         "/use",
         "/status",
+        "/settings",
         "/doctor",
         "/where",
         "/context",
@@ -33,7 +34,9 @@ def build_help(*, qa_commands_enabled: bool) -> str:
         "!use <ref>",
         "!open <ref>",
         "!open_abort <ref>",
+        "!stop [ref]  (stop the running Codex reply for the mapped or selected thread)",
         "!status [ref]",
+        "!settings [ref] --model <model> --effort <effort> --speed <speed>  (alias: !setting; omit a value to list options)",
         "!doctor",
         "!discover_codex",
         "!restart_codex",
@@ -42,6 +45,7 @@ def build_help(*, qa_commands_enabled: bool) -> str:
         "!context [all|refresh [limit]]",
         "!usage [days]",
         "!runners",
+        "!resources  (alias: !system)",
         "!retract [ref]  (remove your latest queued ask)",
         "!bridge sync [limit]",
         "!mirror sync",
@@ -59,6 +63,8 @@ def build_help(*, qa_commands_enabled: bool) -> str:
         "",
         "Plain messages in mirrored Discord threads are sent to that Codex thread.",
     ]
+    if host_commands_enabled:
+        lines.insert(lines.index("!chatid"), "!reset_pc confirm")
     if qa_commands_enabled:
         lines.insert(lines.index("!approval"), "!qa buttons")
         lines.insert(lines.index("!qa buttons") + 1, "!steer <prompt>  (QA-only text path for Steer now)")

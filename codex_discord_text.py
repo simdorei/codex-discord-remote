@@ -7,6 +7,7 @@ import re
 
 
 DISCORD_MAX_LEN = 1900
+type PercentValue = int | float | str | bytes | bytearray | None
 
 
 def env_flag(name: str, default: bool = False) -> bool:
@@ -117,6 +118,29 @@ def build_ask_start_message(prompt: str, *, queued: bool = False) -> str:
     )
 
 
+def build_steering_start_message(prompt: str) -> str:
+    return fit_single_message(
+        "\n".join(
+            [
+                "Discord steering submitted.",
+                f"message: {extract_prompt_first_sentence(prompt)}",
+            ]
+        )
+    )
+
+
+def build_startup_notice() -> str:
+    return "\n".join(
+        [
+            "Codex Discord bot online.",
+            "status: ready; restart/startup completed.",
+            "requests: new Discord messages and slash commands are accepted.",
+            "mapping: use `!where` or `/where` to check this channel's Codex target.",
+            "help: `!help` or `/help`.",
+        ]
+    )
+
+
 def normalize_discord_name(value: str, *, prefix: str = "", max_len: int = 90) -> str:
     name = str(value or "").strip().lower()
     name = re.sub(r"[^a-z0-9가-힣._-]+", "-", name)
@@ -135,7 +159,7 @@ def truncate_discord_title(value: str, fallback: str, *, max_len: int = 90) -> s
     return text[: max(1, max_len - 1)].rstrip() + "..."
 
 
-def format_percent(value: object) -> str:
+def format_percent(value: PercentValue) -> str:
     if isinstance(value, int | float):
         return f"{float(value):.1f}%"
     try:

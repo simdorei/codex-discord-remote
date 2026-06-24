@@ -3,11 +3,29 @@
 from __future__ import annotations
 
 import os
-import re
+import sys
 import time
 from pathlib import Path
 
 import codex_desktop_bridge as bridge
+from codex_discord_log_summary import (
+    get_log_field,
+    is_user_or_control_hook_summary,
+    parse_log_line,
+    summarize_discord_hook_log_line,
+)
+
+
+__all__ = [
+    "get_discord_log_markers",
+    "get_log_field",
+    "get_log_path",
+    "get_recent_discord_hook_events",
+    "is_user_or_control_hook_summary",
+    "log_line",
+    "parse_log_line",
+    "summarize_discord_hook_log_line",
+]
 
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -32,129 +50,13 @@ def log_line(message: str) -> None:
         )
         log_path.parent.mkdir(parents=True, exist_ok=True)
         with log_path.open("a", encoding="utf-8") as handle:
-            handle.write(line)
-    except Exception:
-        pass
-
-
-def parse_log_line(line: str) -> tuple[str, str] | None:
-    match = re.match(r"^\[([^\]]+)\]\s+(.*)$", str(line or "").strip())
-    if not match:
-        return None
-    return match.group(1), match.group(2)
-
-
-def get_log_field(body: str, key: str) -> str:
-    match = re.search(rf"(?:^|\s){re.escape(key)}=([^\s]+)", body)
-    return match.group(1) if match else "-"
-
-
-def summarize_discord_hook_log_line(line: str) -> str | None:
-    parsed = parse_log_line(line)
-    if not parsed:
-        return None
-    timestamp, body = parsed
-    if body.startswith("socket_message_create_untracked "):
-        return (
-            f"{timestamp} raw_message_untracked "
-            f"channel={get_log_field(body, 'channel')} source={get_log_field(body, 'source')}"
+            _ = handle.write(line)
+    except OSError as exc:
+        print(
+            f"discord_log_write_failed path={log_path} "
+            + f"error_type={type(exc).__name__} error={exc}",
+            file=sys.stderr,
         )
-    if body.startswith("socket_message_create "):
-        return (
-            f"{timestamp} raw_message "
-            f"channel={get_log_field(body, 'channel')} source={get_log_field(body, 'source')} "
-            f"bot={get_log_field(body, 'bot')} content_len={get_log_field(body, 'content_len')}"
-        )
-    if body.startswith("message_received "):
-        return (
-            f"{timestamp} message_received "
-            f"channel={get_log_field(body, 'chat')} content_len={get_log_field(body, 'content_len')}"
-        )
-    if body.startswith("ignored_message "):
-        return (
-            f"{timestamp} ignored_message "
-            f"reason={get_log_field(body, 'reason')} channel={get_log_field(body, 'chat')}"
-        )
-    if body.startswith("history_poll_message "):
-        return (
-            f"{timestamp} history_poll_message "
-            f"channel={get_log_field(body, 'channel')} content_len={get_log_field(body, 'content_len')}"
-        )
-    if body.startswith("history_poll_primed "):
-        return (
-            f"{timestamp} history_poll_primed "
-            f"channel={get_log_field(body, 'channel')} messages={get_log_field(body, 'messages')}"
-        )
-    if body.startswith("message "):
-        return (
-            f"{timestamp} message_routed "
-            f"channel={get_log_field(body, 'chat')} target={get_log_field(body, 'target')} "
-            f"prefix={get_log_field(body, 'prefix')} text_len={get_log_field(body, 'text_len')}"
-        )
-    if body.startswith("socket_interaction_create "):
-        return (
-            f"{timestamp} raw_interaction "
-            f"channel={get_log_field(body, 'channel')} type={get_log_field(body, 'type')} "
-            f"command={get_log_field(body, 'command')}"
-        )
-    if body.startswith("interaction_received "):
-        return (
-            f"{timestamp} interaction_received "
-            f"channel={get_log_field(body, 'channel')} type={get_log_field(body, 'type')} "
-            f"command={get_log_field(body, 'command')}"
-        )
-    if body.startswith("slash_"):
-        slash_event = body.split(" ", 1)[0]
-        return (
-            f"{timestamp} {slash_event} "
-            f"channel={get_log_field(body, 'channel')} command={get_log_field(body, 'command')} "
-            f"exit={get_log_field(body, 'exit')} response={get_log_field(body, 'response')} "
-            f"reason={get_log_field(body, 'reason')}"
-        )
-    if body.startswith("component_interaction_"):
-        return (
-            f"{timestamp} component_event "
-            f"channel={get_log_field(body, 'channel')} custom_id={get_log_field(body, 'custom_id')}"
-        )
-    if body.startswith("busy_choice_"):
-        return (
-            f"{timestamp} busy_choice_event "
-            f"reason={get_log_field(body, 'reason')} target={get_log_field(body, 'target')}"
-        )
-    if body.startswith("approval_persistent"):
-        return (
-            f"{timestamp} approval_persistent "
-            f"target={get_log_field(body, 'target')} exit={get_log_field(body, 'exit')}"
-        )
-    if body.startswith("input_choice_persistent"):
-        return (
-            f"{timestamp} input_choice_persistent "
-            f"target={get_log_field(body, 'target')} exit={get_log_field(body, 'exit')}"
-        )
-    return None
-
-
-def is_user_or_control_hook_summary(summary: str) -> bool:
-    if " raw_message " in summary:
-        return " bot=False " in summary or " bot=- " in summary
-    if " raw_message_untracked " in summary:
-        return True
-    return any(
-        marker in summary
-        for marker in [
-            " message_received ",
-            " ignored_message ",
-            " history_poll_message ",
-            " message_routed ",
-            " raw_interaction ",
-            " interaction_received ",
-            " slash_",
-            " component_event ",
-            " busy_choice_event ",
-            " approval_persistent ",
-            " input_choice_persistent ",
-        ]
-    )
 
 
 def get_recent_discord_hook_events(

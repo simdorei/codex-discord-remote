@@ -2,11 +2,66 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Protocol, TypeAlias
 
 
-@dataclass
+class SteeringThreadLike(Protocol):
+    @property
+    def id(self) -> str: ...
+
+    @property
+    def rollout_path(self) -> str: ...
+
+
+SteeringRecentOffset: TypeAlias = tuple[SteeringThreadLike, Path, int]
+SteeringRecentOffsets: TypeAlias = Mapping[str, SteeringRecentOffset]
+
+
+class SteeringBridgeLike(Protocol):
+    def choose_thread(self, thread_id: str | None, cwd: str | None) -> SteeringThreadLike: ...
+
+    def get_thread_workspace_ref(self, thread: SteeringThreadLike) -> str: ...
+
+    def snapshot_recent_session_offsets(
+        self,
+        *,
+        limit: int,
+        include_threads: Sequence[SteeringThreadLike] | None,
+    ) -> SteeringRecentOffsets: ...
+
+    def wait_for_prompt_delivery(
+        self,
+        recent_offsets: SteeringRecentOffsets,
+        prompt: str,
+        *,
+        timeout_sec: float,
+    ) -> SteeringThreadLike | None: ...
+
+    def get_thread_label(self, thread: SteeringThreadLike) -> str: ...
+
+
+class RunAskFunc(Protocol):
+    def __call__(
+        self,
+        prompt: str,
+        *,
+        force_while_busy: bool,
+        wait: bool,
+        target_thread_id: str | None,
+        timeout_sec: float,
+    ) -> tuple[int, str]: ...
+
+
+ResolveTargetRefFunc: TypeAlias = Callable[[str | None], tuple[str | None, str]]
+GetTimeoutFunc: TypeAlias = Callable[[], float]
+LogFunc: TypeAlias = Callable[[str], None]
+FormatLogTextLenFunc: TypeAlias = Callable[[str], int | str]
+
+
+@dataclass(frozen=True, slots=True)
 class SteeringPromptResult:
     exit_code: int
     output: str
@@ -16,7 +71,7 @@ class SteeringPromptResult:
     start_offset: int | None = None
     delivery_pending: bool = False
 
-    def __iter__(self):
+    def __iter__(self) -> Iterator[int | str]:
         yield self.exit_code
         yield self.output
 
@@ -25,9 +80,9 @@ def make_steering_prompt_result(
     exit_code: int,
     output: str,
     *,
-    target_thread: object | None,
+    target_thread: SteeringThreadLike | None,
     target_ref: str,
-    recent_offsets: dict[str, tuple[object, Path, int]],
+    recent_offsets: SteeringRecentOffsets,
     delivery_pending: bool = False,
 ) -> SteeringPromptResult:
     if target_thread is None:
@@ -61,6 +116,9 @@ def is_ipc_delivery_confirmation_timeout(output: str) -> bool:
     ) or (
         "ui_activation: ipc-thread-follower-start-turn" in text
         and "thread-follower-start-turn-timeout" in text
+    ) or (
+        "[delivery_pending]" in text
+        and "local session recording was not confirmed" in text
     )
 
 
@@ -96,12 +154,12 @@ def run_steering_prompt(
     prompt: str,
     target_thread_id: str | None,
     *,
-    bridge_module: object,
-    resolve_target_ref_func,
-    run_ask_func,
-    get_steering_delivery_confirm_timeout_func,
-    log_func,
-    format_log_text_len_func,
+    bridge_module: SteeringBridgeLike,
+    resolve_target_ref_func: ResolveTargetRefFunc,
+    run_ask_func: RunAskFunc,
+    get_steering_delivery_confirm_timeout_func: GetTimeoutFunc,
+    log_func: LogFunc,
+    format_log_text_len_func: FormatLogTextLenFunc,
 ) -> SteeringPromptResult:
     target_thread_id, _target_ref = resolve_target_ref_func(target_thread_id)
     target_thread = bridge_module.choose_thread(target_thread_id, None) if target_thread_id else None
@@ -129,8 +187,8 @@ def run_steering_prompt(
     if is_ipc_delivery_confirmation_timeout(output) and target_thread is not None:
         log_func(
             f"steering_ipc_delivery_pending exit={exit_code} target={target_thread_id or '-'} "
-            "confirm_timeout=0.0 "
-            f"output_len={format_log_text_len_func(output)}"
+            + "confirm_timeout=0.0 "
+            + f"output_len={format_log_text_len_func(output)}"
         )
         return make_steering_prompt_result(
             0,
@@ -151,7 +209,7 @@ def run_steering_prompt(
     ):
         log_func(
             f"steering_nonzero_but_delivered exit={exit_code} target={target_thread_id or '-'} "
-            f"delivered={delivered_thread.id}"
+            + f"delivered={delivered_thread.id}"
         )
         return make_steering_prompt_result(
             0,
@@ -171,6 +229,6 @@ def run_steering_prompt(
 
     log_func(
         f"steering_failed exit={exit_code} target={target_thread_id or '-'} "
-        f"output_len={format_log_text_len_func(output)}"
+        + f"output_len={format_log_text_len_func(output)}"
     )
     return SteeringPromptResult(exit_code, output, target_thread_id=target_thread_id, target_ref=target_ref)
