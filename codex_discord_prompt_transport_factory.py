@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 from contextlib import AbstractContextManager
-from typing import TypeAlias, TypeVar
+from typing import Final, TypeAlias, TypeVar
 
 import codex_app_server_transport as app_server_transport
 import codex_app_server_transport_delivery as app_server_delivery
 import codex_discord_app_server as discord_app_server
 import codex_discord_prompt_transport as prompt_transport
+import codex_discord_runtime_config as runtime_config
 import codex_discord_stream as discord_stream
 import codex_discord_ui_ask as discord_ui_ask
 
@@ -15,6 +16,13 @@ RelayT = TypeVar("RelayT", bound=discord_stream.DiscordAskRelay)
 SteeringResultT = TypeVar("SteeringResultT")
 AppServerDeliveryResult: TypeAlias = app_server_transport.AppServerDeliveryResult
 AppServerStartTurnNoWait: TypeAlias = prompt_transport.StartTurnNoWait[AppServerDeliveryResult]
+DEFAULT_APP_SERVER_DELIVERY_CONFIRM_TIMEOUT_SECONDS: Final = 25.0
+
+
+def get_app_server_delivery_confirm_timeout() -> float:
+    return runtime_config.get_steering_delivery_confirm_timeout(
+        default=DEFAULT_APP_SERVER_DELIVERY_CONFIRM_TIMEOUT_SECONDS,
+    )
 
 
 def make_prompt_transport_deps(
@@ -42,7 +50,7 @@ def make_prompt_transport_deps(
             transport_module=app_server_transport,
             bridge_module=bridge_module,
             client=app_server_transport.DEFAULT_CLIENT,
-            confirm_timeout_sec=6.0,
+            confirm_timeout_sec=get_app_server_delivery_confirm_timeout(),
         )
 
     def start_turn_no_wait_impl(prompt: str, target_thread_id: str | None) -> AppServerDeliveryResult:
@@ -53,7 +61,7 @@ def make_prompt_transport_deps(
             prompt,
             target_thread_id,
             bridge_module=bridge_module,
-            confirm_timeout_sec=6.0,
+            confirm_timeout_sec=get_app_server_delivery_confirm_timeout(),
         )
 
     def run_legacy_stream(

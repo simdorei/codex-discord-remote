@@ -144,6 +144,7 @@ class PromptTransportFactoryTests(unittest.TestCase):
             _ = message
 
         with (
+            mock.patch.dict("os.environ", {"DISCORD_STEERING_DELIVERY_CONFIRM_TIMEOUT_SECONDS": ""}),
             mock.patch.object(
                 app_server_transport,
                 "steer_or_start_no_wait",
@@ -171,7 +172,57 @@ class PromptTransportFactoryTests(unittest.TestCase):
             "please run",
             "thread-1",
             bridge_module=bridge_module,
-            confirm_timeout_sec=6.0,
+            confirm_timeout_sec=25.0,
+        )
+
+    def test_default_no_wait_delivery_uses_configured_confirm_timeout(self) -> None:
+        bridge_module = cast(app_server_delivery.BridgeModule, cast(object, type("FakeBridge", (), {})()))
+
+        def legacy_prompt(prompt: str, target_thread_id: str | None) -> tuple[int, str]:
+            return 0, f"legacy:{prompt}:{target_thread_id}"
+
+        def watch(steering_result: FakeSteeringResult, relay: discord_stream.DiscordAskRelay) -> tuple[int, str]:
+            _ = steering_result
+            _ = relay
+            return 0, "watched"
+
+        def bridge_stream(argv: list[str], on_line: Callable[[str], None]) -> tuple[int, str]:
+            _ = argv
+            _ = on_line
+            return 0, "legacy stream"
+
+        def discard_log(message: str) -> None:
+            _ = message
+
+        with (
+            mock.patch.dict("os.environ", {"DISCORD_STEERING_DELIVERY_CONFIRM_TIMEOUT_SECONDS": "42"}),
+            mock.patch.object(
+                prompt_transport_factory.discord_app_server,
+                "run_prompt_no_wait",
+                return_value=(0, "delivered"),
+            ) as run_prompt,
+        ):
+            deps = prompt_transport_factory.make_prompt_transport_deps(
+                bridge_module=bridge_module,
+                app_server_transport_enabled=lambda: True,
+                run_legacy_prompt_no_wait=legacy_prompt,
+                make_steering_prompt_result=make_app_steering_result,
+                run_watch_stream=watch,
+                run_bridge_command_stream=bridge_stream,
+                ui_fallback_lock=Lock(),
+                log=discard_log,
+            )
+
+            result = deps.run_resident_prompt_no_wait("please run", "thread-1")
+
+        self.assertEqual(result, (0, "delivered"))
+        run_prompt.assert_called_once_with(
+            "please run",
+            "thread-1",
+            transport_module=app_server_transport,
+            bridge_module=bridge_module,
+            client=app_server_transport.DEFAULT_CLIENT,
+            confirm_timeout_sec=42.0,
         )
 
 
