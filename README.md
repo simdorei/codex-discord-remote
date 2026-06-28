@@ -1,6 +1,6 @@
-# Codex Discord Harness
+# Codex Discord Remote
 
-A Windows-local Discord frontend for operating a signed-in Codex Desktop session from Discord.
+A Discord remote for the Codex app, for when opening the app is too much work.
 
 This is not an official OpenAI client, hosted relay, or npm package. It is a local operator tool for a Windows machine where Codex Desktop is already installed, signed in, awake, and trusted.
 
@@ -27,9 +27,48 @@ This repository is Windows-only in practice. The bot, watchdog, tray launcher, a
 
 The Discord bot needs the message content intent enabled in the Discord Developer Portal if you want plain text messages to be forwarded.
 
+## Create And Invite A Discord Bot
+
+Create the bot in the Discord Developer Portal:
+
+1. Open <https://discord.com/developers/applications>.
+2. Click **New Application**, give it a name, and create it.
+3. Open **Bot** in the left sidebar.
+4. Click **Reset Token** or **Copy Token**, then save that value for `DISCORD_BOT_TOKEN`.
+5. In **Privileged Gateway Intents**, turn on **Message Content Intent** and save changes.
+
+Invite the bot to your server:
+
+1. Open **OAuth2** -> **URL Generator**.
+2. Under **Scopes**, select **bot** and **applications.commands**.
+3. Under **Bot Permissions**, select:
+   - View Channels
+   - Send Messages
+   - Read Message History
+   - Use Slash Commands
+   - Attach Files
+   - Embed Links
+   - Add Reactions
+   - Create Public Threads
+   - Send Messages in Threads
+   - Manage Threads
+4. Copy the generated URL, open it in a browser, choose your server, and authorize the bot.
+
+To fill `.env`, turn on Discord **User Settings** -> **Advanced** -> **Developer Mode**.
+Then right-click the server, channels, threads, and bot user to copy IDs for `DISCORD_GUILD_ID`, `DISCORD_ALLOWED_CHANNEL_IDS`, `DISCORD_STARTUP_CHANNEL_ID`, and `DISCORD_PLAIN_ASK_MENTION_USER_IDS`.
+
+Keep the bot token private. Do not commit `.env`.
+
 ## Install
 
 Clone the repository:
+
+```powershell
+git clone https://github.com/simdorei/codex-discord-remote.git
+cd codex-discord-remote
+```
+
+During the rename transition, the older repository URL may still be used:
 
 ```powershell
 git clone https://github.com/simdorei/codex-discord-harness.git
@@ -59,7 +98,7 @@ Use `.\install.ps1 -SkipCodexPlugin` only when you want to skip Codex plugin reg
 ## Install The Codex Plugin
 
 The repository includes a local Codex plugin marketplace at `.agents\plugins\marketplace.json`.
-The installer registers it automatically. To install or reinstall the plugin manually from the repository root:
+The installer registers it automatically. The plugin id remains `codex-discord-harness` for compatibility. To install or reinstall the plugin manually from the repository root:
 
 ```powershell
 codex plugin marketplace add .
@@ -101,7 +140,7 @@ Numeric refs follow the same DB-root numbering as `!list`.
 
 - Mapped Discord threads follow the matching Codex app thread directly. A plain Discord message in that mapped thread is sent to the mapped Codex thread, not to the currently selected Codex app tab.
 - Codex app text output is mirrored as Discord text. Codex app image output and structured file output are mirrored as Discord attachments, so a `view_image` result or app-provided file should appear as an uploaded attachment rather than only a path. For local file paths, the mirror only uploads files under `.codex-remote-attachments\`; this avoids accidentally uploading unrelated files from the Windows machine.
-- `STOP REPLY` means the Codex app's current-reply stop button: it stops the active response generation in that Codex thread. It is different from Discord `!stop`, which is a harness command.
+- `STOP REPLY` means the Codex app's current-reply stop button: it stops the active response generation in that Codex thread. It is different from Discord `!stop`, which is a remote-control command.
 
 ## Configure
 

@@ -51,7 +51,7 @@ Live Discord QA should verify:
 
 ## Project Position
 
-This repository is a Windows-local operator harness. It depends on Windows Codex Desktop, PowerShell scripts, and local user-session state. It is useful for personal or team-operated Windows machines, but it is not a hosted multi-user service, Linux service, or mobile Codex replacement.
+This repository is a Windows-local Codex Discord remote. It depends on Windows Codex Desktop, PowerShell scripts, and local user-session state. It is useful for personal or team-operated Windows machines, but it is not a hosted multi-user service, Linux service, or mobile Codex replacement.
 
 ## Acknowledgements
 

@@ -1,7 +1,7 @@
 {
   "name": "codex-discord-harness",
   "interface": {
-    "displayName": "Codex Discord Harness"
+    "displayName": "Codex Discord Remote"
   },
   "plugins": [
     {

@@ -15,7 +15,7 @@ py -3 .\send_discord_attachment.py --channel-id 123456789012345678 --content "ìž
 ## Daily Workflow
 
 1. Start Codex Desktop and sign in.
-2. Start the Discord harness.
+2. Start the Discord remote.
 3. Use `/bridge_sync` to refresh Discord mirror state.
 4. Send messages in a mapped Discord thread to operate the matching Codex thread.
 5. When Codex asks for approval/input/steering, answer from the Discord controls.
@@ -63,7 +63,7 @@ Common `!` commands:
 
 ## Interop With Other Discord Tools
 
-This harness is intentionally Discord-native, so it can share a Discord thread with other bots or command-line agents that post through Discord.
+This remote is intentionally Discord-native, so it can share a Discord thread with other bots or command-line agents that post through Discord.
 
 Useful patterns:
 

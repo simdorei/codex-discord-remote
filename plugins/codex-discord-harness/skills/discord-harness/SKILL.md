@@ -1,11 +1,11 @@
 ---
 name: discord-harness
-description: Operate the local Codex Discord Harness runtime, including status checks, restarts, archive-lock recovery, mirror mapping checks, and log triage. Use when the user asks about this Discord bridge, bot health, missing Discord messages, archive failures, mirror routing, or local harness deployment.
+description: Operate the local Codex Discord Remote runtime, including status checks, restarts, archive-lock recovery, mirror mapping checks, and log triage. Use when the user asks about this Discord bridge, bot health, missing Discord messages, archive failures, mirror routing, or local deployment.
 ---
 
-# Codex Discord Harness Operations
+# Codex Discord Remote Operations
 
-Use this skill for the `codex-discord-harness` repository and its local Windows bot runtime.
+Use this skill for this repository and its local Windows bot runtime.
 
 ## Scope
 
@@ -30,7 +30,7 @@ Use this skill for the `codex-discord-harness` repository and its local Windows 
 - Do not revert user changes unless explicitly requested.
 - Do not delete session, mirror, or Discord attachment data unless the user explicitly asks.
 - For recursive deletion, resolve the absolute target path and confirm it remains under the intended repo or named target directory.
-- If the harness is running, prefer a restart marker plus watchdog over force-killing the bot process.
+- If the remote is running, prefer a restart marker plus watchdog over force-killing the bot process.
 
 ## Useful Scripts
 

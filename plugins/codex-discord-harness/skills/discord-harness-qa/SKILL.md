@@ -1,11 +1,11 @@
 ---
 name: discord-harness-qa
-description: Run focused QA for the Codex Discord Harness, especially mirror mapping, context refresh, session mirror cursor priming, steering suppression, archive lock retry, and deployment readiness checks.
+description: Run focused QA for Codex Discord Remote, especially mirror mapping, context refresh, session mirror cursor priming, steering suppression, archive lock retry, and deployment readiness checks.
 ---
 
-# Codex Discord Harness QA
+# Codex Discord Remote QA
 
-Use this skill when validating local changes or deciding whether the harness is ready to push or deploy.
+Use this skill when validating local changes or deciding whether the remote is ready to push or deploy.
 
 ## Standard QA
 

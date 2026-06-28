@@ -1,16 +1,16 @@
 ## Bundled Skills And Attribution
 
-The local Codex plugin packages these skills. In Codex, the fully qualified
+The Codex Discord Remote plugin packages these skills. In Codex, the fully qualified
 skill names use the `$codex-discord-harness:<skill-name>` form. In Discord,
 some skills also have slash or `!` command wrappers.
 
 | Skill | Purpose | Discord entrypoint |
 | --- | --- | --- |
-| `discord-harness` | Operational runbook for this local Discord bridge: bot status, watchdog restarts, archive-lock recovery, mirror routing checks, log triage, and local deployment checks. | No direct skill wrapper; use the normal harness commands such as `!status`, `!doctor`, `!mirror check`, and `!bridge sync`. |
-| `discord-harness-qa` | Focused QA checklist for mirror mapping, context refresh, session mirror cursor priming, steering suppression, archive lock retry, and deployment readiness. | No direct skill wrapper; use it from Codex when validating harness changes. |
+| `discord-harness` | Operational runbook for this local Discord bridge: bot status, watchdog restarts, archive-lock recovery, mirror routing checks, log triage, and local deployment checks. | No direct skill wrapper; use the normal remote commands such as `!status`, `!doctor`, `!mirror check`, and `!bridge sync`. |
+| `discord-harness-qa` | Focused QA checklist for mirror mapping, context refresh, session mirror cursor priming, steering suppression, archive lock retry, and deployment readiness. | No direct skill wrapper; use it from Codex when validating remote changes. |
 | `deep-interview` | Clarification-first requirements workflow. It confirms the work structure, asks one question at a time, scores ambiguity, preserves the user's language, tracks scope/entities/constraints, and stops at a pending-approval ticket before implementation. | `/interview <request>` or `!interview <request>`. |
 | `github-project-triage` | GitHub queue triage workflow for issues, PRs, CI, blockers, risk, evidence, and next actions. It is for deciding what needs attention; it does not authorize implementation, merge, close, release, or destructive actions by itself. | `/github_triage [prompt]` or `!triage [request]`. |
-| `maintainer-orchestrator` | Maintainer workflow for organizing decision-ready PR work, worker/queue monitoring, release readiness, and cross-repository follow-up. In this harness it is a skill prompt wrapper, not an automatic multi-agent runtime; any mutation, delegation, push, merge, close, or release still requires explicit user authorization. | `/maintainer_orchestrator <prompt>` or `!orchestrate <request>`. |
+| `maintainer-orchestrator` | Maintainer workflow for organizing decision-ready PR work, worker/queue monitoring, release readiness, and cross-repository follow-up. In this remote it is a skill prompt wrapper, not an automatic multi-agent runtime; any mutation, delegation, push, merge, close, or release still requires explicit user authorization. | `/maintainer_orchestrator <prompt>` or `!orchestrate <request>`. |
 
 Source attribution is included for transparency and license compliance. These
 upstream authors are not listed as this repository's contributors unless they
