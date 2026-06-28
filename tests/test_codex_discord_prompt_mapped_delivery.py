@@ -39,7 +39,9 @@ class DepsFixture:
     pending: bool = False
     busy: bool = False
     app_menu_result: bool = False
+    preprocess_result: mapped_delivery.PromptPreprocessResult | None = None
     transport_calls: list[tuple[str, str | None]] = field(default_factory=list)
+    marked_discord_origin_prompts: list[tuple[str | None, str]] = field(default_factory=list)
     deactivated: list[str | None] = field(default_factory=list)
     app_menu_calls: list[tuple[str | None, str, str]] = field(default_factory=list)
     selected_thread_ids: list[str] = field(default_factory=list)
@@ -52,6 +54,15 @@ class DepsFixture:
     def typing(self, channel: FakeChannel, *, context: str) -> FakeTypingContext:
         self.logs.append(f"typing_context={context}")
         return FakeTypingContext(channel)
+
+    def preprocess(self, prompt: str) -> mapped_delivery.PromptPreprocessResult:
+        if self.preprocess_result is None:
+            return mapped_delivery.keep_prompt(prompt)
+        self.logs.append(f"preprocess_prompt={prompt}")
+        return self.preprocess_result
+
+    def mark_discord_origin_prompt(self, target_thread_id: str | None, prompt: str) -> None:
+        self.marked_discord_origin_prompts.append((target_thread_id, prompt))
 
     async def transport(self, prompt: str, target_thread_id: str | None) -> tuple[int, str]:
         self.transport_calls.append((prompt, target_thread_id))
@@ -87,6 +98,8 @@ class DepsFixture:
             prepare_mapped_session_mirror_output=self.prepare,
             set_selected_thread_id=self.set_selected_thread_id,
             channel_typing=self.typing,
+            preprocess_prompt=self.preprocess,
+            mark_recent_discord_origin_prompt=self.mark_discord_origin_prompt,
             run_transport_prompt_no_wait=self.transport,
             send_chunks=self.send_chunks,
             is_delivery_confirmation_timeout=lambda output: self.pending,
@@ -100,6 +113,28 @@ class DepsFixture:
 
 
 class MappedPromptDeliveryTests(unittest.IsolatedAsyncioTestCase):
+    async def test_success_sends_visible_preprocess_line_and_delivers_rewritten_prompt(self) -> None:
+        fixture = DepsFixture(
+            transport_result=(0, "delivered"),
+            preprocess_result=mapped_delivery.PromptPreprocessResult(
+                prompt="Check Discord QA",
+                visible_line="\ubc88\uc5ed: Check Discord QA",
+            ),
+        )
+        channel = FakeChannel()
+
+        result = await mapped_delivery.handle_mapped_prompt_delivery(
+            channel,
+            "$kor \ub514\uc2a4\ucf54\ub4dc QA \ud655\uc778",
+            "thread-1",
+            deps=fixture.build(),
+        )
+
+        self.assertTrue(result.handled)
+        self.assertEqual(channel.messages, ["\ubc88\uc5ed: Check Discord QA"])
+        self.assertEqual(fixture.transport_calls, [("Check Discord QA", "thread-1")])
+        self.assertEqual(fixture.marked_discord_origin_prompts, [("thread-1", "Check Discord QA")])
+
     async def test_prepare_false_returns_not_handled_without_transport(self) -> None:
         fixture = DepsFixture(prepared=False)
         channel = FakeChannel()

@@ -15,6 +15,24 @@ BusyPredicate = Callable[[int, str], bool]
 PendingFormatter = Callable[[str], str]
 OutputTargetDeactivator = Callable[[str | None], None]
 SelectedThreadSetter = Callable[[str], None]
+DiscordOriginPromptMarker = Callable[[str | None, str], None]
+
+
+@dataclass(frozen=True, slots=True)
+class PromptPreprocessResult:
+    prompt: str
+    visible_line: str = ""
+
+
+PromptPreprocessor = Callable[[str], PromptPreprocessResult]
+
+
+def keep_prompt(prompt: str) -> PromptPreprocessResult:
+    return PromptPreprocessResult(prompt=prompt)
+
+
+def ignore_discord_origin_prompt(target_thread_id: str | None, prompt: str) -> None:
+    _ = target_thread_id, prompt
 
 
 class PrepareMappedSessionMirrorOutput(Protocol[ChannelContraT]):
@@ -60,6 +78,8 @@ class MappedPromptDeliveryDeps(Generic[ChannelT]):
     prepare_mapped_session_mirror_output: PrepareMappedSessionMirrorOutput[ChannelT]
     set_selected_thread_id: SelectedThreadSetter
     channel_typing: ChannelTyping[ChannelT]
+    preprocess_prompt: PromptPreprocessor
+    mark_recent_discord_origin_prompt: DiscordOriginPromptMarker
     run_transport_prompt_no_wait: TransportNoWait
     send_chunks: ChunkSender[ChannelT]
     is_delivery_confirmation_timeout: OutputPredicate
@@ -95,8 +115,13 @@ async def handle_mapped_prompt_delivery(
         deps.set_selected_thread_id(target_thread_id)
         deps.log(f"mapped_prompt_selected_thread_synced target={target_thread_id}")
 
+    preprocessed = deps.preprocess_prompt(prompt)
+    if preprocessed.visible_line:
+        await deps.send_chunks(channel, preprocessed.visible_line, context="prompt_preprocess_visible_line")
+        deps.mark_recent_discord_origin_prompt(target_thread_id, preprocessed.prompt)
+
     async with deps.channel_typing(channel, context="ask_transport_no_wait"):
-        exit_code, output = await deps.run_transport_prompt_no_wait(prompt, target_thread_id)
+        exit_code, output = await deps.run_transport_prompt_no_wait(preprocessed.prompt, target_thread_id)
     deps.log(
         f"ask_transport_no_wait_done exit={exit_code} target={target_thread_id or '-'} "
         + f"output_len={deps.format_log_text_len(output)}"

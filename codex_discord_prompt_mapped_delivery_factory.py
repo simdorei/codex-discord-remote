@@ -25,6 +25,10 @@ def make_mapped_prompt_delivery_deps(
     send_codex_app_menu_if_available: discord_prompt_mapped_delivery.AppMenuSender[ChannelT],
     format_log_text_len: discord_prompt_mapped_delivery.TextLenFunc,
     log: discord_prompt_mapped_delivery.LogFunc,
+    preprocess_prompt: discord_prompt_mapped_delivery.PromptPreprocessor = discord_prompt_mapped_delivery.keep_prompt,
+    mark_recent_discord_origin_prompt: discord_prompt_mapped_delivery.DiscordOriginPromptMarker = (
+        discord_prompt_mapped_delivery.ignore_discord_origin_prompt
+    ),
 ) -> discord_prompt_mapped_delivery.MappedPromptDeliveryDeps[ChannelT]:
     async def run_transport_no_wait(prompt: str, target_thread_id: str | None) -> tuple[int, str]:
         return await asyncio.to_thread(
@@ -37,6 +41,8 @@ def make_mapped_prompt_delivery_deps(
         prepare_mapped_session_mirror_output=prepare_mapped_session_mirror_output,
         set_selected_thread_id=set_selected_thread_id,
         channel_typing=channel_typing,
+        preprocess_prompt=preprocess_prompt,
+        mark_recent_discord_origin_prompt=mark_recent_discord_origin_prompt,
         run_transport_prompt_no_wait=run_transport_no_wait,
         send_chunks=send_chunks,
         is_delivery_confirmation_timeout=is_delivery_confirmation_timeout,

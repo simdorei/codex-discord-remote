@@ -34,6 +34,8 @@ class BotPromptTransportRuntimeDeps(Generic[ChannelT, RelayT, SteeringResultT]):
     run_watch_stream: discord_prompt_transport.WatchStream[SteeringResultT, RelayT]
     run_bridge_command_stream: discord_stream.RunBridgeCommandStreamFunc
     ui_fallback_lock: AbstractContextManager[bool]
+    preprocess_prompt: discord_prompt_mapped_delivery.PromptPreprocessor
+    mark_recent_discord_origin_prompt: discord_prompt_mapped_delivery.DiscordOriginPromptMarker
     prepare_mapped_session_mirror_output: discord_prompt_mapped_delivery.PrepareMappedSessionMirrorOutput[ChannelT]
     set_selected_thread_id: discord_prompt_mapped_delivery.SelectedThreadSetter
     channel_typing: discord_prompt_mapped_delivery.ChannelTyping[ChannelT]
@@ -76,6 +78,8 @@ class BotPromptTransportRuntime(Generic[ChannelT, RelayT, SteeringResultT]):
             prepare_mapped_session_mirror_output=self.deps.prepare_mapped_session_mirror_output,
             set_selected_thread_id=self.deps.set_selected_thread_id,
             channel_typing=self.deps.channel_typing,
+            preprocess_prompt=self.deps.preprocess_prompt,
+            mark_recent_discord_origin_prompt=self.deps.mark_recent_discord_origin_prompt,
             run_transport_prompt_no_wait=self.deps.run_transport_prompt_no_wait,
             send_chunks=self.deps.send_chunks,
             is_delivery_confirmation_timeout=self.deps.is_delivery_confirmation_timeout,

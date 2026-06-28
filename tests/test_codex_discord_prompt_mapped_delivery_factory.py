@@ -35,6 +35,7 @@ class FactoryFixture:
     transport_calls: list[tuple[str, str | None]] = field(default_factory=list)
     chunk_calls: list[tuple[FakeChannel, str, str | None]] = field(default_factory=list)
     app_menu_calls: list[tuple[FakeChannel, str | None, str, str]] = field(default_factory=list)
+    marked_discord_origin_prompts: list[tuple[str | None, str]] = field(default_factory=list)
     deactivated: list[str | None] = field(default_factory=list)
     logs: list[str] = field(default_factory=list)
 
@@ -61,6 +62,9 @@ class FactoryFixture:
         context: str | None = None,
     ) -> None:
         self.chunk_calls.append((channel, content, context))
+
+    def mark_recent_discord_origin_prompt(self, target_thread_id: str | None, prompt: str) -> None:
+        self.marked_discord_origin_prompts.append((target_thread_id, prompt))
 
     def is_delivery_confirmation_timeout(self, output: str) -> bool:
         return output == "pending-output"
@@ -101,6 +105,7 @@ class MappedPromptDeliveryFactoryTests(unittest.IsolatedAsyncioTestCase):
         is_selected_thread_busy_error = fixture.is_selected_thread_busy_error
         send_codex_app_menu_if_available = fixture.send_codex_app_menu_if_available
         format_log_text_len = fixture.format_log_text_len
+        mark_recent_discord_origin_prompt = fixture.mark_recent_discord_origin_prompt
         log = fixture.logs.append
 
         deps = factory.make_mapped_prompt_delivery_deps(
@@ -115,6 +120,7 @@ class MappedPromptDeliveryFactoryTests(unittest.IsolatedAsyncioTestCase):
             is_selected_thread_busy_error=is_selected_thread_busy_error,
             send_codex_app_menu_if_available=send_codex_app_menu_if_available,
             format_log_text_len=format_log_text_len,
+            mark_recent_discord_origin_prompt=mark_recent_discord_origin_prompt,
             log=log,
         )
 
@@ -123,6 +129,7 @@ class MappedPromptDeliveryFactoryTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs(deps.channel_typing, typing)
         self.assertIsNot(deps.run_transport_prompt_no_wait, run_transport_sync)
         self.assertIs(deps.send_chunks, send_chunks)
+        self.assertIs(deps.mark_recent_discord_origin_prompt, mark_recent_discord_origin_prompt)
         self.assertIs(deps.is_delivery_confirmation_timeout, is_delivery_confirmation_timeout)
         self.assertIs(deps.format_pending_ask_delivery_output, format_pending_ask_delivery_output)
         self.assertIs(deps.deactivate_session_mirror_output_target, deactivate_session_mirror_output_target)
@@ -134,6 +141,7 @@ class MappedPromptDeliveryFactoryTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(await deps.prepare_mapped_session_mirror_output(channel, "thread-1"))
         deps.set_selected_thread_id("thread-1")
         _ = deps.channel_typing(channel, context="typing-context")
+        deps.mark_recent_discord_origin_prompt("thread-1", "rewritten prompt")
         await deps.send_chunks(channel, "chunk-body", context="chunk-context")
         self.assertTrue(deps.is_delivery_confirmation_timeout("pending-output"))
         self.assertEqual(deps.format_pending_ask_delivery_output("output"), "pending:output")
@@ -155,6 +163,7 @@ class MappedPromptDeliveryFactoryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(fixture.prepared_calls, [(channel, "thread-1")])
         self.assertEqual(fixture.selected_thread_ids, ["thread-1"])
         self.assertEqual(fixture.typing_calls, [(channel, "typing-context")])
+        self.assertEqual(fixture.marked_discord_origin_prompts, [("thread-1", "rewritten prompt")])
         self.assertEqual(fixture.chunk_calls, [(channel, "chunk-body", "chunk-context")])
         self.assertEqual(fixture.deactivated, ["thread-1"])
         self.assertEqual(fixture.app_menu_calls, [(channel, "thread-1", "busy-output", "busy-reason")])

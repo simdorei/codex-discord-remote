@@ -9,6 +9,7 @@ from typing import Protocol, TypeAlias, cast
 import codex_app_server_transport as app_server_transport
 import codex_app_server_transport_delivery as app_server_delivery
 import codex_discord_ask_stream_factory as discord_ask_stream_factory
+import codex_discord_bot_prompt_transport_preprocess as discord_prompt_transport_preprocess
 import codex_discord_bot_prompt_transport_runtime as discord_bot_prompt_transport_runtime
 import codex_discord_prompt_busy_result as discord_prompt_busy_result
 import codex_discord_prompt_mapped_delivery as discord_prompt_mapped_delivery
@@ -60,6 +61,10 @@ class BotPromptTransportAdapterRuntime:
                 ui_fallback_lock=cast(
                     AbstractContextManager[bool],
                     getattr(self.module, "UI_FALLBACK_LOCK"),
+                ),
+                preprocess_prompt=discord_prompt_transport_preprocess.make_prompt_preprocessor(self.module),
+                mark_recent_discord_origin_prompt=discord_prompt_transport_preprocess.make_discord_origin_prompt_marker(
+                    self.module
                 ),
                 prepare_mapped_session_mirror_output=cast(
                     discord_prompt_mapped_delivery.PrepareMappedSessionMirrorOutput[PromptChannel],
