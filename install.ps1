@@ -52,6 +52,9 @@ function Invoke-Python {
     }
 
     & $exe @baseArgs @Arguments
+    if ($LASTEXITCODE -ne 0) {
+        throw "Python command failed with exit code ${LASTEXITCODE}: $exe $($baseArgs + $Arguments -join ' ')"
+    }
 }
 
 function Get-EnvFileValue {
@@ -83,17 +86,12 @@ function Resolve-CodexCommand {
         return $envCodexExe
     }
 
-    $envDesktopExe = Get-EnvFileValue -Name 'CODEX_DESKTOP_EXE'
-    if (-not [string]::IsNullOrWhiteSpace($envDesktopExe)) {
-        return $envDesktopExe
-    }
-
     $codex = Get-Command codex -ErrorAction SilentlyContinue
     if ($codex -ne $null) {
         return $codex.Source
     }
 
-    throw 'Codex CLI was not found. Install Codex Desktop, set CODEX_EXE, or set CODEX_DESKTOP_EXE in .env.'
+    throw 'Codex CLI was not found. Set CODEX_EXE or install/enable the codex command.'
 }
 
 function Invoke-Codex {
@@ -134,6 +132,9 @@ if (-not $SkipEnvFile) {
     }
 }
 
+Write-Output 'Discovering Codex Desktop executable.'
+Invoke-Python -Arguments @('codex_desktop_bridge.py', 'discover_codex')
+
 if ($SkipSteeringConfig) {
     Write-Output 'Skipping steering config: installer no longer changes Codex Desktop follow-up mode.'
 }
@@ -144,11 +145,17 @@ if ($SkipCodexPlugin) {
     if (-not (Test-Path -LiteralPath $PluginMarketplacePath)) {
         throw "Codex plugin marketplace was not found: $PluginMarketplacePath"
     }
-    Write-Output 'Installing Codex plugin marketplace from this repository.'
-    Invoke-Codex -Arguments @('plugin', 'marketplace', 'add', $ScriptDir)
-    Write-Output "Installing Codex plugin: $PluginRef"
-    Invoke-Codex -Arguments @('plugin', 'add', $PluginRef)
+    try {
+        Write-Output 'Installing Codex plugin marketplace from this repository.'
+        Invoke-Codex -Arguments @('plugin', 'marketplace', 'add', $ScriptDir)
+        Write-Output "Installing Codex plugin: $PluginRef"
+        Invoke-Codex -Arguments @('plugin', 'add', $PluginRef)
+    } catch {
+        Write-Output "Codex plugin install skipped: $($_.Exception.Message)"
+        Write-Output 'Bot setup can continue. Install the Codex plugin later after the codex command is available.'
+    }
 }
 
 Write-Output 'Install complete.'
-Write-Output 'Next: edit .env, restart Codex so bundled skills reload, then run .\codex-discord-bot.cmd'
+Write-Output 'Setup required: run .\setup-discord-bot.ps1 and paste the Discord bot token when prompted.'
+Write-Output 'After setup, restart Codex so bundled skills reload, then run .\codex-discord-bot.cmd'

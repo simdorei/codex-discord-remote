@@ -8,6 +8,18 @@ This is not an official OpenAI client, hosted relay, or npm package. It is a loc
 
 This repository is Windows-only in practice. The bot, watchdog, tray launcher, and local Codex Desktop bridge depend on Windows paths, PowerShell scripts, and a signed-in Windows Codex Desktop session.
 
+## First: Get The Bot Token
+
+Do this first, but do not paste the token during installation. Installation can finish without it.
+
+1. Open <https://discord.com/developers/applications>.
+2. Click **New Application**, give it a name, and create it.
+3. Open **Bot** in the left sidebar.
+4. Click **Reset Token** or **Copy Token**.
+5. In **Privileged Gateway Intents**, turn on **Message Content Intent** and save changes.
+
+Keep the token private. After installation, run `.\setup-discord-bot.ps1`; it asks for the token with hidden input, saves it to `.env`, and prints the bot invite link.
+
 ## What It Does
 
 - Maps Discord channels and threads to local Codex threads.
@@ -24,42 +36,10 @@ This repository is Windows-only in practice. The bot, watchdog, tray launcher, a
 - Python 3.11 or newer
 - Git
 - Codex Desktop installed and signed in
-- A Discord bot token
+- A Discord bot token from the first section for post-install setup
 - A Discord server/channel where the bot can read and send messages
 
 The Discord bot needs the message content intent enabled in the Discord Developer Portal if you want plain text messages to be forwarded.
-
-## Create And Invite A Discord Bot
-
-Create the bot in the Discord Developer Portal:
-
-1. Open <https://discord.com/developers/applications>.
-2. Click **New Application**, give it a name, and create it.
-3. Open **Bot** in the left sidebar.
-4. Click **Reset Token** or **Copy Token**, then save that value for `DISCORD_BOT_TOKEN`.
-5. In **Privileged Gateway Intents**, turn on **Message Content Intent** and save changes.
-
-Invite the bot to your server:
-
-1. Open **OAuth2** -> **URL Generator**.
-2. Under **Scopes**, select **bot** and **applications.commands**.
-3. Under **Bot Permissions**, select:
-   - View Channels
-   - Send Messages
-   - Read Message History
-   - Use Slash Commands
-   - Attach Files
-   - Embed Links
-   - Add Reactions
-   - Create Public Threads
-   - Send Messages in Threads
-   - Manage Threads
-4. Copy the generated URL, open it in a browser, choose your server, and authorize the bot.
-
-To fill `.env`, turn on Discord **User Settings** -> **Advanced** -> **Developer Mode**.
-Then right-click the server, channels, threads, and bot user to copy IDs for `DISCORD_GUILD_ID`, `DISCORD_ALLOWED_CHANNEL_IDS`, `DISCORD_STARTUP_CHANNEL_ID`, and `DISCORD_PLAIN_ASK_MENTION_USER_IDS`.
-
-Keep the bot token private. Do not commit `.env`.
 
 ## Install
 
@@ -80,7 +60,8 @@ The installer:
 
 - installs Python dependencies from `requirements.txt`
 - creates `.env` from `.env.example` when `.env` is missing
-- installs the local Codex plugin marketplace and `codex-discord-remote` plugin so bundled skills are available
+- discovers the Codex Desktop executable and writes `CODEX_DESKTOP_EXE` to `.env`
+- installs the local Codex plugin marketplace and `codex-discord-remote` plugin when the `codex` command is available
 
 To preview what the installer would do:
 
@@ -88,7 +69,29 @@ To preview what the installer would do:
 .\install.ps1 -DryRun
 ```
 
-Use `.\install.ps1 -SkipCodexPlugin` only when you want to skip Codex plugin registration.
+If the `codex` command is not available yet, the bot setup still completes and the installer prints the plugin step it skipped. Use `.\install.ps1 -SkipCodexPlugin` only when you want to skip Codex plugin registration explicitly.
+
+## After Install: Add The Token And Invite The Bot
+
+Run the Discord setup script:
+
+```powershell
+.\setup-discord-bot.ps1
+```
+
+The setup script:
+
+- asks for the Discord bot token after installation, with hidden input
+- checks the token with Discord
+- saves `DISCORD_BOT_TOKEN` to `.env`
+- prints an invite link for the bot
+
+Open the invite link, choose your Discord server, and authorize the bot. The invite link adds the bot to a server; it does not choose a single channel. Channel access still depends on Discord channel permissions and the channel IDs in `.env`.
+
+To fill the remaining `.env` values, turn on Discord **User Settings** -> **Advanced** -> **Developer Mode**.
+Then right-click the server, channels, threads, and bot user to copy IDs for `DISCORD_GUILD_ID`, `DISCORD_ALLOWED_CHANNEL_IDS`, `DISCORD_STARTUP_CHANNEL_ID`, and `DISCORD_PLAIN_ASK_MENTION_USER_IDS`.
+
+Keep the bot token private. Do not commit `.env`.
 
 ## Install The Codex Plugin
 
@@ -148,6 +151,7 @@ notepad .env
 Minimum useful settings:
 
 ```dotenv
+# Filled by .\setup-discord-bot.ps1:
 DISCORD_BOT_TOKEN=your_discord_bot_token
 DISCORD_GUILD_ID=your_discord_server_id
 DISCORD_ALLOWED_CHANNEL_IDS=channel_or_thread_id
