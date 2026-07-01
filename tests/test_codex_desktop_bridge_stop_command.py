@@ -118,6 +118,67 @@ class DesktopBridgeStopCommandTests(unittest.TestCase):
             ],
         )
 
+    def test_run_stop_command_surfaces_active_turn_lookup_failure(self) -> None:
+        interrupt_calls: list[tuple[str, str]] = []
+        lines: list[str] = []
+
+        def get_active_turn_id(thread_id: str) -> str | None:
+            _ = thread_id
+            raise RuntimeError("active turn read failed")
+
+        with self.assertRaisesRegex(RuntimeError, "active turn read failed"):
+            stop_command.run_stop_command(
+                _thread(),
+                deps=stop_command.StopCommandDeps(
+                    get_active_turn_id=get_active_turn_id,
+                    interrupt_turn=lambda thread_id, turn_id: interrupt_calls.append((thread_id, turn_id)),
+                    get_thread_label=lambda thread: f"{thread.title} ({thread.id})",
+                    time_now=lambda: 0.0,
+                    sleep=lambda seconds: None,
+                    print_line=lines.append,
+                ),
+            )
+
+        self.assertEqual(interrupt_calls, [])
+        self.assertEqual(lines, ["target_thread: Thread title (thread-1)"])
+
+    def test_run_stop_command_surfaces_confirm_lookup_failure(self) -> None:
+        interrupt_calls: list[tuple[str, str]] = []
+        lines: list[str] = []
+        active_turn_reads: list[str | RuntimeError] = [
+            "turn-1",
+            RuntimeError("confirm read failed"),
+        ]
+
+        def get_active_turn_id(thread_id: str) -> str | None:
+            _ = thread_id
+            value = active_turn_reads.pop(0)
+            if isinstance(value, RuntimeError):
+                raise value
+            return value
+
+        with self.assertRaisesRegex(RuntimeError, "confirm read failed"):
+            stop_command.run_stop_command(
+                _thread(),
+                deps=stop_command.StopCommandDeps(
+                    get_active_turn_id=get_active_turn_id,
+                    interrupt_turn=lambda thread_id, turn_id: interrupt_calls.append((thread_id, turn_id)),
+                    get_thread_label=lambda thread: f"{thread.title} ({thread.id})",
+                    time_now=lambda: 0.0,
+                    sleep=lambda seconds: None,
+                    print_line=lines.append,
+                ),
+            )
+
+        self.assertEqual(interrupt_calls, [("thread-1", "turn-1")])
+        self.assertEqual(
+            lines,
+            [
+                "target_thread: Thread title (thread-1)",
+                "reply_stop_requested: true",
+            ],
+        )
+
     def test_run_stop_command_surfaces_sidecar_failure(self) -> None:
         def interrupt_turn(thread_id: str, turn_id: str) -> object:
             _ = thread_id

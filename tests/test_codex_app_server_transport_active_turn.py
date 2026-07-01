@@ -47,6 +47,20 @@ class PersistentCodexAppServerActiveTurnTests(unittest.TestCase):
         self.assertEqual(len(logs), 1)
         self.assertIn("error_type=ActiveTurnReadTimeout", logs[0])
 
+    def test_get_active_turn_id_or_raise_surfaces_transport_failure(self) -> None:
+        logs: list[str] = []
+        client = transport.PersistentCodexAppServer(log_func=logs.append)
+
+        def read_thread(thread_id: str, *, include_turns: bool = False) -> JsonObject:
+            _ = (thread_id, include_turns)
+            raise CodexAppServerTransportError("transport down")
+
+        with mock.patch.object(client, "read_thread", read_thread):
+            with self.assertRaisesRegex(CodexAppServerTransportError, "transport down"):
+                _ = client.get_active_turn_id_or_raise("thread-1")
+
+        self.assertEqual(logs, [])
+
     def test_get_active_turn_id_surfaces_unexpected_read_failure(self) -> None:
         logs: list[str] = []
         client = transport.PersistentCodexAppServer(log_func=logs.append)

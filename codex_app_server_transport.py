@@ -137,5 +137,15 @@ class PersistentCodexAppServer(ResidentCodexAppServerTransport):
             return None
         return get_in_progress_turn_id(payload)
 
+    def get_active_turn_id_or_raise(self, thread_id: str) -> str | None:
+        with self._lock:
+            turn_id = self._pending.active_turn_id(thread_id)
+            if turn_id:
+                return turn_id
+        payload = self.read_thread(thread_id, include_turns=True).get("thread")
+        if not isinstance(payload, dict):
+            return None
+        return get_in_progress_turn_id(payload)
+
 
 DEFAULT_CLIENT = PersistentCodexAppServer()

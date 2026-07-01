@@ -89,6 +89,12 @@ def get_active_turn_id_via_app_server(thread_id: str) -> str | None:
     return app_server_transport.DEFAULT_CLIENT.get_active_turn_id(thread_id)
 
 
+def get_active_turn_id_via_app_server_or_raise(thread_id: str) -> str | None:
+    import codex_app_server_transport as app_server_transport
+
+    return app_server_transport.DEFAULT_CLIENT.get_active_turn_id_or_raise(thread_id)
+
+
 def interrupt_turn_via_app_server(thread_id: str, turn_id: str) -> object:
     import codex_app_server_transport as app_server_transport
 
