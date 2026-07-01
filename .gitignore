@@ -1,4 +1,13 @@
 .env
+.omo/
+.ruff_cache/
+.codex-remote-attachments/
+.startup-backup/
+HANDOFF.md
+ERROR_HANDOFF.md
+MIRROR.md
+.codex_discord_bot.restart.claimed.*
+..omoulw-loop*
 *.log
 *.log.bak
 *.sqlite

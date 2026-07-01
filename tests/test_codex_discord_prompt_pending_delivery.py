@@ -114,7 +114,7 @@ class AskStreamPendingDeliveryTests(unittest.IsolatedAsyncioTestCase):
                 "ERROR: Prompt delivery could not be confirmed in any recent Codex thread after IPC delivery.",
                 "The transport reported success, but no matching user message was recorded.",
                 "ui_activation: ipc-thread-follower-start-turn",
-                "thread_ref: codex-discord-harness:2",
+                "thread_ref: codex-discord-remote:2",
             ]
         )
 

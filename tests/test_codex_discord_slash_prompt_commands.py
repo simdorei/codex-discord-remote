@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 
 import codex_discord_slash_prompt_commands as slash_prompt_commands
 
@@ -100,15 +100,14 @@ class PromptSlashCommandRegistrationTests(unittest.IsolatedAsyncioTestCase):
             if denied_calls is not None:
                 denied_calls.append(interaction)
 
-        return slash_prompt_commands.PromptSlashCommandDeps(
-            check_allowed=lambda interaction: allowed,
-            send_not_allowed=send_not_allowed,
-            handle_new=self.make_handler("new", events),
-            handle_ask=self.make_handler("ask", events),
-            handle_interview=self.make_handler("interview", events),
-            handle_github_triage=self.make_handler("github_triage", events),
-            handle_maintainer_orchestrator=self.make_handler("maintainer_orchestrator", events),
-        )
+        deps_kwargs = {
+            "check_allowed": lambda interaction: allowed,
+            "send_not_allowed": send_not_allowed,
+            "handle_new": self.make_handler("new", events),
+            "handle_ask": self.make_handler("ask", events),
+            "handle_interview": self.make_handler("interview", events),
+        }
+        return slash_prompt_commands.PromptSlashCommandDeps(**deps_kwargs)
 
     def test_registers_prompt_slash_command_names(self) -> None:
         bot = FakeBot()
@@ -119,12 +118,13 @@ class PromptSlashCommandRegistrationTests(unittest.IsolatedAsyncioTestCase):
             {
                 "ask",
                 "ask_ipc",
-                "github_triage",
                 "interview",
-                "maintainer_orchestrator",
                 "new",
             },
         )
+        dep_fields = {field.name for field in fields(slash_prompt_commands.PromptSlashCommandDeps)}
+        self.assertNotIn("handle_github_triage", dep_fields)
+        self.assertNotIn("handle_maintainer_orchestrator", dep_fields)
 
     async def test_allowed_new_defers_and_calls_new_handler(self) -> None:
         bot = FakeBot()
@@ -159,9 +159,9 @@ class PromptSlashCommandRegistrationTests(unittest.IsolatedAsyncioTestCase):
         slash_prompt_commands.register_prompt_slash_commands(bot, self.make_deps(events=events))
         interaction = FakeInteraction()
 
-        await bot.tree.commands["ask_ipc"](interaction, "legacy prompt")
+        await bot.tree.commands["ask_ipc"](interaction, "$custom hello")
 
-        self.assertEqual(events, [("ask", "legacy prompt")])
+        self.assertEqual(events, [("ask", "$custom hello")])
         self.assertEqual(interaction.response.defer_kwargs, [{"thinking": True}])
 
 

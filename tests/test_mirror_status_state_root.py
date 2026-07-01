@@ -27,6 +27,7 @@ class MirrorStatusStateRootTests(unittest.TestCase):
     def test_build_mirror_check_defaults_to_state_root_threads(self) -> None:
         bridge = bridge_module()
         old_load_user_root_threads = bridge.load_user_root_threads
+        old_filter_mirrorable_threads = bot.filter_mirrorable_threads
         old_filter_app_server_available_threads = bot.filter_app_server_available_threads
         old_status_builder = bot.discord_mirror_status.build_mirror_check
         root_thread = self.make_thread("root-thread", str(Path.cwd()), "root")
@@ -43,6 +44,7 @@ class MirrorStatusStateRootTests(unittest.TestCase):
 
         try:
             bridge.load_user_root_threads = fake_load_user_root_threads
+            bot.filter_mirrorable_threads = lambda threads: list(threads)
             bot.filter_app_server_available_threads = lambda threads: list(threads)
             bot.discord_mirror_status.build_mirror_check = fake_build_mirror_check
 
@@ -53,12 +55,14 @@ class MirrorStatusStateRootTests(unittest.TestCase):
             self.assertEqual(observed_unavailable_counts, [0])
         finally:
             bridge.load_user_root_threads = old_load_user_root_threads
+            bot.filter_mirrorable_threads = old_filter_mirrorable_threads
             bot.filter_app_server_available_threads = old_filter_app_server_available_threads
             bot.discord_mirror_status.build_mirror_check = old_status_builder
 
     def test_build_mirror_check_reports_app_server_unavailable_threads(self) -> None:
         bridge = bridge_module()
         old_load_user_root_threads = bridge.load_user_root_threads
+        old_filter_mirrorable_threads = bot.filter_mirrorable_threads
         old_filter_app_server_available_threads = bot.filter_app_server_available_threads
         old_status_builder = bot.discord_mirror_status.build_mirror_check
         available = self.make_thread("available-thread", str(Path.cwd()), "available")
@@ -73,6 +77,7 @@ class MirrorStatusStateRootTests(unittest.TestCase):
 
         try:
             bridge.load_user_root_threads = lambda limit=0: [available, ghost]
+            bot.filter_mirrorable_threads = lambda threads: list(threads)
             bot.filter_app_server_available_threads = lambda threads: [
                 thread for thread in threads if thread.id == available.id
             ]
@@ -85,6 +90,7 @@ class MirrorStatusStateRootTests(unittest.TestCase):
             self.assertEqual(observed_unavailable_counts, [1])
         finally:
             bridge.load_user_root_threads = old_load_user_root_threads
+            bot.filter_mirrorable_threads = old_filter_mirrorable_threads
             bot.filter_app_server_available_threads = old_filter_app_server_available_threads
             bot.discord_mirror_status.build_mirror_check = old_status_builder
 

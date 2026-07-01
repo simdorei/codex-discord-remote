@@ -173,23 +173,3 @@ class BotSkillSlashAdapterRuntime:
             discord_bot_skill_slash_runtime.BotSkillSlashRuntime[SlashAskSourceMessage],
             getattr(self.module, "SKILL_SLASH_RUNTIME"),
         ).handle_interview(interaction, prompt)
-
-    async def handle_slash_github_triage(
-        self,
-        interaction: discord_slash_prompt_commands.SkillSlashInteraction,
-        prompt: str = "",
-    ) -> None:
-        await cast(
-            discord_bot_skill_slash_runtime.BotSkillSlashRuntime[SlashAskSourceMessage],
-            getattr(self.module, "SKILL_SLASH_RUNTIME"),
-        ).handle_github_triage(interaction, prompt)
-
-    async def handle_slash_maintainer_orchestrator(
-        self,
-        interaction: discord_slash_prompt_commands.SkillSlashInteraction,
-        prompt: str,
-    ) -> None:
-        await cast(
-            discord_bot_skill_slash_runtime.BotSkillSlashRuntime[SlashAskSourceMessage],
-            getattr(self.module, "SKILL_SLASH_RUNTIME"),
-        ).handle_maintainer_orchestrator(interaction, prompt)

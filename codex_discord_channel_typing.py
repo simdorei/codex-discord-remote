@@ -34,6 +34,7 @@ async def channel_typing(
     *,
     context: str = "",
     log_func: LogFunc,
+    raise_start_error: bool = False,
 ):
     typing_factory = getattr(target, "typing", None)
     if not callable(typing_factory):
@@ -49,6 +50,8 @@ async def channel_typing(
         await manager.__aenter__()
     except Exception as exc:  # noqa: BROAD_EXCEPT_OK - Discord typing manager boundary.
         log_func(f"typing_start_failed context={context or '-'} error_type={type(exc).__name__}")
+        if raise_start_error:
+            raise
         yield
         return
 

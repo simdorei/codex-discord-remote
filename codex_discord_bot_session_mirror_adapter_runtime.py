@@ -135,12 +135,14 @@ class BotSessionMirrorAdapterRuntime:
 
     async def send_typing_pulse(self, channel: MessageableChannel, target_thread_id: str, context: str) -> None:
         starter = cast(Callable[..., None], self._module_func("start_session_mirror_typing_pulse"))
+        deactivate = cast(Callable[[str | None], None], self._module_func("deactivate_session_mirror_output_target"))
         starter(
             channel,
             target_thread_id,
             context,
             channel_typing=cast(object, self._module_func("channel_typing")),
             log=cast(Callable[[str], None], self._module_func("log_line")),
+            on_start_error=deactivate,
         )
 
     def get_archive_skip_logged(

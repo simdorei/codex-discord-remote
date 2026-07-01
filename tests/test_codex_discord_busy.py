@@ -54,13 +54,13 @@ class DiscordBusyMessageTests(unittest.TestCase):
     def test_stale_busy_steer_block_message_formats_thread_age_and_prompt(self) -> None:
         output = busy.build_stale_busy_steer_block_message(
             "  please continue  ",
-            target_ref="codex-discord-harness:1",
+            target_ref="codex-discord-remote:1",
             age_seconds=125.0,
             fit_single_message_func=fit_single_message,
         )
 
         self.assertIn("This Codex thread is busy but has not produced new output recently.", output)
-        self.assertIn("thread: codex-discord-harness:1", output)
+        self.assertIn("thread: codex-discord-remote:1", output)
         self.assertIn("last Codex activity: about 2 min ago", output)
         self.assertIn("message: please continue", output)
 

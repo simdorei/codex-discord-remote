@@ -77,6 +77,21 @@ class ChannelTypingTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(logs, ["typing_start_failed context=unit error_type=TypingManagerError"])
 
+    async def test_channel_typing_can_raise_start_failure_after_logging(self) -> None:
+        logs: list[str] = []
+        manager = RecordingTypingManager(fail_enter=True)
+
+        with self.assertRaisesRegex(TypingManagerError, "enter failed"):
+            async with channel_typing.channel_typing(
+                TypingTarget(manager),
+                context="unit",
+                log_func=logs.append,
+                raise_start_error=True,
+            ):
+                pass
+
+        self.assertEqual(logs, ["typing_start_failed context=unit error_type=TypingManagerError"])
+
     async def test_channel_typing_logs_stop_failure_and_preserves_body_exception(self) -> None:
         logs: list[str] = []
         manager = RecordingTypingManager(fail_exit=True)

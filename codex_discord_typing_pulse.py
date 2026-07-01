@@ -7,10 +7,17 @@ from dataclasses import dataclass, field
 from typing import Protocol
 
 LogFunc = Callable[[str], None]
+StartErrorFunc = Callable[[str], None]
 
 
 class ChannelTypingFactory(Protocol):
-    def __call__(self, channel: object, *, context: str) -> AbstractAsyncContextManager[None]: ...
+    def __call__(
+        self,
+        channel: object,
+        *,
+        context: str,
+        raise_start_error: bool = False,
+    ) -> AbstractAsyncContextManager[None]: ...
 
 
 @dataclass(slots=True)
@@ -27,6 +34,7 @@ class TypingPulseRegistry:
         *,
         channel_typing: ChannelTypingFactory,
         log: LogFunc,
+        on_start_error: StartErrorFunc | None = None,
     ) -> None:
         key = _normalize_key(target_thread_id)
         if not key:
@@ -41,6 +49,7 @@ class TypingPulseRegistry:
                 context,
                 channel_typing=channel_typing,
                 log=log,
+                on_start_error=on_start_error,
             )
         )
         self._tasks[key] = task
@@ -52,8 +61,18 @@ class TypingPulseRegistry:
         if not key:
             return
         task = self._tasks.pop(key, None)
-        if task is not None and not task.done():
-            task.cancel()
+        if task is None or task.done():
+            return
+        try:
+            current_task = asyncio.current_task()
+        except RuntimeError:
+            current_task = None
+        if task is not current_task:
+            loop = task.get_loop()
+            if loop.is_running():
+                loop.call_soon_threadsafe(task.cancel)
+            else:
+                task.cancel()
 
     async def _run_pulse(
         self,
@@ -63,16 +82,19 @@ class TypingPulseRegistry:
         *,
         channel_typing: ChannelTypingFactory,
         log: LogFunc,
+        on_start_error: StartErrorFunc | None,
     ) -> None:
         try:
             while True:
-                async with channel_typing(channel, context=context):
+                async with channel_typing(channel, context=context, raise_start_error=True):
                     await asyncio.sleep(max(0.1, self.pulse_seconds))
                 await asyncio.sleep(max(0.0, self.interval_seconds))
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # noqa: BROAD_EXCEPT_OK - background typing pulse boundary.
             log(f"typing_pulse_failed target={key} context={context or '-'} error_type={type(exc).__name__}")
+            if on_start_error is not None:
+                on_start_error(key)
 
     def _drop_done_task(self, key: str, done_task: asyncio.Task[None]) -> None:
         if self._tasks.get(key) is done_task:
@@ -89,6 +111,7 @@ def start_session_mirror_typing_pulse(
     *,
     channel_typing: ChannelTypingFactory,
     log: LogFunc,
+    on_start_error: StartErrorFunc | None = None,
 ) -> None:
     SESSION_MIRROR_TYPING_PULSES.start(
         channel,
@@ -96,6 +119,7 @@ def start_session_mirror_typing_pulse(
         context,
         channel_typing=channel_typing,
         log=log,
+        on_start_error=on_start_error,
     )
 
 

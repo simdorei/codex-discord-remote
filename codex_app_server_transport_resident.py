@@ -76,8 +76,8 @@ class ResidentCodexAppServerTransport:
             "initialize",
             {
                 "clientInfo": {
-                    "name": "codex-discord-harness",
-                    "title": "Codex Discord Harness",
+                    "name": "codex-discord-remote",
+                    "title": "Codex Discord Remote",
                     "version": "1.0",
                 },
                 "capabilities": {"experimentalApi": True},

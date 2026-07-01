@@ -1,12 +1,12 @@
 # Worklog
 
-## 2026-06-05 Discord Harness Stabilization
+## 2026-06-05 Discord Remote Stabilization
 
-Goal: keep this repository as a Discord-only Windows-local Codex frontend harness.
+Goal: keep this repository as a Discord-only Windows-local Codex frontend.
 
 ### Current State
 
-- Repo path: `C:\repos\simdorei\codex-discord-harness`
+- Repo path: `C:\repos\simdorei\codex-discord-remote`
 - Runtime bot is running from this repo.
 - Windows scheduled task `Codex Discord Bot` now points to this repo's watchdog.
 - Runtime startup can also be handled by the user Startup shortcut.
@@ -14,9 +14,9 @@ Goal: keep this repository as a Discord-only Windows-local Codex frontend harnes
 
 ### Product Direction
 
-- Discord-only frontend harness.
+- Discord-only frontend.
 - Windows-local operator tool for a signed-in Codex app/web session.
-- Not a Codex CLI harness.
+- Not a Codex CLI frontend.
 - Not an official mobile Codex replacement.
 
 ### Behavior Decisions
@@ -30,7 +30,7 @@ Goal: keep this repository as a Discord-only Windows-local Codex frontend harnes
 
 ### Validation Completed
 
-Run from `C:\repos\simdorei\codex-discord-harness`:
+Run from `C:\repos\simdorei\codex-discord-remote`:
 
 ```powershell
 py -3 -m unittest tests.test_codex_discord_bot

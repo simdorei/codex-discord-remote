@@ -47,8 +47,6 @@ class BotCommandWiringRuntime:
         self._set("send_skill_slash_interaction_chunks", runtime.send_skill_slash_interaction_chunks)
         self._set("SKILL_SLASH_RUNTIME", runtime.make_skill_slash_runtime())
         self._set("handle_slash_interview", runtime.handle_slash_interview)
-        self._set("handle_slash_github_triage", runtime.handle_slash_github_triage)
-        self._set("handle_slash_maintainer_orchestrator", runtime.handle_slash_maintainer_orchestrator)
         return runtime
 
     def _install_steering_ack(self) -> None:

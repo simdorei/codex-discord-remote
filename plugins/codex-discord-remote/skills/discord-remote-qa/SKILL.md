@@ -1,5 +1,5 @@
 ---
-name: discord-harness-qa
+name: discord-remote-qa
 description: Run focused QA for Codex Discord Remote, especially mirror mapping, context refresh, session mirror cursor priming, steering suppression, archive lock retry, and deployment readiness checks.
 ---
 
@@ -12,14 +12,14 @@ Use this skill when validating local changes or deciding whether the remote is r
 Run:
 
 ```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File plugins/codex-discord-harness/scripts/qa-smoke.ps1
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File plugins/codex-discord-remote/scripts/qa-smoke.ps1
 ```
 
 The smoke script covers:
 
 - `git diff --check`
 - installer dry-run without dependency or `.env` changes
-- Python compile checks for core harness modules
+- Python compile checks for core remote modules
 - the main Discord bot and mirror cleanup test suites
 
 ## Runtime QA Notes

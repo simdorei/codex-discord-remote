@@ -8,8 +8,8 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-PLUGIN_RESTART = ROOT / "plugins" / "codex-discord-harness" / "scripts" / "restart.ps1"
-PLUGIN_STATUS = ROOT / "plugins" / "codex-discord-harness" / "scripts" / "status.ps1"
+PLUGIN_RESTART = ROOT / "plugins" / "codex-discord-remote" / "scripts" / "restart.ps1"
+PLUGIN_STATUS = ROOT / "plugins" / "codex-discord-remote" / "scripts" / "status.ps1"
 WATCHDOG = ROOT / "codex-discord-watchdog.ps1"
 WATCHDOG_RUNTIME = ROOT / "codex-discord-watchdog-runtime.ps1"
 WATCHDOG_RESTART_RUNTIME = ROOT / "codex-discord-watchdog-restart-runtime.ps1"

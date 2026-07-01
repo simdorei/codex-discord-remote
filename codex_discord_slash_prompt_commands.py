@@ -44,8 +44,6 @@ class PromptSlashCommandDeps:
     handle_new: PromptSlashHandler
     handle_ask: PromptSlashHandler
     handle_interview: PromptSlashHandler
-    handle_github_triage: PromptSlashHandler
-    handle_maintainer_orchestrator: PromptSlashHandler
 
 
 def register_prompt_slash_commands(bot: SlashCommandBot, deps: PromptSlashCommandDeps) -> None:
@@ -72,23 +70,6 @@ def register_prompt_slash_commands(bot: SlashCommandBot, deps: PromptSlashComman
     async def slash_interview(interaction: PromptSlashInteraction, prompt: str) -> None:
         await run_prompt_command(interaction, prompt, deps.handle_interview)
 
-    @bot.tree.command(
-        name="github_triage",
-        description="Run GitHub project triage in the mapped Codex thread.",
-    )
-    async def slash_github_triage(
-        interaction: PromptSlashInteraction,
-        prompt: str = "",
-    ) -> None:
-        await run_prompt_command(interaction, prompt, deps.handle_github_triage)
-
-    @bot.tree.command(name="maintainer_orchestrator", description="Run maintainer orchestration.")
-    async def slash_maintainer_orchestrator(
-        interaction: PromptSlashInteraction,
-        prompt: str,
-    ) -> None:
-        await run_prompt_command(interaction, prompt, deps.handle_maintainer_orchestrator)
-
     @bot.tree.command(name="ask_ipc", description="Legacy alias of /ask.")
     async def slash_ask_ipc(interaction: PromptSlashInteraction, prompt: str) -> None:
         await run_prompt_command(interaction, prompt, deps.handle_ask)
@@ -97,7 +78,5 @@ def register_prompt_slash_commands(bot: SlashCommandBot, deps: PromptSlashComman
         slash_new,
         slash_ask,
         slash_interview,
-        slash_github_triage,
-        slash_maintainer_orchestrator,
         slash_ask_ipc,
     )

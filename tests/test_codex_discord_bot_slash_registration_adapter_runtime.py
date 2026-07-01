@@ -129,12 +129,12 @@ class SlashRegistrationAdapterRuntimeTests(unittest.TestCase):
             "handle_slash_new": handle_slash_new,
             "handle_slash_ask": handle_slash_prompt,
             "handle_slash_interview": handle_slash_prompt,
-            "handle_slash_github_triage": handle_slash_prompt,
-            "handle_slash_maintainer_orchestrator": handle_slash_prompt,
             "log_line": lambda message: None,
         }
         for name, value in funcs.items():
             setattr(module, name, value)
+        self.assertFalse(hasattr(module, "handle_slash_github_triage"))
+        self.assertFalse(hasattr(module, "handle_slash_maintainer_orchestrator"))
         return module
 
 

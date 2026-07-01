@@ -4,11 +4,7 @@ from collections.abc import Callable
 
 from codex_discord_prefix_skill_prompts import (
     DEEP_INTERVIEW_PROMPT_HEADER,
-    GITHUB_TRIAGE_PROMPT_HEADER,
-    MAINTAINER_ORCHESTRATOR_PROMPT_HEADER,
     build_deep_interview_prompt,
-    build_github_triage_prompt,
-    build_maintainer_orchestrator_prompt,
 )
 from codex_discord_prefix_prompt_types import (
     AuthorLike,
@@ -21,38 +17,19 @@ from codex_discord_prefix_prompt_types import (
 
 __all__ = [
     "DEEP_INTERVIEW_PROMPT_HEADER",
-    "GITHUB_TRIAGE_PROMPT_HEADER",
-    "MAINTAINER_ORCHESTRATOR_PROMPT_HEADER",
     "ASK_COMMANDS",
     "AuthorLike",
     "ChannelLike",
-    "GITHUB_TRIAGE_COMMANDS",
     "HandlePlainAskFunc",
     "INTERVIEW_COMMANDS",
-    "MAINTAINER_ORCHESTRATOR_COMMANDS",
     "MessageLike",
     "PrefixPromptCommandDeps",
     "SendChunksFunc",
     "build_deep_interview_prompt",
-    "build_github_triage_prompt",
-    "build_maintainer_orchestrator_prompt",
     "handle_prefix_prompt_command",
 ]
 
 INTERVIEW_COMMANDS = {"interview", "deep_interview", "deep-interview"}
-GITHUB_TRIAGE_COMMANDS = {
-    "triage",
-    "github_triage",
-    "github-triage",
-    "github_project_triage",
-    "github-project-triage",
-}
-MAINTAINER_ORCHESTRATOR_COMMANDS = {
-    "orchestrate",
-    "maintainer",
-    "maintainer_orchestrator",
-    "maintainer-orchestrator",
-}
 ASK_COMMANDS = {"ask", "ask_ipc"}
 
 
@@ -73,28 +50,6 @@ async def handle_prefix_prompt_command(
             log_context="prefix_interview",
             requires_request=True,
             build_prompt=build_deep_interview_prompt,
-        )
-    if command in GITHUB_TRIAGE_COMMANDS:
-        return await _handle_skill_prompt_command(
-            command,
-            arg,
-            message,
-            deps=deps,
-            usage_context="prefix_github_triage_usage",
-            log_context="prefix_github_triage",
-            requires_request=False,
-            build_prompt=build_github_triage_prompt,
-        )
-    if command in MAINTAINER_ORCHESTRATOR_COMMANDS:
-        return await _handle_skill_prompt_command(
-            command,
-            arg,
-            message,
-            deps=deps,
-            usage_context="prefix_maintainer_orchestrator_usage",
-            log_context="prefix_maintainer_orchestrator",
-            requires_request=True,
-            build_prompt=build_maintainer_orchestrator_prompt,
         )
     if command in ASK_COMMANDS:
         return await _handle_ask_command(command, arg, message, deps=deps)

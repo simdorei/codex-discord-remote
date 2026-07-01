@@ -80,7 +80,7 @@ class SessionMirrorItemCollectionIntegrationTests(unittest.TestCase):
                     "content": [
                         {
                             "type": "input_text",
-                            "text": "# AGENTS.md instructions for C:\\repos\\simdorei\\codex-discord-harness\n\n<INSTRUCTIONS>",
+                            "text": "# AGENTS.md instructions for C:\\repos\\simdorei\\codex-discord-remote\n\n<INSTRUCTIONS>",
                         }
                     ],
                 },

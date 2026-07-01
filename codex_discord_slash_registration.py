@@ -97,8 +97,6 @@ class SlashRegistrationDeps(Generic[BotT, ResolvedInteractionT]):
     handle_slash_new: SlashNewHandler[BotT, ResolvedInteractionT]
     handle_slash_ask: SlashPromptHandler[ResolvedInteractionT]
     handle_slash_interview: SlashPromptHandler[ResolvedInteractionT]
-    handle_slash_github_triage: SlashPromptHandler[ResolvedInteractionT]
-    handle_slash_maintainer_orchestrator: SlashPromptHandler[ResolvedInteractionT]
     log_line: Callable[[str], None]
 
 
@@ -212,18 +210,6 @@ def register_commands(bot: BotT, deps: SlashRegistrationDeps[BotT, ResolvedInter
     ) -> None:
         await deps.handle_slash_interview(deps.require_discord_interaction(interaction), prompt)
 
-    async def handle_prompt_github_triage(
-        interaction: discord_slash_prompt_commands.PromptSlashInteraction,
-        prompt: str,
-    ) -> None:
-        await deps.handle_slash_github_triage(deps.require_discord_interaction(interaction), prompt)
-
-    async def handle_prompt_maintainer_orchestrator(
-        interaction: discord_slash_prompt_commands.PromptSlashInteraction,
-        prompt: str,
-    ) -> None:
-        await deps.handle_slash_maintainer_orchestrator(deps.require_discord_interaction(interaction), prompt)
-
     discord_slash_prompt_commands.register_prompt_slash_commands(
         slash_bot,
         discord_slash_prompt_commands.PromptSlashCommandDeps(
@@ -232,7 +218,5 @@ def register_commands(bot: BotT, deps: SlashRegistrationDeps[BotT, ResolvedInter
             handle_new=handle_prompt_new,
             handle_ask=handle_prompt_ask,
             handle_interview=handle_prompt_interview,
-            handle_github_triage=handle_prompt_github_triage,
-            handle_maintainer_orchestrator=handle_prompt_maintainer_orchestrator,
         ),
     )

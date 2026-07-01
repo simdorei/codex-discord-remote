@@ -89,6 +89,7 @@ class BotSessionRunnerWiringRuntime:
         self._set("prepare_prefix_session_mirror_delegation", runtime.prepare_prefix_session_mirror_delegation)
 
     def _install_prefix_command_runtime(self) -> None:
+        host_reboot_allowed_user_ids_configured = bool(discord_runtime_config.get_discord_allowed_user_ids())
         runtime = cast(
             discord_bot_prefix_command_runtime.BotPrefixCommandRuntime[object],
             discord_bot_prefix_command_runtime.BotPrefixCommandRuntime(
@@ -97,6 +98,7 @@ class BotSessionRunnerWiringRuntime:
                     interactive_state_approval=cast(str, getattr(self.module, "INTERACTIVE_STATE_APPROVAL")),
                     qa_commands_enabled=discord_runtime_config.discord_qa_commands_enabled,
                     host_commands_enabled=discord_runtime_config.discord_host_commands_enabled,
+                    host_reboot_allowed_user_ids_configured=lambda: host_reboot_allowed_user_ids_configured,
                     monotonic=time.monotonic,
                 )
             )

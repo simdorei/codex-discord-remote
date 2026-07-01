@@ -38,6 +38,7 @@ class BotPrefixCommandRuntimeDeps:
     interactive_state_approval: str
     qa_commands_enabled: Callable[[], bool]
     host_commands_enabled: Callable[[], bool]
+    host_reboot_allowed_user_ids_configured: Callable[[], bool]
     monotonic: Callable[[], float]
 
 
@@ -165,6 +166,7 @@ class BotPrefixCommandRuntime(Generic[BotT]):
                 getattr(module, "run_prefix_discord_new_thread"),
             ),
             host_commands_enabled=self.deps.host_commands_enabled,
+            host_reboot_allowed_user_ids_configured=self.deps.host_reboot_allowed_user_ids_configured,
             log_line=cast(Callable[[str], None], getattr(module, "log_line")),
             monotonic=self.deps.monotonic,
         )

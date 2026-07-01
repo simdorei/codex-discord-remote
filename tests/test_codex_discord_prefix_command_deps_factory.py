@@ -169,6 +169,9 @@ class PrefixCommandDepsFactoryTests(unittest.TestCase):
             _ = (bot, channel_id, prompt)
             return 0, "new"
 
+        def host_reboot_allowed_user_ids_configured() -> bool:
+            return True
+
         factory: deps_factory.PrefixCommandDepsFactory[TestBotLike] = deps_factory.PrefixCommandDepsFactory(
             prompt_send_chunks=send_chunks,
             mirror_send_chunks=send_chunks,
@@ -212,6 +215,7 @@ class PrefixCommandDepsFactoryTests(unittest.TestCase):
             run_discord_button_qa=run_button_qa,
             run_discord_new_thread=run_new_thread,
             host_commands_enabled=lambda: False,
+            host_reboot_allowed_user_ids_configured=host_reboot_allowed_user_ids_configured,
             log_line=lambda line: None,
             monotonic=lambda: 1.0,
         )
@@ -226,6 +230,10 @@ class PrefixCommandDepsFactoryTests(unittest.TestCase):
         self.assertIs(factory.make_prefix_qa_deps().run_discord_button_qa, run_button_qa)
         self.assertIs(factory.make_prefix_new_deps().run_discord_new_thread, run_new_thread)
         self.assertIs(factory.make_prefix_host_deps().send_chunks, send_chunks)
+        self.assertIs(
+            factory.make_prefix_host_deps().host_reboot_allowed_user_ids_configured,
+            host_reboot_allowed_user_ids_configured,
+        )
 
 
 if __name__ == "__main__":

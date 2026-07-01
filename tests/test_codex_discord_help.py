@@ -27,10 +27,15 @@ EXPECTED_SLASH_COMMANDS = {
     "new",
     "ask",
     "interview",
-    "github_triage",
-    "maintainer_orchestrator",
     "ask_ipc",
 }
+
+REMOVED_COMMAND_TOKENS = (
+    "/github_triage",
+    "/maintainer_orchestrator",
+    "!triage",
+    "!orchestrate",
+)
 
 
 class DiscordHelpContractTests(unittest.TestCase):
@@ -72,6 +77,9 @@ class DiscordHelpContractTests(unittest.TestCase):
         self.assertEqual(command_names, EXPECTED_SLASH_COMMANDS | {"qa_buttons"})
         self.assertIn("slash_new_dispatch", source)
         self.assertIn("slash_new_done", source)
+
+        for token in REMOVED_COMMAND_TOKENS:
+            self.assertNotIn(token, help_text)
 
     def test_qa_commands_are_hidden_unless_enabled(self) -> None:
         self.assertNotIn("!qa buttons", bot.build_help())

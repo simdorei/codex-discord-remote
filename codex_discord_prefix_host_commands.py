@@ -8,6 +8,9 @@ from typing import Final, Protocol
 
 HOST_REBOOT_COMMANDS: Final[frozenset[str]] = frozenset({"reset_pc", "reboot_pc", "reset_computer"})
 REBOOT_DELAY_SECONDS: Final[int] = 5
+REBOOT_ALLOWLIST_REQUIRED_MESSAGE: Final[str] = (
+    "Host reboot refused. DISCORD_ALLOWED_USER_IDS must contain at least one allowed Discord user ID."
+)
 
 
 class ChannelLike(Protocol):
@@ -36,6 +39,7 @@ class HostRebootFunc(Protocol):
 class PrefixHostCommandDeps:
     send_chunks: SendChunksFunc
     host_commands_enabled: Callable[[], bool]
+    host_reboot_allowed_user_ids_configured: Callable[[], bool]
     request_host_reboot: HostRebootFunc
     log_line: Callable[[str], None]
 
@@ -73,6 +77,13 @@ async def handle_prefix_host_command(
         return True
     if arg.strip().lower() != "confirm":
         _ = await deps.send_chunks(message.channel, "Usage: !reset_pc confirm", context="prefix_reset_pc_usage")
+        return True
+    if not deps.host_reboot_allowed_user_ids_configured():
+        _ = await deps.send_chunks(
+            message.channel,
+            REBOOT_ALLOWLIST_REQUIRED_MESSAGE,
+            context="prefix_reset_pc_allowlist_required",
+        )
         return True
     try:
         deps.request_host_reboot(delay_seconds=REBOOT_DELAY_SECONDS)

@@ -64,6 +64,7 @@ class PrefixCommandDepsFactory(Generic[BotT]):
     run_discord_button_qa: qa_command.RunDiscordButtonQaFunc[BotT]
     run_discord_new_thread: new_command.RunDiscordNewThreadFunc
     host_commands_enabled: Callable[[], bool]
+    host_reboot_allowed_user_ids_configured: Callable[[], bool]
     log_line: Callable[[str], None]
     monotonic: Callable[[], float]
 
@@ -159,6 +160,7 @@ class PrefixCommandDepsFactory(Generic[BotT]):
         return host_commands.PrefixHostCommandDeps(
             send_chunks=self.host_send_chunks,
             host_commands_enabled=self.host_commands_enabled,
+            host_reboot_allowed_user_ids_configured=self.host_reboot_allowed_user_ids_configured,
             request_host_reboot=host_commands.request_windows_reboot,
             log_line=self.log_line,
         )

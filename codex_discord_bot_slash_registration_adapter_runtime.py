@@ -113,14 +113,6 @@ class BotSlashRegistrationAdapterRuntime:
                     discord_slash_registration.SlashPromptHandler[object],
                     self._module_func("handle_slash_interview"),
                 ),
-                handle_slash_github_triage=cast(
-                    discord_slash_registration.SlashPromptHandler[object],
-                    self._module_func("handle_slash_github_triage"),
-                ),
-                handle_slash_maintainer_orchestrator=cast(
-                    discord_slash_registration.SlashPromptHandler[object],
-                    self._module_func("handle_slash_maintainer_orchestrator"),
-                ),
                 log_line=cast(Callable[[str], None], self._module_func("log_line")),
             ),
         )

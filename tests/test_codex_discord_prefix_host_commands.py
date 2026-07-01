@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import os
 import unittest
 from dataclasses import dataclass, field
+from unittest.mock import patch
 
 import codex_discord_prefix_host_commands as host_commands
 
@@ -23,6 +25,7 @@ class HostCommandFixture:
     logs: list[str] = field(default_factory=list)
     reboot_error: OSError | None = None
     host_commands_enabled: bool = True
+    host_reboot_allowed_user_ids_configured: bool = True
 
     async def send_chunks(
         self,
@@ -43,6 +46,7 @@ class HostCommandFixture:
         return host_commands.PrefixHostCommandDeps(
             send_chunks=self.send_chunks,
             host_commands_enabled=lambda: self.host_commands_enabled,
+            host_reboot_allowed_user_ids_configured=lambda: self.host_reboot_allowed_user_ids_configured,
             request_host_reboot=self.request_host_reboot,
             log_line=self.logs.append,
         )
@@ -97,6 +101,29 @@ class PrefixHostCommandTests(unittest.IsolatedAsyncioTestCase):
             fixture.sent,
             ["222:prefix_reset_pc_requested:PC reset requested. Windows will reboot in 5 seconds."],
         )
+
+    async def test_reset_pc_confirm_refuses_when_injected_allowed_user_ids_are_empty(self) -> None:
+        fixture = HostCommandFixture(
+            host_commands_enabled=True,
+            host_reboot_allowed_user_ids_configured=False,
+        )
+
+        with patch.dict(
+            os.environ,
+            {"DISCORD_ENABLE_HOST_COMMANDS": "0", "DISCORD_ALLOWED_USER_IDS": ""},
+            clear=True,
+        ):
+            handled = await host_commands.handle_prefix_host_command(
+                "reset_pc",
+                "confirm",
+                FakeMessage(),
+                deps=fixture.deps(),
+            )
+
+        self.assertTrue(handled)
+        self.assertEqual(fixture.reboot_calls, [])
+        self.assertEqual(len(fixture.sent), 1)
+        self.assertIn("DISCORD_ALLOWED_USER_IDS", fixture.sent[0])
 
     async def test_reset_pc_reports_reboot_failure(self) -> None:
         fixture = HostCommandFixture(reboot_error=OSError("shutdown denied"))

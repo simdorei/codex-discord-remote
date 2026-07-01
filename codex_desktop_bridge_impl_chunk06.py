@@ -165,8 +165,11 @@ def command_stop(args: argparse.Namespace) -> int:
 
 def _make_stop_command_deps() -> stop_command.StopCommandDeps:
     return stop_command.StopCommandDeps(
-        interrupt_thread_via_sidecar=sidecar_thread.interrupt_thread_via_sidecar,
+        get_active_turn_id=sidecar_thread.get_active_turn_id_via_app_server,
+        interrupt_turn=sidecar_thread.interrupt_turn_via_app_server,
         get_thread_label=get_thread_label,
+        time_now=time.time,
+        sleep=time.sleep,
         print_line=print,
     )
 

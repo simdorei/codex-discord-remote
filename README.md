@@ -1,6 +1,8 @@
 # Codex Discord Remote
 
-A Discord remote for the Codex app, for when opening the app is too much work.
+A local Discord remote for Codex Desktop and the Codex app.
+
+Use this repo when you want to operate Codex Desktop from Discord on your own Windows machine.
 
 This is not an official OpenAI client, hosted relay, or npm package. It is a local operator tool for a Windows machine where Codex Desktop is already installed, signed in, awake, and trusted.
 
@@ -68,13 +70,6 @@ git clone https://github.com/simdorei/codex-discord-remote.git
 cd codex-discord-remote
 ```
 
-During the rename transition, the older repository URL may still be used:
-
-```powershell
-git clone https://github.com/simdorei/codex-discord-harness.git
-cd codex-discord-harness
-```
-
 Run the installer:
 
 ```powershell
@@ -85,7 +80,7 @@ The installer:
 
 - installs Python dependencies from `requirements.txt`
 - creates `.env` from `.env.example` when `.env` is missing
-- installs the local Codex plugin marketplace and `codex-discord-harness` plugin so bundled skills are available
+- installs the local Codex plugin marketplace and `codex-discord-remote` plugin so bundled skills are available
 
 To preview what the installer would do:
 
@@ -98,11 +93,11 @@ Use `.\install.ps1 -SkipCodexPlugin` only when you want to skip Codex plugin reg
 ## Install The Codex Plugin
 
 The repository includes a local Codex plugin marketplace at `.agents\plugins\marketplace.json`.
-The installer registers it automatically. The plugin id remains `codex-discord-harness` for compatibility. To install or reinstall the plugin manually from the repository root:
+The installer registers it automatically. To install or reinstall the plugin manually from the repository root:
 
 ```powershell
 codex plugin marketplace add .
-codex plugin add codex-discord-harness@codex-discord-harness
+codex plugin add codex-discord-remote@codex-discord-remote
 ```
 
 Confirm that Codex can see the marketplace and plugin:
@@ -114,8 +109,8 @@ codex plugin list
 
 Expected entries include:
 
-- marketplace: `codex-discord-harness`
-- plugin: `codex-discord-harness@codex-discord-harness`
+- marketplace: `codex-discord-remote`
+- plugin: `codex-discord-remote@codex-discord-remote`
 
 Restart Codex after installing the plugin so the bundled skills are loaded into new sessions.
 
@@ -126,13 +121,13 @@ Restart Codex after installing the plugin so the bundled skills are loaded into 
 - [Daily workflow and Discord commands](docs/operations.md)
 - [Steering, transport, validation, and project position](docs/policies-validation.md)
 
-Bundled workflow skills include `deep-interview`, `github-project-triage`, and `maintainer-orchestrator`.
+Bundled workflow skills include `deep-interview`.
 
 Registered Discord slash commands:
 
-- /help, /list, /archived_list, /use, /status, /settings, /doctor, /where, /context, /usage, /runners, /retract, /mirror_check, /bridge_sync, /new, /ask, /interview, /github_triage, /maintainer_orchestrator (legacy alias: /ask_ipc)
+- /help, /list, /archived_list, /use, /status, /settings, /doctor, /where, /context, /usage, /runners, /retract, /mirror_check, /bridge_sync, /new, /ask, /interview (legacy alias: /ask_ipc)
 
-Common `!` commands include `!help`, `!list`, `!archived_list`, `!use`, `!open`, `!open_abort`, `!stop`, `!status`, `!settings`, `!setting`, `!doctor`, `!discover_codex`, `!restart_codex`, `!reset_pc`, `!chatid`, `!where`, `!context`, `!usage`, `!runners`, `!resources`, `!system`, `!retract`, `!bridge`, `!mirror`, `!approval`, `!archive`, `!delete_archive`, `!confirm_delete_archive`, `!new`, `!ask`, `!interview`, `!triage`, and `!orchestrate`.
+Common `!` commands include `!help`, `!list`, `!archived_list`, `!use`, `!open`, `!open_abort`, `!stop`, `!status`, `!settings`, `!setting`, `!doctor`, `!discover_codex`, `!restart_codex`, `!reset_pc`, `!chatid`, `!where`, `!context`, `!usage`, `!runners`, `!resources`, `!system`, `!retract`, `!bridge`, `!mirror`, `!approval`, `!archive`, `!delete_archive`, `!confirm_delete_archive`, `!new`, `!ask`, and `!interview`.
 
 Numeric refs follow the same DB-root numbering as `!list`.
 
@@ -170,7 +165,7 @@ DISCORD_ENABLE_ATTACHMENTS=1
 Notes:
 
 - `DISCORD_ALLOWED_CHANNEL_IDS` is a comma-separated allowlist.
-- `DISCORD_ALLOWED_USER_IDS` is optional. Leave it empty for all users in allowed channels.
+- `DISCORD_ALLOWED_USER_IDS` is a comma-separated list of Discord user IDs, not channel or server IDs. For normal bot use it is optional; host reboot commands such as `!reset_pc confirm` require both `DISCORD_ENABLE_HOST_COMMANDS=1` and a narrow `DISCORD_ALLOWED_USER_IDS` allowlist of trusted Discord user IDs.
 - `DISCORD_PLAIN_ASK_MENTION_USER_IDS` lets plain messages require an explicit mention outside mapped mirror threads.
 - In mapped mirror threads, plain messages route to that mapped Codex thread.
 - Messages authored by other bots are ignored unless they explicitly mention the Codex bridge user. Restart-check handoff packets are a narrow exception: `ACTION: RESTART-CHECK / HANDOFF` can route when it includes an explicit `codex/session` thread id.

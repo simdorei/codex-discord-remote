@@ -1,5 +1,5 @@
 ---
-name: discord-harness
+name: discord-remote
 description: Operate the local Codex Discord Remote runtime, including status checks, restarts, archive-lock recovery, mirror mapping checks, and log triage. Use when the user asks about this Discord bridge, bot health, missing Discord messages, archive failures, mirror routing, or local deployment.
 ---
 
@@ -13,15 +13,15 @@ Use this skill for this repository and its local Windows bot runtime.
 - Keep Discord bot tokens, guild IDs, channel IDs, and user-specific paths in `.env` or local state; do not hard-code secrets into plugin files.
 - Prefer repo scripts and tests over ad hoc shell commands.
 - Do not open extra Discord Web tabs for QA when an existing usable Discord tab/window is available.
-- The plugin also packages `deep-interview`, `github-project-triage`, and `maintainer-orchestrator` skills.
-- The bot exposes `/interview` and `!interview` for the clarification-first workflow, `/github_triage` and `!triage` for GitHub queue triage, and `/maintainer_orchestrator` and `!orchestrate` for maintainer orchestration.
+- The plugin also packages `deep-interview` and `discord-remote-qa` skills.
+- The bot exposes `/interview` and `!interview` for the clarification-first workflow.
 
 ## First Checks
 
 1. Inspect the working tree before changing files:
    `git status --short --branch`
 2. Check bot runtime status:
-   `powershell.exe -NoProfile -ExecutionPolicy Bypass -File plugins/codex-discord-harness/scripts/status.ps1`
+   `powershell.exe -NoProfile -ExecutionPolicy Bypass -File plugins/codex-discord-remote/scripts/status.ps1`
 3. For archive lock failures, confirm the lock/process state before killing processes.
 4. For mirror or steering issues, inspect `codex_discord_bot.log` and the mapped thread state before changing code.
 
@@ -34,15 +34,12 @@ Use this skill for this repository and its local Windows bot runtime.
 
 ## Useful Scripts
 
-- `scripts/status.ps1`: show git state, bot PID/process status, recent bot log tail, and bridge thread list.
-- `scripts/restart.ps1`: request bot restart through `.codex_discord_bot.restart` and run the watchdog.
-- `scripts/qa-smoke.ps1`: run deploy-oriented smoke checks.
+- `plugins/codex-discord-remote/scripts/status.ps1`: show git state, bot PID/process status, recent bot log tail, and bridge thread list.
+- `plugins/codex-discord-remote/scripts/restart.ps1`: request bot restart through `.codex_discord_bot.restart` and run the watchdog.
+- `plugins/codex-discord-remote/scripts/qa-smoke.ps1`: run deploy-oriented smoke checks.
 
 ## Interview Workflow
 
 - For vague, broad, risky, or under-specified implementation requests, use the packaged `deep-interview` skill before coding.
 - In Discord, use `/interview <request>` or `!interview <request>` to wrap the request in the Gajae-style clarification prompt.
 - The interview must stop at a pending-approval ticket and wait for explicit user approval before implementation.
-- GitHub triage and maintainer orchestration are separate workflows, not interview aliases.
-- In Discord, use `/github_triage [prompt]` or `!triage [request]` to run the vendored `github-project-triage` skill.
-- In Discord, use `/maintainer_orchestrator <prompt>` or `!orchestrate <request>` to run the vendored `maintainer-orchestrator` skill.

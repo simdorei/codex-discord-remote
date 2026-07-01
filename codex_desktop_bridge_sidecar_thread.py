@@ -83,6 +83,18 @@ def interrupt_thread_via_sidecar(thread: ThreadInfo) -> bool:
         return True
 
 
+def get_active_turn_id_via_app_server(thread_id: str) -> str | None:
+    import codex_app_server_transport as app_server_transport
+
+    return app_server_transport.DEFAULT_CLIENT.get_active_turn_id(thread_id)
+
+
+def interrupt_turn_via_app_server(thread_id: str, turn_id: str) -> object:
+    import codex_app_server_transport as app_server_transport
+
+    return app_server_transport.DEFAULT_CLIENT.interrupt_turn(thread_id, turn_id)
+
+
 def is_transient_sidecar_attach_error(exc: Exception) -> bool:
     detail = str(exc).lower()
     return "thread not found" in detail or "no rollout found" in detail

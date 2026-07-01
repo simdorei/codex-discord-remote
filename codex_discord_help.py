@@ -22,8 +22,6 @@ def build_help(*, qa_commands_enabled: bool, host_commands_enabled: bool = False
         "/new",
         "/ask",
         "/interview",
-        "/github_triage",
-        "/maintainer_orchestrator",
         "/ask_ipc",
     ]
     lines = [
@@ -58,8 +56,6 @@ def build_help(*, qa_commands_enabled: bool, host_commands_enabled: bool = False
         "!new <prompt>  (create a new Codex thread with the first prompt)",
         "!ask <prompt>",
         "!interview <request>  (Gajae-style clarify before implementation)",
-        "!triage [request]  (GitHub issue/PR triage workflow)",
-        "!orchestrate <request>  (maintainer orchestrator workflow)",
         "",
         "Plain messages in mirrored Discord threads are sent to that Codex thread.",
     ]

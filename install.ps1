@@ -16,7 +16,7 @@ $RequirementsPath = Join-Path $ScriptDir 'requirements.txt'
 $EnvExamplePath = Join-Path $ScriptDir '.env.example'
 $EnvPath = Join-Path $ScriptDir '.env'
 $PluginMarketplacePath = Join-Path $ScriptDir '.agents\plugins\marketplace.json'
-$PluginRef = 'codex-discord-harness@codex-discord-harness'
+$PluginRef = 'codex-discord-remote@codex-discord-remote'
 
 function Resolve-PythonCommand {
     if (-not [string]::IsNullOrWhiteSpace($PythonExe)) {

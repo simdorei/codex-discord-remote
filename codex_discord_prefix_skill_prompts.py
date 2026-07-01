@@ -26,36 +26,7 @@ Codex port rules:
 
 User request:
 """
-GITHUB_TRIAGE_PROMPT_HEADER = """Run the packaged Codex skill `$codex-discord-harness:github-project-triage`.
-
-Rules:
-- Do not run deep-interview for this request.
-- Use the vendored upstream `github-project-triage` workflow.
-- If the named skill is not available in this Codex session, report that exact skill-loading failure and stop.
-- Respect the upstream authorization boundaries. Triage does not authorize implementation, push, merge, close, release, or delegated execution unless the user explicitly asks for that action.
-
-User request:
-"""
-MAINTAINER_ORCHESTRATOR_PROMPT_HEADER = """Run the packaged Codex skill `$codex-discord-harness:maintainer-orchestrator`.
-
-Rules:
-- Do not run deep-interview for this request.
-- Use the vendored upstream `maintainer-orchestrator` workflow.
-- If the named skill is not available in this Codex session, report that exact skill-loading failure and stop.
-- Respect the upstream authorization boundaries. Monitoring, delegation, implementation, push, merge, close, release, and worker-thread changes each require explicit user authorization from the current conversation.
-
-User request:
-"""
 
 
 def build_deep_interview_prompt(user_request: str) -> str:
     return DEEP_INTERVIEW_PROMPT_HEADER + str(user_request or "").strip()
-
-
-def build_github_triage_prompt(user_request: str) -> str:
-    request = str(user_request or "").strip() or "triage the current GitHub project"
-    return GITHUB_TRIAGE_PROMPT_HEADER + request
-
-
-def build_maintainer_orchestrator_prompt(user_request: str) -> str:
-    return MAINTAINER_ORCHESTRATOR_PROMPT_HEADER + str(user_request or "").strip()

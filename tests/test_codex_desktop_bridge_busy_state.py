@@ -1,6 +1,7 @@
 # pyright: reportAny=false, reportAttributeAccessIssue=false, reportPrivateUsage=false, reportUnknownArgumentType=false, reportUnknownLambdaType=false, reportUnknownMemberType=false, reportUnknownVariableType=false, reportUnusedCallResult=false
 from __future__ import annotations
 
+from collections.abc import Iterator
 import json
 import os
 import tempfile
@@ -9,7 +10,7 @@ from pathlib import Path
 
 import codex_desktop_bridge as bridge
 import codex_desktop_bridge_busy_state as busy_state
-from codex_session_events import iter_session_events
+from codex_session_events import JsonEvent, iter_session_events
 from codex_thread_models import ThreadInfo
 
 
@@ -112,6 +113,30 @@ class BusyStateEdgeTests(unittest.TestCase):
                 "waiting-input",
             )
 
+    def test_is_thread_busy_scans_events_without_materializing_iterator(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            session_path = Path(temp_dir) / "streaming.jsonl"
+            session_path.write_text("", encoding="utf-8")
+
+            def iter_events(path: Path) -> Iterator[JsonEvent]:
+                self.assertEqual(path, session_path)
+                return NoLengthHintEvents([_task_started(), _user_message()])
+
+            deps = _deps()
+            streaming_deps = busy_state.BusyStateDeps(
+                iter_session_events=iter_events,
+                time_now=deps.time_now,
+                get_orphan_task_started_grace_seconds=deps.get_orphan_task_started_grace_seconds,
+                get_stale_busy_session_seconds=deps.get_stale_busy_session_seconds,
+                get_pending_interactive_state_from_session=deps.get_pending_interactive_state_from_session,
+                load_recent_threads=deps.load_recent_threads,
+                make_sidecar=deps.make_sidecar,
+                get_sidecar_thread_status_type=deps.get_sidecar_thread_status_type,
+                ensure_thread_loaded_via_sidecar=deps.ensure_thread_loaded_via_sidecar,
+            )
+
+            self.assertTrue(busy_state.is_thread_busy(session_path, deps=streaming_deps))
+
 
 class FakeSidecar:
     def __init__(self, responses: dict[str, busy_state.JsonObject], *, loaded: dict[str, busy_state.JsonObject] | None = None) -> None:
@@ -137,6 +162,20 @@ class FailingSidecar:
 
     def close(self) -> None:
         pass
+
+
+class NoLengthHintEvents:
+    def __init__(self, events: list[JsonEvent]) -> None:
+        self._events = iter(events)
+
+    def __iter__(self) -> Iterator[JsonEvent]:
+        return self
+
+    def __next__(self) -> JsonEvent:
+        return next(self._events)
+
+    def __length_hint__(self) -> int:
+        raise AssertionError("session events were materialized")
 
 
 def _deps(

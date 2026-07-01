@@ -20,9 +20,11 @@ py -3 .\send_discord_attachment.py --channel-id 123456789012345678 --content "ìž
 4. Send messages in a mapped Discord thread to operate the matching Codex thread.
 5. When Codex asks for approval/input/steering, answer from the Discord controls.
 
+Use this repo when you want to operate Codex Desktop or the Codex app from Discord on your own Windows machine.
+
 Registered Discord slash commands:
 
-- /help, /list, /archived_list, /use, /status, /settings, /doctor, /where, /context, /usage, /runners, /retract, /mirror_check, /bridge_sync, /new, /ask, /interview, /github_triage, /maintainer_orchestrator (legacy alias: /ask_ipc)
+- /help, /list, /archived_list, /use, /status, /settings, /doctor, /where, /context, /usage, /runners, /retract, /mirror_check, /bridge_sync, /new, /ask, /interview (legacy alias: /ask_ipc)
 
 Common `!` commands:
 
@@ -39,7 +41,7 @@ Common `!` commands:
 | `!doctor` | Runs Discord and local bridge diagnostics. |
 | `!discover_codex` | Shows the detected Codex Desktop path. |
 | `!restart_codex` | Restarts Codex Desktop through the local bridge. |
-| `!reset_pc confirm` | Requests a Windows host reboot from the Discord bot process. Disabled unless `DISCORD_ENABLE_HOST_COMMANDS=1`. |
+| `!reset_pc confirm` | Requests a Windows host reboot from the Discord bot process. Disabled unless `DISCORD_ENABLE_HOST_COMMANDS=1` and `DISCORD_ALLOWED_USER_IDS` is a narrow allowlist of trusted Discord user IDs. |
 | `!chatid` | Prints Discord guild/channel/user ids for configuration. |
 | `!where` | Shows the Codex thread mapped to the current Discord channel. |
 | `!context [all]` | Shows context usage for the current thread, or mapped threads with `all`. |
@@ -58,9 +60,6 @@ Common `!` commands:
 | `!new <prompt>` | Creates a new Codex thread with the first prompt. |
 | `!ask <prompt>` | Sends a prompt to the mapped Codex thread, or selected thread outside mirrors. |
 | `!interview <request>` | Sends the request as a Gajae-style deep interview so Codex confirms work structure, scores ambiguity, and waits for approval before implementation. |
-| `!triage [request]` | Sends the request to the vendored `github-project-triage` skill. Without a request, it asks for current GitHub project triage. |
-| `!orchestrate <request>` | Sends the request to the vendored `maintainer-orchestrator` skill. Requires an explicit request because it coordinates higher-risk maintainer workflows. |
-
 ## Interop With Other Discord Tools
 
 This remote is intentionally Discord-native, so it can share a Discord thread with other bots or command-line agents that post through Discord.
@@ -77,6 +76,7 @@ Safety behavior:
 - Other bot messages are accepted only when they explicitly mention the Codex bridge user.
 - Restart-check handoff packets are accepted without the bridge mention only when they are `ACTION: RESTART-CHECK / HANDOFF` packets and include an explicit `codex/session` id.
 - The bridge ignores its own messages to avoid loops.
+- `DISCORD_ALLOWED_USER_IDS` contains Discord user IDs, not channel or server IDs. Host reboot commands require both `DISCORD_ENABLE_HOST_COMMANDS=1` and a narrow `DISCORD_ALLOWED_USER_IDS` allowlist.
 
 Explicit routing:
 

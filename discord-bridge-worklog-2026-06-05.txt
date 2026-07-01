@@ -11,7 +11,7 @@ Codex 앱의 동시 입력 처리 방식이 서로 겹친 것이었다.
 1. Telegram 잔재 정리
 - Discord bot 런타임이 codex-telegram 쪽 watchdog을 다시 보지 않도록 scheduled task를 새 repo로 옮겼다.
 - Telegram repo에 남아 있던 Discord bot 잔여 런타임이 다시 살아나는 경로를 차단했다.
-- 현재 Discord bot은 codex-discord-harness repo 기준으로 독립 실행된다.
+- 현재 Discord bot은 codex-discord-remote repo 기준으로 독립 실행된다.
 
 2. 스레드별 매칭과 미러링
 - Discord project channel / thread와 Codex app thread를 mirror DB로 매칭한다.
@@ -45,7 +45,7 @@ Codex 앱의 동시 입력 처리 방식이 서로 겹친 것이었다.
 - git diff --check OK
 - Discord startup channel, project channel, thread probe OK
 - taxlab thread 미러링 OK
-- harness thread 미러링 OK
+- remote thread 미러링 OK
 - Discord 이미지 첨부 저장 및 로컬 열람 OK
 - 텍스트 첨부 저장 및 preview 생성 smoke QA OK
 

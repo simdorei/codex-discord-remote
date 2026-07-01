@@ -125,7 +125,7 @@ class MappedPromptDeliveryTests(unittest.IsolatedAsyncioTestCase):
 
         result = await mapped_delivery.handle_mapped_prompt_delivery(
             channel,
-            "$kor \ub514\uc2a4\ucf54\ub4dc QA \ud655\uc778",
+            "$custom \ub514\uc2a4\ucf54\ub4dc QA \ud655\uc778",
             "thread-1",
             deps=fixture.build(),
         )

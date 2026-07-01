@@ -114,11 +114,7 @@ EXPORTS_BY_MODULE: Mapping[str, tuple[str, ...]] = {
     "codex_discord_persistent_busy_choice": ("make_persistent_busy_source_message",),
     "codex_discord_prefix_skill_prompts": (
         "DEEP_INTERVIEW_PROMPT_HEADER",
-        "GITHUB_TRIAGE_PROMPT_HEADER",
-        "MAINTAINER_ORCHESTRATOR_PROMPT_HEADER",
         "build_deep_interview_prompt",
-        "build_github_triage_prompt",
-        "build_maintainer_orchestrator_prompt",
     ),
     "codex_discord_prompt_busy_result": ("build_codex_app_busy_retry_message",),
     "codex_discord_prompt_pending_delivery": ("format_pending_ask_delivery_output",),

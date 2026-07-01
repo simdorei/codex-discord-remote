@@ -35,40 +35,6 @@ class BotSkillSlashRuntime(Generic[SourceMessageT]):
             ),
         )
 
-    async def handle_github_triage(
-        self,
-        interaction: discord_slash_prompt_commands.SkillSlashInteraction,
-        prompt: str = "",
-    ) -> None:
-        await self._handle(
-            interaction,
-            prompt,
-            spec=discord_slash_prompt_commands.SkillSlashPromptSpec(
-                title="GitHub triage",
-                log_name="slash_github_triage",
-                ack_message="GitHub triage handling posted in this channel.",
-                ack_context="github_triage_posted",
-                build_prompt=discord_prefix_prompt_commands.build_github_triage_prompt,
-            ),
-        )
-
-    async def handle_maintainer_orchestrator(
-        self,
-        interaction: discord_slash_prompt_commands.SkillSlashInteraction,
-        prompt: str,
-    ) -> None:
-        await self._handle(
-            interaction,
-            prompt,
-            spec=discord_slash_prompt_commands.SkillSlashPromptSpec(
-                title="Maintainer orchestrator",
-                log_name="slash_maintainer_orchestrator",
-                ack_message="Maintainer orchestrator handling posted in this channel.",
-                ack_context="maintainer_orchestrator_posted",
-                build_prompt=discord_prefix_prompt_commands.build_maintainer_orchestrator_prompt,
-            ),
-        )
-
     async def _handle(
         self,
         interaction: discord_slash_prompt_commands.SkillSlashInteraction,

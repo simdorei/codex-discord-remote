@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass, replace
 from pathlib import Path
 import time
@@ -53,11 +53,10 @@ def session_file_age_seconds(
 
 def is_thread_busy(session_path: Path, *, deps: BusySessionDeps) -> bool:
     try:
-        events = tuple(deps.iter_session_events(session_path))
+        activity = _scan_busy_session_activity(deps.iter_session_events(session_path))
     except OSError:
         return False
 
-    activity = _scan_busy_session_activity(events)
     last_done = max(activity.last_complete, activity.last_final, activity.last_aborted)
     if activity.last_started <= last_done:
         return False
@@ -76,7 +75,7 @@ def is_thread_busy(session_path: Path, *, deps: BusySessionDeps) -> bool:
     return True
 
 
-def _scan_busy_session_activity(events: tuple[JsonEvent, ...]) -> _BusySessionActivity:
+def _scan_busy_session_activity(events: Iterable[JsonEvent]) -> _BusySessionActivity:
     activity = _BusySessionActivity()
     for index, event in enumerate(events):
         payload = _busy_event_payload(event)

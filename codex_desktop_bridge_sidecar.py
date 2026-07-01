@@ -68,7 +68,11 @@ class CodexAppServerSidecar:
         self._last_close_errors: tuple[OSError, ...] = ()
         self._start_stdout_drain_thread()
         if initialize:
-            self._initialize_app_server()
+            try:
+                self._initialize_app_server()
+            except (OSError, RuntimeError):
+                self.close()
+                raise
 
     def _start_stdout_drain_thread(self) -> None:
         self._stdout_thread: sidecar_io.StdoutThread = sidecar_io.start_stdout_drain_thread(
