@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+import sys
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -30,6 +31,9 @@ def is_windowsapps_path(path: Path | str) -> bool:
 
 
 def run_powershell_capture(command: str) -> str:
+    if os.name != "nt":
+        return ""
+
     powershell_exe = (
         shutil.which("powershell.exe")
         or shutil.which("powershell")
@@ -48,7 +52,32 @@ def run_powershell_capture(command: str) -> str:
     return completed.stdout.strip()
 
 
+def run_macos_capture(args: list[str]) -> str:
+    if sys.platform != "darwin":
+        return ""
+    completed = subprocess.run(
+        args,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+    if completed.returncode != 0:
+        return ""
+    return completed.stdout.strip()
+
+
 def detect_running_codex_app_server_executable() -> tuple[Path | None, str]:
+    if sys.platform == "darwin":
+        for line in run_macos_capture(["ps", "-axo", "comm=,args="]).splitlines():
+            if " app-server" not in line:
+                continue
+            command = line.split(None, 1)[0]
+            candidate = normalize_executable_candidate(command)
+            if candidate is not None:
+                return (candidate, "ps:running-app-server")
+        return (None, "")
+
     process_path = normalize_executable_candidate(
         run_powershell_capture(
             "Get-CimInstance Win32_Process " +
@@ -71,6 +100,13 @@ def iter_codex_app_server_bin_candidates() -> Iterator[tuple[str, Path]]:
         fallback_root = Path.home() / "AppData" / "Local" / "OpenAI" / "Codex" / "bin"
         if all(str(fallback_root).lower() != str(root).lower() for root in roots):
             roots.append(fallback_root)
+    if sys.platform == "darwin":
+        roots.extend(
+            [
+                Path.home() / "Library" / "Application Support" / "OpenAI" / "Codex" / "bin",
+                Path("/Applications/Codex.app/Contents/Resources/bin"),
+            ]
+        )
 
     seen: set[str] = set()
     candidates: list[Path] = []

@@ -2,11 +2,11 @@
 
 A local Discord remote for Codex Desktop and the Codex app.
 
-Use this repo when you want to operate Codex Desktop from Discord on your own Windows machine.
+Use this repo when you want to operate Codex Desktop from Discord on your own Windows or macOS machine.
 
-This is not an official OpenAI client, hosted relay, or npm package. It is a local operator tool for a Windows machine where Codex Desktop is already installed, signed in, awake, and trusted.
+This is not an official OpenAI client, hosted relay, or npm package. It is a local operator tool for a machine where Codex Desktop is already installed, signed in, awake, and trusted.
 
-This repository is Windows-only in practice. The bot, watchdog, tray launcher, and local Codex Desktop bridge depend on Windows paths, PowerShell scripts, and a signed-in Windows Codex Desktop session.
+Windows uses Win32 and PowerShell UI Automation. macOS uses AppleScript/System Events and the standard `open`, `pbcopy`, `pbpaste`, `osascript`, and `mdfind` tools. On macOS, grant Accessibility permission to the terminal app that runs the bot so it can focus Codex Desktop, click controls, and send keyboard shortcuts.
 
 ## First: Get The Bot Token
 
@@ -18,7 +18,7 @@ Do this first, but do not paste the token during installation. Installation can 
 4. Click **Reset Token** or **Copy Token**.
 5. In **Privileged Gateway Intents**, turn on **Message Content Intent** and save changes.
 
-Keep the token private. After installation, run `.\setup-discord-bot.ps1`; it asks for the token with hidden input, saves it to `.env`, and prints the bot invite link.
+Keep the token private. After installation, run `.\setup-discord-bot.ps1` on Windows or `./setup-discord-bot.sh` on macOS; it asks for the token with hidden input, saves it to `.env`, and prints the bot invite link.
 
 ## What It Does
 
@@ -32,7 +32,7 @@ Keep the token private. After installation, run `.\setup-discord-bot.ps1`; it as
 
 ## Requirements
 
-- Windows 10/11
+- Windows 10/11 or macOS
 - Python 3.11 or newer
 - Git
 - Codex Desktop installed and signed in
@@ -50,10 +50,16 @@ git clone https://github.com/simdorei/codex-discord-remote.git
 cd codex-discord-remote
 ```
 
-Run the installer:
+Run the installer on Windows:
 
 ```powershell
 .\install.ps1
+```
+
+On macOS:
+
+```sh
+./install.sh
 ```
 
 The installer:
@@ -63,13 +69,25 @@ The installer:
 - discovers the Codex Desktop executable and writes `CODEX_DESKTOP_EXE` to `.env`
 - installs the local Codex plugin marketplace and `codex-discord-remote` plugin when the `codex` command is available
 
-To preview what the installer would do:
+To preview what the installer would do on Windows:
 
 ```powershell
 .\install.ps1 -DryRun
 ```
 
-If the `codex` command is not available yet, the bot setup still completes and the installer prints the plugin step it skipped. Use `.\install.ps1 -SkipCodexPlugin` only when you want to skip Codex plugin registration explicitly.
+On macOS:
+
+```sh
+./install.sh --dry-run
+```
+
+If the `codex` command is not available yet, the bot setup still completes and the installer prints the plugin step it skipped. Use `.\install.ps1 -SkipCodexPlugin` on Windows or `./install.sh --skip-codex-plugin` on macOS only when you want to skip Codex plugin registration explicitly.
+
+On macOS, if the shell scripts are not executable because the repository was copied from a zip file, run:
+
+```sh
+chmod +x ./install.sh ./setup-discord-bot.sh ./codex-discord-bot.sh
+```
 
 ## After Install: Add The Token And Invite The Bot
 
@@ -77,6 +95,12 @@ Run the Discord setup script:
 
 ```powershell
 .\setup-discord-bot.ps1
+```
+
+On macOS:
+
+```sh
+./setup-discord-bot.sh
 ```
 
 The setup script:
@@ -92,6 +116,18 @@ To fill the remaining `.env` values, turn on Discord **User Settings** -> **Adva
 Then right-click the server, channels, threads, and bot user to copy IDs for `DISCORD_GUILD_ID`, `DISCORD_ALLOWED_CHANNEL_IDS`, `DISCORD_STARTUP_CHANNEL_ID`, and `DISCORD_PLAIN_ASK_MENTION_USER_IDS`.
 
 Keep the bot token private. Do not commit `.env`.
+
+Start the bot on Windows:
+
+```powershell
+.\codex-discord-bot.cmd
+```
+
+On macOS:
+
+```sh
+./codex-discord-bot.sh
+```
 
 ## Install The Codex Plugin
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 import ctypes
 import ctypes.wintypes as wt
 import json
+import os
 import time
 from typing import cast
 
@@ -72,44 +73,54 @@ class IPCShortWriteError(IPCPipeError):
             f"Short IPC write to {CODEX_IPC_PIPE}: expected {expected_size}, got {actual_size}."
         )
 
-kernel32 = ctypes.windll.kernel32
+kernel32 = ctypes.windll.kernel32 if os.name == "nt" else None
 
-kernel32.CreateFileW.argtypes = [
-    wt.LPCWSTR,
-    wt.DWORD,
-    wt.DWORD,
-    wt.LPVOID,
-    wt.DWORD,
-    wt.DWORD,
-    wt.HANDLE,
-]
-kernel32.CreateFileW.restype = wt.HANDLE
-kernel32.ReadFile.argtypes = [wt.HANDLE, wt.LPVOID, wt.DWORD, ctypes.POINTER(wt.DWORD), wt.LPVOID]
-kernel32.ReadFile.restype = wt.BOOL
-kernel32.WriteFile.argtypes = [wt.HANDLE, wt.LPCVOID, wt.DWORD, ctypes.POINTER(wt.DWORD), wt.LPVOID]
-kernel32.WriteFile.restype = wt.BOOL
-kernel32.CloseHandle.argtypes = [wt.HANDLE]
-kernel32.CloseHandle.restype = wt.BOOL
-kernel32.PeekNamedPipe.argtypes = [
-    wt.HANDLE,
-    wt.LPVOID,
-    wt.DWORD,
-    ctypes.POINTER(wt.DWORD),
-    ctypes.POINTER(wt.DWORD),
-    ctypes.POINTER(wt.DWORD),
-]
-kernel32.PeekNamedPipe.restype = wt.BOOL
+if kernel32 is not None:
+    kernel32.CreateFileW.argtypes = [
+        wt.LPCWSTR,
+        wt.DWORD,
+        wt.DWORD,
+        wt.LPVOID,
+        wt.DWORD,
+        wt.DWORD,
+        wt.HANDLE,
+    ]
+    kernel32.CreateFileW.restype = wt.HANDLE
+    kernel32.ReadFile.argtypes = [wt.HANDLE, wt.LPVOID, wt.DWORD, ctypes.POINTER(wt.DWORD), wt.LPVOID]
+    kernel32.ReadFile.restype = wt.BOOL
+    kernel32.WriteFile.argtypes = [wt.HANDLE, wt.LPCVOID, wt.DWORD, ctypes.POINTER(wt.DWORD), wt.LPVOID]
+    kernel32.WriteFile.restype = wt.BOOL
+    kernel32.CloseHandle.argtypes = [wt.HANDLE]
+    kernel32.CloseHandle.restype = wt.BOOL
+    kernel32.PeekNamedPipe.argtypes = [
+        wt.HANDLE,
+        wt.LPVOID,
+        wt.DWORD,
+        ctypes.POINTER(wt.DWORD),
+        ctypes.POINTER(wt.DWORD),
+        ctypes.POINTER(wt.DWORD),
+    ]
+    kernel32.PeekNamedPipe.restype = wt.BOOL
+
+
+def require_kernel32() -> ctypes.CDLL:
+    if kernel32 is None:
+        raise IPCPipeError("Codex IPC pipe is only implemented on Windows.")
+    return kernel32
 
 
 def get_last_win_error_message() -> str:
-    code = int(kernel32.GetLastError())
+    code = int(require_kernel32().GetLastError())
     if not code:
         return "unknown Windows error"
     return f"{ctypes.WinError(code)}"
 
 
 def open_codex_ipc_pipe() -> int:
-    handle = kernel32.CreateFileW(
+    if os.name != "nt":
+        raise IPCPipeOpenError("Windows named-pipe IPC is only implemented on Windows.")
+
+    handle = require_kernel32().CreateFileW(
         CODEX_IPC_PIPE,
         GENERIC_READ | GENERIC_WRITE,
         0,
@@ -124,8 +135,9 @@ def open_codex_ipc_pipe() -> int:
 
 
 def peek_pipe_bytes_available(handle: int) -> int:
+    win32 = require_kernel32()
     total_available = wt.DWORD(0)
-    ok = kernel32.PeekNamedPipe(handle, None, 0, None, ctypes.byref(total_available), None)
+    ok = win32.PeekNamedPipe(handle, None, 0, None, ctypes.byref(total_available), None)
     if not ok:
         raise IPCPipePeekError(get_last_win_error_message())
     return int(total_available.value)
@@ -141,10 +153,11 @@ def wait_for_pipe_bytes(handle: int, min_bytes: int, timeout_sec: float) -> None
 
 
 def read_pipe_exact(handle: int, size: int, timeout_sec: float) -> bytes:
+    win32 = require_kernel32()
     wait_for_pipe_bytes(handle, size, timeout_sec)
     buffer = ctypes.create_string_buffer(size)
     bytes_read = wt.DWORD(0)
-    ok = kernel32.ReadFile(handle, buffer, size, ctypes.byref(bytes_read), None)
+    ok = win32.ReadFile(handle, buffer, size, ctypes.byref(bytes_read), None)
     if not ok:
         raise IPCPipeReadError(get_last_win_error_message())
     if int(bytes_read.value) != size:
@@ -165,11 +178,12 @@ def read_ipc_message(handle: int, timeout_sec: float) -> JsonObject:
 
 
 def write_ipc_message(handle: int, payload: JsonObject) -> None:
+    win32 = require_kernel32()
     data = json.dumps(payload, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
     frame = len(data).to_bytes(4, "little") + data
     buffer = ctypes.create_string_buffer(frame)
     bytes_written = wt.DWORD(0)
-    ok = kernel32.WriteFile(handle, buffer, len(frame), ctypes.byref(bytes_written), None)
+    ok = win32.WriteFile(handle, buffer, len(frame), ctypes.byref(bytes_written), None)
     if not ok:
         raise IPCPipeWriteError(get_last_win_error_message())
     if int(bytes_written.value) != len(frame):
@@ -177,4 +191,4 @@ def write_ipc_message(handle: int, payload: JsonObject) -> None:
 
 
 def close_ipc_pipe(handle: int) -> None:
-    _ = kernel32.CloseHandle(handle)
+    _ = require_kernel32().CloseHandle(handle)

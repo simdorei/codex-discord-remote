@@ -11,6 +11,7 @@ from unittest.mock import patch
 import codex_desktop_bridge as bridge
 import codex_desktop_bridge_desktop_process as desktop_process
 import codex_desktop_bridge_desktop_process_scripts as desktop_process_scripts
+import codex_desktop_bridge_desktop_resolver as desktop_resolver
 
 
 class DesktopProcessTests(unittest.TestCase):
@@ -183,6 +184,32 @@ class DesktopProcessTests(unittest.TestCase):
             )
 
         self.assertEqual(candidates, [(f"default:{first.parent}", first), (f"default:{second.parent}", second)])
+
+    def test_macos_app_bundle_resolution_and_start_stop_commands(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            app_bundle = Path(temp_dir) / "Codex.app"
+            executable = app_bundle / "Contents" / "MacOS" / "Codex"
+            executable.parent.mkdir(parents=True)
+            executable.write_text("", encoding="utf-8")
+
+            with patch.object(desktop_resolver.sys, "platform", "darwin"):
+                self.assertEqual(desktop_resolver.normalize_executable_candidate(str(app_bundle)), executable)
+
+            run_calls: list[list[str]] = []
+            start_calls: list[dict[str, object]] = []
+            started = cast(subprocess.Popen[str], object())
+            deps = _deps(
+                run=lambda args, **_kwargs: run_calls.append(args)
+                or subprocess.CompletedProcess(args=args, returncode=0, stdout="", stderr=""),
+                start=lambda args, **kwargs: start_calls.append({"args": args, **kwargs}) or started,
+            )
+
+            with patch.object(desktop_process.sys, "platform", "darwin"):
+                self.assertEqual(desktop_process.stop_codex_desktop_processes(executable, deps=deps), (True, "-"))
+                self.assertIs(desktop_process.start_codex_desktop_process(executable, deps=deps), started)
+
+            self.assertEqual(run_calls[0], ["osascript", "-e", 'tell application "Codex" to quit'])
+            self.assertEqual(start_calls[0]["args"], ["open", str(app_bundle)])
 
 
 def _deps(

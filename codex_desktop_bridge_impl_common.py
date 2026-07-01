@@ -129,7 +129,12 @@ import codex_desktop_bridge_use_report as use_report
 
 import codex_desktop_bridge_window_focus as window_focus
 
-import codex_desktop_bridge_windows_input as windows_input
+if os.name == "nt":
+    import codex_desktop_bridge_windows_input as windows_input
+elif sys.platform == "darwin":
+    import codex_desktop_bridge_macos_input as windows_input
+else:
+    import codex_desktop_bridge_unsupported_input as windows_input
 
 from codex_bridge_state import JsonObject, JsonValue
 

@@ -1,2 +1,2 @@
-# Runtime target: Windows + Python 3.11 or newer.
+# Runtime target: Windows and macOS local Codex Desktop control.
 discord.py>=2.7,<3

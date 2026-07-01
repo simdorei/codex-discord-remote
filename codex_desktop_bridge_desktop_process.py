@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+import sys
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -116,7 +117,7 @@ def ensure_codex_desktop_executable_configured(
     if discovered_path is None:
         raise RuntimeError(
             "Codex Desktop executable could not be discovered. "
-            + "Set CODEX_DESKTOP_EXE in .env or install Codex Desktop in the default Windows location."
+            + "Set CODEX_DESKTOP_EXE in .env or install Codex Desktop in the default platform location."
         )
     updated = deps.persist_env_value(bridge_env_path, env_name, str(discovered_path))
     deps.set_environ_value(env_name, str(discovered_path))
@@ -128,6 +129,19 @@ def stop_codex_desktop_processes(
     *,
     deps: DesktopProcessDeps,
 ) -> tuple[bool, str]:
+    if sys.platform == "darwin":
+        app_name = _macos_app_name_for_executable(executable_path)
+        completed = deps.run_process(
+            ["osascript", "-e", f'tell application "{app_name}" to quit'],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            creationflags=0,
+        )
+        details = "\n".join(part for part in [completed.stdout.strip(), completed.stderr.strip()] if part).strip()
+        return (completed.returncode == 0, details or "-")
+
     taskkill = deps.which("taskkill") or "taskkill"
     completed = deps.run_process(
         [taskkill, "/IM", executable_path.name, "/F"],
@@ -143,6 +157,19 @@ def stop_codex_desktop_processes(
 
 
 def stop_codex_app_server_processes() -> tuple[bool, str]:
+    if sys.platform == "darwin":
+        completed = subprocess.run(
+            ["pkill", "-f", "codex.*app-server"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+        details = "\n".join(part for part in [completed.stdout.strip(), completed.stderr.strip()] if part).strip()
+        if completed.returncode == 1:
+            return (False, details or "no matching app-server processes")
+        return (completed.returncode == 0, details or "-")
+
     if os.name != "nt":
         return (False, "skipped: app-server process stop is only implemented on Windows")
 
@@ -167,6 +194,16 @@ def start_codex_desktop_process(
 ) -> subprocess.Popen[str]:
     creationflags = 0
     creationflags |= deps.create_new_process_group
+    if sys.platform == "darwin":
+        app_bundle = _macos_app_bundle_for_executable(executable_path)
+        if app_bundle is not None:
+            return deps.start_process(
+                ["open", str(app_bundle)],
+                cwd=str(app_bundle.parent),
+                close_fds=True,
+                creationflags=0,
+                text=True,
+            )
     return deps.start_process(
         [str(executable_path)],
         cwd=str(executable_path.parent),
@@ -174,3 +211,17 @@ def start_codex_desktop_process(
         creationflags=creationflags,
         text=True,
     )
+
+
+def _macos_app_bundle_for_executable(executable_path: Path) -> Path | None:
+    for parent in [executable_path, *executable_path.parents]:
+        if parent.suffix.lower() == ".app":
+            return parent
+    return None
+
+
+def _macos_app_name_for_executable(executable_path: Path) -> str:
+    app_bundle = _macos_app_bundle_for_executable(executable_path)
+    if app_bundle is not None:
+        return app_bundle.stem
+    return executable_path.stem
