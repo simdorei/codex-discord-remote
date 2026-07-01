@@ -1,103 +1,130 @@
 # Codex Discord Remote
 
-A local Discord remote for Codex Desktop and the Codex app.
+Local Discord remote control for Codex Desktop.
 
-Use this repo when you want to operate Codex Desktop from Discord on your own Windows or macOS machine.
+This repo lets a Discord bot send messages into local Codex Desktop threads, mirror Codex replies back to Discord, and expose common Codex operations through Discord commands. It is not an official OpenAI client, hosted relay, or npm package. It runs on the user's own machine, where Codex Desktop is already installed, signed in, awake, and trusted.
 
-This is not an official OpenAI client, hosted relay, or npm package. It is a local operator tool for a machine where Codex Desktop is already installed, signed in, awake, and trusted.
+## AI Agent Brief
 
-Windows uses Win32 and PowerShell UI Automation. macOS uses AppleScript/System Events and the standard `open`, `pbcopy`, `pbpaste`, `osascript`, and `mdfind` tools. On macOS, grant Accessibility permission to the terminal app that runs the bot so it can focus Codex Desktop, click controls, and send keyboard shortcuts.
+- Product: local bridge between Discord and Codex Desktop.
+- Main user: a person who wants to operate their local Codex app from Discord.
+- Runtime model: Discord bot process plus local Codex Desktop/app-server access.
+- Primary platform: Windows 10/11.
+- macOS status: native code path exists and macOS GitHub Actions smoke passes, but real GUI control requires Accessibility permission and may still need manual Mac QA on the target machine.
+- Linux status: not a desktop-control target.
+- Secrets: `.env` contains the Discord bot token and must not be committed.
+- Start here when changing code: `codex_discord_bot.py`, `codex_desktop_bridge.py`, `codex_app_server_transport.py`, and the tests matching the touched file.
 
-## First: Get The Bot Token
+## Support Matrix
 
-Do this first, but do not paste the token during installation. Installation can finish without it.
+| Platform | Status | Desktop control method | Launcher |
+| --- | --- | --- | --- |
+| Windows 10/11 | Primary supported path | Win32 APIs, PowerShell UI Automation, Codex app-server | `.\codex-discord-bot.cmd` |
+| macOS | Beta path | AppleScript/System Events, `open`, `pbcopy`, `pbpaste`, Codex app-server | `./codex-discord-bot.sh` |
+| Linux | Not supported for Codex Desktop control | None | None |
 
-1. Open <https://discord.com/developers/applications>.
-2. Click **New Application**, give it a name, and create it.
-3. Open **Bot** in the left sidebar.
-4. Click **Reset Token** or **Copy Token**.
-5. In **Privileged Gateway Intents**, turn on **Message Content Intent** and save changes.
-
-Keep the token private. After installation, run `.\setup-discord-bot.ps1` on Windows or `./setup-discord-bot.sh` on macOS; it asks for the token with hidden input, saves it to `.env`, and prints the bot invite link.
+On macOS, grant Accessibility permission to the terminal app that runs the bot. Without it, System Events cannot focus Codex Desktop, click controls, or send keyboard shortcuts.
 
 ## What It Does
 
 - Maps Discord channels and threads to local Codex threads.
-- Sends plain Discord messages directly into the mapped Codex thread.
-- Mirrors Codex approval/input/follow-up choices back into Discord when the app exposes them.
-- Mirrors Codex app image and structured file outputs back to Discord as real attachments.
-- Avoids Discord-side global busy prompts while serializing cross-target Codex app turns so one thread does not abort another.
-- Supports slash commands, `!` commands, startup diagnostics, history polling, and a tray/watchdog launcher.
-- Can be used alongside other Discord bots or Discord-based CLIs. For example, you can ask a separate Discord CLI/bot to do work in a project thread, then mention the Codex bridge in the same Discord thread to inspect, steer, or continue the local Codex-side work.
+- Sends plain Discord messages into the mapped Codex thread.
+- Mirrors Codex text, approvals, input prompts, image outputs, and structured file outputs back to Discord.
+- Serializes cross-target Codex app turns so one Discord thread does not accidentally abort another.
+- Supports slash commands, `!` prefix commands, startup diagnostics, history polling, and Windows tray/watchdog launchers.
+- Can run beside other Discord bots. If another bot works in the same Discord thread, mention this bridge when you want local Codex to inspect, steer, or continue that work.
+
+## Setup Overview
+
+1. Create a Discord bot token.
+2. Clone this repo.
+3. Run the platform installer.
+4. Run the token setup script after installation.
+5. Invite the bot to the Discord server.
+6. Fill the remaining `.env` Discord IDs.
+7. Restart Codex Desktop.
+8. Start the bot launcher.
+
+The installer can run without the Discord token. Token setup is intentionally post-install so the token is pasted only into the local `.env` file.
 
 ## Requirements
 
-- Windows 10/11 or macOS
-- Python 3.11 or newer
-- Git
-- Codex Desktop installed and signed in
-- A Discord bot token from the first section for post-install setup
-- A Discord server/channel where the bot can read and send messages
+- Windows 10/11 or macOS.
+- Python 3.11 or newer.
+- Git.
+- Codex Desktop installed and signed in.
+- Discord bot token.
+- Discord server and channel/thread IDs where the bot may read and send messages.
+- Discord Developer Portal `Message Content Intent` enabled if plain text messages should be forwarded.
 
-The Discord bot needs the message content intent enabled in the Discord Developer Portal if you want plain text messages to be forwarded.
+## Create The Discord Bot Token
+
+1. Open <https://discord.com/developers/applications>.
+2. Click **New Application**, name it, and create it.
+3. Open **Bot** in the left sidebar.
+4. Click **Reset Token** or **Copy Token**.
+5. In **Privileged Gateway Intents**, enable **Message Content Intent**.
+6. Save changes.
+
+Keep the token private. Do not paste it into chat, commits, GitHub Actions, or issue comments.
 
 ## Install
 
-Clone the repository:
+Clone:
 
 ```powershell
 git clone https://github.com/simdorei/codex-discord-remote.git
 cd codex-discord-remote
 ```
 
-Run the installer on Windows:
+Windows install:
 
 ```powershell
 .\install.ps1
 ```
 
-On macOS:
-
-```sh
-./install.sh
-```
-
-The installer:
-
-- installs Python dependencies from `requirements.txt`
-- creates `.env` from `.env.example` when `.env` is missing
-- discovers the Codex Desktop executable and writes `CODEX_DESKTOP_EXE` to `.env`
-- installs the local Codex plugin marketplace and `codex-discord-remote` plugin when the `codex` command is available
-
-To preview what the installer would do on Windows:
+Windows dry run:
 
 ```powershell
 .\install.ps1 -DryRun
 ```
 
-On macOS:
+macOS install:
+
+```sh
+./install.sh
+```
+
+macOS dry run:
 
 ```sh
 ./install.sh --dry-run
 ```
 
-If the `codex` command is not available yet, the bot setup still completes and the installer prints the plugin step it skipped. Use `.\install.ps1 -SkipCodexPlugin` on Windows or `./install.sh --skip-codex-plugin` on macOS only when you want to skip Codex plugin registration explicitly.
-
-On macOS, if the shell scripts are not executable because the repository was copied from a zip file, run:
+If macOS shell scripts are not executable because the repo was copied from a zip file:
 
 ```sh
 chmod +x ./install.sh ./setup-discord-bot.sh ./codex-discord-bot.sh
 ```
 
-## After Install: Add The Token And Invite The Bot
+Installer behavior:
 
-Run the Discord setup script:
+- Installs Python dependencies from `requirements.txt`.
+- Creates `.env` from `.env.example` if `.env` does not exist.
+- Discovers Codex Desktop and writes `CODEX_DESKTOP_EXE` to `.env`.
+- Registers the local Codex plugin marketplace when the `codex` command is available.
+
+If the `codex` command is not available, setup still continues. Install the plugin later or set `CODEX_EXE` in `.env`.
+
+## Add Token And Invite Bot
+
+Windows:
 
 ```powershell
 .\setup-discord-bot.ps1
 ```
 
-On macOS:
+macOS:
 
 ```sh
 ./setup-discord-bot.sh
@@ -105,128 +132,218 @@ On macOS:
 
 The setup script:
 
-- asks for the Discord bot token after installation, with hidden input
+- asks for the Discord bot token with hidden input
 - checks the token with Discord
 - saves `DISCORD_BOT_TOKEN` to `.env`
-- prints an invite link for the bot
+- prints a Discord invite URL
 
-Open the invite link, choose your Discord server, and authorize the bot. The invite link adds the bot to a server; it does not choose a single channel. Channel access still depends on Discord channel permissions and the channel IDs in `.env`.
+Open the invite URL, choose the Discord server, and authorize the bot. The invite adds the bot to a server; channel access still depends on Discord permissions and `.env` channel IDs.
 
-To fill the remaining `.env` values, turn on Discord **User Settings** -> **Advanced** -> **Developer Mode**.
-Then right-click the server, channels, threads, and bot user to copy IDs for `DISCORD_GUILD_ID`, `DISCORD_ALLOWED_CHANNEL_IDS`, `DISCORD_STARTUP_CHANNEL_ID`, and `DISCORD_PLAIN_ASK_MENTION_USER_IDS`.
+## Configure `.env`
 
-Keep the bot token private. Do not commit `.env`.
-
-Start the bot on Windows:
-
-```powershell
-.\codex-discord-bot.cmd
-```
-
-On macOS:
-
-```sh
-./codex-discord-bot.sh
-```
-
-## Install The Codex Plugin
-
-The repository includes a local Codex plugin marketplace at `.agents\plugins\marketplace.json`.
-The installer registers it automatically. To install or reinstall the plugin manually from the repository root:
-
-```powershell
-codex plugin marketplace add .
-codex plugin add codex-discord-remote@codex-discord-remote
-```
-
-Confirm that Codex can see the marketplace and plugin:
-
-```powershell
-codex plugin marketplace list
-codex plugin list
-```
-
-Expected entries include:
-
-- marketplace: `codex-discord-remote`
-- plugin: `codex-discord-remote@codex-discord-remote`
-
-Restart Codex after installing the plugin so the bundled skills are loaded into new sessions.
-
-
-## More Documentation
-
-- [Bundled skills and attribution](docs/plugin-skills.md)
-- [Daily workflow and Discord commands](docs/operations.md)
-- [Steering, transport, validation, and project position](docs/policies-validation.md)
-
-Bundled workflow skills include `deep-interview`.
-
-Registered Discord slash commands:
-
-- /help, /list, /archived_list, /use, /status, /settings, /doctor, /where, /context, /usage, /runners, /retract, /mirror_check, /bridge_sync, /new, /ask, /interview (legacy alias: /ask_ipc)
-
-Common `!` commands include `!help`, `!list`, `!archived_list`, `!use`, `!open`, `!open_abort`, `!stop`, `!status`, `!settings`, `!setting`, `!doctor`, `!discover_codex`, `!restart_codex`, `!reset_pc`, `!chatid`, `!where`, `!context`, `!usage`, `!runners`, `!resources`, `!system`, `!retract`, `!bridge`, `!mirror`, `!approval`, `!archive`, `!delete_archive`, `!confirm_delete_archive`, `!new`, `!ask`, and `!interview`.
-
-Numeric refs follow the same DB-root numbering as `!list`.
-
-## Mirror Behavior
-
-- Mapped Discord threads follow the matching Codex app thread directly. A plain Discord message in that mapped thread is sent to the mapped Codex thread, not to the currently selected Codex app tab.
-- Codex app text output is mirrored as Discord text. Codex app image output and structured file output are mirrored as Discord attachments, so a `view_image` result or app-provided file should appear as an uploaded attachment rather than only a path. For local file paths, the mirror only uploads files under `.codex-remote-attachments\`; this avoids accidentally uploading unrelated files from the Windows machine.
-- `STOP REPLY` means the Codex app's current-reply stop button: it stops the active response generation in that Codex thread. It is different from Discord `!stop`, which is a remote-control command.
-
-## Configure
-
-Edit `.env`:
-
-```powershell
-notepad .env
-```
+Turn on Discord **User Settings** -> **Advanced** -> **Developer Mode**. Then right-click the server, channels, threads, and bot user to copy IDs.
 
 Minimum useful settings:
 
 ```dotenv
-# Filled by .\setup-discord-bot.ps1:
 DISCORD_BOT_TOKEN=your_discord_bot_token
 DISCORD_GUILD_ID=your_discord_server_id
 DISCORD_ALLOWED_CHANNEL_IDS=channel_or_thread_id
 DISCORD_STARTUP_CHANNEL_ID=channel_id_for_startup_notice
 DISCORD_ENABLE_MESSAGE_CONTENT=1
 DISCORD_PLAIN_ASK_MENTION_USER_IDS=your_bridge_bot_user_id
-DISCORD_PLAIN_ASK_CONTEXT_FALLBACK=0
-DISCORD_STREAM_COMMENTARY=1
-DISCORD_CHUNK_MARKERS=1
 DISCORD_SESSION_MIRROR=1
-DISCORD_SESSION_MIRROR_ARCHIVE_BACKLOG_MAX_EVENTS=200
 DISCORD_ENABLE_ATTACHMENTS=1
+CODEX_DESKTOP_EXE=
+CODEX_EXE=
+PYTHON_EXE=
 ```
 
-Notes:
+Important fields:
 
-- `DISCORD_ALLOWED_CHANNEL_IDS` is a comma-separated allowlist.
-- `DISCORD_ALLOWED_USER_IDS` is a comma-separated list of Discord user IDs, not channel or server IDs. For normal bot use it is optional; host reboot commands such as `!reset_pc confirm` require both `DISCORD_ENABLE_HOST_COMMANDS=1` and a narrow `DISCORD_ALLOWED_USER_IDS` allowlist of trusted Discord user IDs.
-- `DISCORD_PLAIN_ASK_MENTION_USER_IDS` lets plain messages require an explicit mention outside mapped mirror threads.
-- In mapped mirror threads, plain messages route to that mapped Codex thread.
-- Messages authored by other bots are ignored unless they explicitly mention the Codex bridge user. Restart-check handoff packets are a narrow exception: `ACTION: RESTART-CHECK / HANDOFF` can route when it includes an explicit `codex/session` thread id.
-- `DISCORD_STREAM_COMMENTARY=1` mirrors Codex in-progress commentary to Discord. Set it to `0` if you only want final answers.
-- `DISCORD_CHUNK_MARKERS=1` prefixes multi-part Discord messages with `[1/N]`, `[2/N]`, etc. so long Codex output can be audited for missing chunks.
-- `DISCORD_SESSION_MIRROR=1` tails mapped Codex session files and mirrors new app-side user text, commentary, final answers, aborts, and approval/input prompts into the mapped Discord thread.
-- `DISCORD_SESSION_MIRROR_ARCHIVE_BACKLOG_MAX_EVENTS=200` limits archive-recommended catch-up reads per poll. Set `0` for unlimited catch-up.
-- `DISCORD_ENABLE_ATTACHMENTS=1` saves Discord attachments under `discord_attachments\` and includes the local paths in the Codex prompt. Small text-like attachments are also inlined as previews.
+| Name | Meaning |
+| --- | --- |
+| `DISCORD_BOT_TOKEN` | Secret bot token. Filled by the setup script. |
+| `DISCORD_GUILD_ID` | Discord server ID. |
+| `DISCORD_ALLOWED_CHANNEL_IDS` | Comma-separated allowlist of channel or thread IDs. |
+| `DISCORD_ALLOWED_USER_IDS` | Discord user IDs only. Required for host reboot commands. |
+| `DISCORD_ENABLE_HOST_COMMANDS` | Default `0`. Keep disabled unless trusted users are allowlisted. |
+| `DISCORD_PLAIN_ASK_MENTION_USER_IDS` | Bot user IDs that must be mentioned for plain ask routing outside mapped threads. |
+| `DISCORD_SESSION_MIRROR` | Mirrors mapped Codex session output back into Discord. |
+| `DISCORD_ENABLE_ATTACHMENTS` | Saves Discord attachments and includes local paths in Codex prompts. |
+| `CODEX_EXE` | Optional path to Codex CLI/app-server executable. |
+| `CODEX_DESKTOP_EXE` | Optional path to Codex Desktop executable. Installer tries to fill it. |
+| `PYTHON_EXE` | Optional Python executable override. |
+
+Do not commit `.env`.
 
 ## Run
 
-Visible console launcher:
+Windows visible launcher:
 
 ```powershell
 .\codex-discord-bot.cmd
 ```
 
-Headless launcher with tray/watchdog support:
+Windows headless launcher:
 
 ```powershell
 wscript.exe .\codex-discord-bot-headless.vbs
 ```
 
-The headless launcher writes `discord_launcher.log`. The bot writes `codex_discord_bot.log` unless `CODEX_DISCORD_LOG_PATH` is set.
+macOS launcher:
+
+```sh
+./codex-discord-bot.sh
+```
+
+Logs:
+
+- bot log: `codex_discord_bot.log`, unless `CODEX_DISCORD_LOG_PATH` is set
+- launcher log: `discord_launcher.log`
+
+## Install Or Reinstall Codex Plugin
+
+The installer normally registers the local plugin marketplace. Manual commands:
+
+```powershell
+codex plugin marketplace add .
+codex plugin add codex-discord-remote@codex-discord-remote
+```
+
+Confirm:
+
+```powershell
+codex plugin marketplace list
+codex plugin list
+```
+
+Expected entries:
+
+- marketplace: `codex-discord-remote`
+- plugin: `codex-discord-remote@codex-discord-remote`
+
+Restart Codex Desktop after installing the plugin so bundled skills load into new sessions.
+
+## Discord Command Surface
+
+Common slash commands:
+
+- `/help`
+- `/list`
+- `/status`
+- `/doctor`
+- `/where`
+- `/context`
+- `/usage`
+- `/new`
+- `/ask`
+- `/interview`
+
+Common prefix commands:
+
+- `!help`
+- `!list`
+- `!use`
+- `!open`
+- `!stop`
+- `!status`
+- `!doctor`
+- `!discover_codex`
+- `!restart_codex`
+- `!where`
+- `!context`
+- `!usage`
+- `!bridge`
+- `!mirror`
+- `!approval`
+- `!archive`
+- `!new`
+- `!ask`
+
+See [docs/operations.md](docs/operations.md) for daily workflow details.
+
+## Routing And Mirror Rules
+
+- A mapped Discord thread follows its matching Codex app thread.
+- Plain Discord messages inside a mapped thread go to that mapped Codex thread, not the currently selected Codex tab.
+- Codex text output mirrors as Discord text.
+- Codex image and structured file output mirrors as Discord attachments.
+- Local file uploads are limited to `.codex-remote-attachments\` to avoid uploading unrelated files.
+- `STOP REPLY` means the Codex app's current response stop button.
+- Discord `!stop` is a bot command and is not the same thing as `STOP REPLY`.
+- Messages from other bots are ignored unless they explicitly mention this bridge user.
+
+## Source Map For AI Agents
+
+Use this map before editing:
+
+| Area | Files |
+| --- | --- |
+| Discord bot entrypoint | `codex_discord_bot.py`, `codex_discord_runtime.py` |
+| Discord command/runtime modules | `codex_discord_*` |
+| Desktop bridge facade | `codex_desktop_bridge.py`, `codex_desktop_bridge_impl_common.py`, `codex_desktop_bridge_impl_chunk*.py` |
+| Windows desktop control | `codex_desktop_bridge_windows_input.py`, `codex_desktop_bridge_windows_native.py`, `codex_desktop_bridge_*.ps1` |
+| macOS desktop control | `codex_desktop_bridge_macos_input.py`, `codex_desktop_bridge_macos_ui.py` |
+| Codex app-server transport | `codex_app_server_transport*.py`, `codex_desktop_bridge_sidecar*.py` |
+| Local IPC path | `codex_desktop_bridge_ipc_*.py`, `codex_desktop_bridge_ipc_pipe.py` |
+| Session mirror | `codex_discord_session_mirror*.py` |
+| Install/setup | `install.ps1`, `install.sh`, `setup_discord_bot.py`, `setup-discord-bot.ps1`, `setup-discord-bot.sh` |
+| Launchers | `codex-discord-bot.cmd`, `codex-discord-bot.sh`, `codex-discord-bot-headless.vbs` |
+| Tests | `tests/test_*.py` |
+| CI | `.github/workflows/macos-smoke.yml` |
+
+Prefer changing the shared helper used by all callers instead of patching one command path.
+
+## Validation
+
+Windows/local smoke:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\plugins\codex-discord-remote\scripts\qa-smoke.ps1
+```
+
+Focused Python tests:
+
+```powershell
+py -3 -m unittest tests.test_setup_discord_bot tests.test_codex_desktop_bridge_desktop_process tests.test_codex_desktop_bridge_macos_input
+```
+
+macOS CI smoke runs on push and pull request:
+
+```text
+.github/workflows/macos-smoke.yml
+```
+
+Latest known successful macOS smoke on this branch tested Python compile, selected unit tests, `install.sh --dry-run`, and `setup-discord-bot.sh --dry-run`.
+
+## Troubleshooting
+
+`Codex CLI was not found`
+
+- Install or enable the `codex` command, or set `CODEX_EXE` in `.env`.
+- Bot setup can still continue without plugin registration.
+
+`Discord messages are ignored`
+
+- Check `DISCORD_ENABLE_MESSAGE_CONTENT=1`.
+- Check Message Content Intent in the Discord Developer Portal.
+- Check `DISCORD_ALLOWED_CHANNEL_IDS`.
+- In non-mapped channels, mention the bridge user if `DISCORD_PLAIN_ASK_MENTION_USER_IDS` is set.
+
+`macOS cannot click or focus Codex`
+
+- Grant Accessibility permission to the terminal app running `codex-discord-bot.sh`.
+- Keep Codex Desktop installed, signed in, awake, and visible at least once.
+
+`Windows desktop control cannot find Codex`
+
+- Run `.\install.ps1 -DryRun`.
+- Set `CODEX_DESKTOP_EXE` in `.env` if discovery cannot find the app.
+- Run `.\codex-discord-bot.cmd` from the repo root.
+
+## More Documentation
+
+- [Bundled skills and attribution](docs/plugin-skills.md)
+- [Daily workflow and Discord commands](docs/operations.md)
+- [Steering, transport, validation, and project position](docs/policies-validation.md)
