@@ -76,12 +76,13 @@ class DesktopProcessTests(unittest.TestCase):
             start=lambda args, **kwargs: start_calls.append({"args": args, **kwargs}) or started,
         )
 
-        stopped, details = desktop_process.stop_codex_desktop_processes(Path("C:/Codex/Codex.exe"), deps=deps)
-        self.assertTrue(stopped)
-        self.assertEqual(details, "stopped")
-        self.assertEqual(run_calls, [["C:/Windows/taskkill.exe", "/IM", "Codex.exe", "/F"]])
+        with patch.object(desktop_process.sys, "platform", "win32"):
+            stopped, details = desktop_process.stop_codex_desktop_processes(Path("C:/Codex/Codex.exe"), deps=deps)
+            self.assertTrue(stopped)
+            self.assertEqual(details, "stopped")
+            self.assertEqual(run_calls, [["C:/Windows/taskkill.exe", "/IM", "Codex.exe", "/F"]])
 
-        self.assertIs(desktop_process.start_codex_desktop_process(Path("C:/Codex/Codex.exe"), deps=deps), started)
+            self.assertIs(desktop_process.start_codex_desktop_process(Path("C:/Codex/Codex.exe"), deps=deps), started)
         self.assertEqual(start_calls[0]["args"], [str(Path("C:/Codex/Codex.exe"))])
         self.assertEqual(start_calls[0]["cwd"], str(Path("C:/Codex")))
         self.assertTrue(start_calls[0]["close_fds"])
@@ -135,7 +136,10 @@ class DesktopProcessTests(unittest.TestCase):
     def test_app_server_stop_preserves_skip_and_powershell_result_behavior(self) -> None:
         run_args: list[list[str]] = []
         run_kwargs: list[dict[str, str | bool | int]] = []
-        with patch("codex_desktop_bridge_desktop_process.os.name", "posix"):
+        with (
+            patch("codex_desktop_bridge_desktop_process.os.name", "posix"),
+            patch.object(desktop_process.sys, "platform", "linux"),
+        ):
             self.assertEqual(
                 desktop_process.stop_codex_app_server_processes(),
                 (False, "skipped: app-server process stop is only implemented on Windows"),
@@ -153,6 +157,7 @@ class DesktopProcessTests(unittest.TestCase):
 
         with (
             patch("codex_desktop_bridge_desktop_process.os.name", "nt"),
+            patch.object(desktop_process.sys, "platform", "win32"),
             patch("codex_desktop_bridge_desktop_process.subprocess.run", fake_run),
         ):
             stopped, details = desktop_process.stop_codex_app_server_processes()
