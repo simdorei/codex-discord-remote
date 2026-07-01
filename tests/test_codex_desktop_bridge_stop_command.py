@@ -6,6 +6,10 @@ import codex_desktop_bridge_stop_command as stop_command
 from codex_thread_models import ThreadInfo
 
 
+class ActiveTurnLookupFailure(Exception):
+    pass
+
+
 def _thread() -> ThreadInfo:
     return ThreadInfo(
         id="thread-1",
@@ -124,9 +128,9 @@ class DesktopBridgeStopCommandTests(unittest.TestCase):
 
         def get_active_turn_id(thread_id: str) -> str | None:
             _ = thread_id
-            raise RuntimeError("active turn read failed")
+            raise ActiveTurnLookupFailure("active turn read failed")
 
-        with self.assertRaisesRegex(RuntimeError, "active turn read failed"):
+        with self.assertRaisesRegex(ActiveTurnLookupFailure, "active turn read failed"):
             stop_command.run_stop_command(
                 _thread(),
                 deps=stop_command.StopCommandDeps(
@@ -145,19 +149,19 @@ class DesktopBridgeStopCommandTests(unittest.TestCase):
     def test_run_stop_command_surfaces_confirm_lookup_failure(self) -> None:
         interrupt_calls: list[tuple[str, str]] = []
         lines: list[str] = []
-        active_turn_reads: list[str | RuntimeError] = [
+        active_turn_reads: list[str | ActiveTurnLookupFailure] = [
             "turn-1",
-            RuntimeError("confirm read failed"),
+            ActiveTurnLookupFailure("confirm read failed"),
         ]
 
         def get_active_turn_id(thread_id: str) -> str | None:
             _ = thread_id
             value = active_turn_reads.pop(0)
-            if isinstance(value, RuntimeError):
+            if isinstance(value, ActiveTurnLookupFailure):
                 raise value
             return value
 
-        with self.assertRaisesRegex(RuntimeError, "confirm read failed"):
+        with self.assertRaisesRegex(ActiveTurnLookupFailure, "confirm read failed"):
             stop_command.run_stop_command(
                 _thread(),
                 deps=stop_command.StopCommandDeps(
