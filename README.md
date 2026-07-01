@@ -269,7 +269,7 @@ See [docs/operations.md](docs/operations.md) for daily workflow details.
 - Plain Discord messages inside a mapped thread go to that mapped Codex thread, not the currently selected Codex tab.
 - Codex text output mirrors as Discord text.
 - Codex image and structured file output mirrors as Discord attachments.
-- Local file uploads are limited to `.codex-remote-attachments\` to avoid uploading unrelated files.
+- Local file uploads are limited to `.codex-remote-attachments` to avoid uploading unrelated files.
 - `STOP REPLY` means the Codex app's current response stop button.
 - Discord `!stop` is a bot command and is not the same thing as `STOP REPLY`.
 - Messages from other bots are ignored unless they explicitly mention this bridge user.
@@ -315,7 +315,7 @@ macOS CI smoke runs on push and pull request:
 .github/workflows/macos-smoke.yml
 ```
 
-Latest known successful macOS smoke on this branch tested Python compile, selected unit tests, `install.sh --dry-run`, and `setup-discord-bot.sh --dry-run`.
+The macOS smoke workflow checks Python compilation, selected unit tests, `install.sh --dry-run`, and `setup-discord-bot.sh --dry-run`.
 
 ## Troubleshooting
 
