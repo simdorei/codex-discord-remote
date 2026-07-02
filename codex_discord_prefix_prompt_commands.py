@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Callable
 
 from codex_discord_prefix_skill_prompts import (
+    build_archive_used_prompt,
     DEEP_INTERVIEW_PROMPT_HEADER,
     build_deep_interview_prompt,
 )
@@ -17,7 +18,7 @@ from codex_discord_prefix_prompt_types import (
 
 __all__ = [
     "DEEP_INTERVIEW_PROMPT_HEADER",
-    "ASK_COMMANDS",
+    "ARCHIVE_USED_COMMANDS",
     "AuthorLike",
     "ChannelLike",
     "HandlePlainAskFunc",
@@ -25,12 +26,13 @@ __all__ = [
     "MessageLike",
     "PrefixPromptCommandDeps",
     "SendChunksFunc",
+    "build_archive_used_prompt",
     "build_deep_interview_prompt",
     "handle_prefix_prompt_command",
 ]
 
 INTERVIEW_COMMANDS = {"interview", "deep_interview", "deep-interview"}
-ASK_COMMANDS = {"ask", "ask_ipc"}
+ARCHIVE_USED_COMMANDS = {"archive-used"}
 
 
 async def handle_prefix_prompt_command(
@@ -51,8 +53,17 @@ async def handle_prefix_prompt_command(
             requires_request=True,
             build_prompt=build_deep_interview_prompt,
         )
-    if command in ASK_COMMANDS:
-        return await _handle_ask_command(command, arg, message, deps=deps)
+    if command in ARCHIVE_USED_COMMANDS:
+        return await _handle_skill_prompt_command(
+            command,
+            arg,
+            message,
+            deps=deps,
+            usage_context="prefix_archive_used_usage",
+            log_context="prefix_archive_used",
+            requires_request=True,
+            build_prompt=build_archive_used_prompt,
+        )
     return False
 
 
@@ -68,9 +79,10 @@ async def _handle_skill_prompt_command(
     build_prompt: Callable[[str], str],
 ) -> bool:
     if requires_request and not arg:
+        usage_arg = "threshold" if command in ARCHIVE_USED_COMMANDS else "request"
         _ = await deps.send_chunks(
             message.channel,
-            f"Usage: !{deps.format_discord_command_label(command)} <request>",
+            f"Usage: !{deps.format_discord_command_label(command)} <{usage_arg}>",
             context=usage_context,
         )
         return True
@@ -83,27 +95,6 @@ async def _handle_skill_prompt_command(
     )
     deps.log_line(log_message)
     await deps.handle_plain_ask(message, build_prompt(arg), target_thread_id=target_thread_id)
-    return True
-
-
-async def _handle_ask_command(
-    command: str,
-    arg: str,
-    message: MessageLike,
-    *,
-    deps: PrefixPromptCommandDeps,
-) -> bool:
-    if not arg:
-        _ = await deps.send_chunks(
-            message.channel,
-            f"Usage: !{command} <prompt>",
-            context="prefix_ask_usage",
-        )
-        return True
-    target_thread_id = await _resolve_target_or_send_project_message(message, deps=deps)
-    if target_thread_id is None:
-        return True
-    await deps.handle_plain_ask(message, arg, target_thread_id=target_thread_id)
     return True
 
 

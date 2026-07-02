@@ -55,10 +55,10 @@ Common `!` commands:
 | `!mirror check [limit]` | Checks mirror mappings and stale rows. Without a limit, it uses DB-root user threads. |
 | `!approval` | Re-sends the pending approval controls for the mapped/current Codex thread when one exists. |
 | `!archive [ref]` | Archives the mapped/current Codex thread or a supplied ref. Numeric refs follow the same DB-root numbering as `!list`. |
+| `!archive-used <threshold>` | Runs the packaged `archive-used` skill for high-`used` cleanup using the threshold you provide. |
 | `!delete_archive <ref>` | Previews deletion of an archived Codex thread. |
 | `!confirm_delete_archive <ref>` | Permanently deletes the archived thread after previewing. |
 | `!new <prompt>` | Creates a new Codex thread with the first prompt. |
-| `!ask <prompt>` | Sends a prompt to the mapped Codex thread, or selected thread outside mirrors. |
 | `!interview <request>` | Sends the request as a Gajae-style deep interview so Codex confirms work structure, scores ambiguity, and waits for approval before implementation. |
 ## Interop With Other Discord Tools
 

@@ -227,6 +227,10 @@ Restart Codex Desktop after installing the plugin so bundled skills load into ne
 
 ## Discord Command Surface
 
+Registered Discord slash commands:
+
+- /help, /list, /archived_list, /use, /status, /settings, /doctor, /where, /context, /usage, /runners, /retract, /mirror_check, /bridge_sync, /new, /ask, /interview (legacy alias: /ask_ipc)
+
 Common slash commands:
 
 - `/help`
@@ -244,22 +248,34 @@ Common prefix commands:
 
 - `!help`
 - `!list`
+- `!archived_list`
 - `!use`
 - `!open`
+- `!open_abort`
 - `!stop`
 - `!status`
+- `!settings`
 - `!doctor`
 - `!discover_codex`
 - `!restart_codex`
+- `!chatid`
 - `!where`
 - `!context`
 - `!usage`
+- `!runners`
+- `!resources`
+- `!retract`
 - `!bridge`
 - `!mirror`
 - `!approval`
 - `!archive`
+- `!archive-used`
+- `!delete_archive`
+- `!confirm_delete_archive`
 - `!new`
-- `!ask`
+- `!interview`
+
+Numeric refs follow the same DB-root numbering as `!list`.
 
 See [docs/operations.md](docs/operations.md) for daily workflow details.
 

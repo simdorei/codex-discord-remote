@@ -8,6 +8,7 @@ some skills also have slash or `!` command wrappers.
 | --- | --- | --- |
 | `discord-remote` | Operational runbook for this local Discord bridge: bot status, watchdog restarts, archive-lock recovery, mirror routing checks, log triage, and local deployment checks. | No direct skill wrapper; use the normal remote commands such as `!status`, `!doctor`, `!mirror check`, and `!bridge sync`. |
 | `discord-remote-qa` | Focused QA checklist for mirror mapping, context refresh, session mirror cursor priming, steering suppression, archive lock retry, and deployment readiness. | No direct skill wrapper; use it from Codex when validating remote changes. |
+| `archive-used` | Bulk archive workflow for Codex threads whose `used` value in bridge list output is at or above a user-provided `<threshold>`, targeting the UUID printed in each selected list row. | `!archive-used <threshold>` invokes the skill from Discord; Codex then uses local bridge list/archive commands or the equivalent `!list` and `!archive <uuid-from-list>`. |
 | `deep-interview` | Clarification-first requirements workflow. It confirms the work structure, asks one question at a time, scores ambiguity, preserves the user's language, tracks scope/entities/constraints, and stops at a pending-approval ticket before implementation. | `/interview <request>` or `!interview <request>`. |
 
 Source attribution is included for transparency and license compliance. These

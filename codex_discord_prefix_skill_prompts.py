@@ -30,3 +30,7 @@ User request:
 
 def build_deep_interview_prompt(user_request: str) -> str:
     return DEEP_INTERVIEW_PROMPT_HEADER + str(user_request or "").strip()
+
+
+def build_archive_used_prompt(threshold: str) -> str:
+    return "$codex-discord-remote:archive-used " + str(threshold or "").strip()
