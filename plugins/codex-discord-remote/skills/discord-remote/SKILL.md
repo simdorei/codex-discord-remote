@@ -38,6 +38,19 @@ Use this skill for this repository and its local Windows bot runtime.
 - `plugins/codex-discord-remote/scripts/restart.ps1`: request bot restart through `.codex_discord_bot.restart` and run the watchdog.
 - `plugins/codex-discord-remote/scripts/qa-smoke.ps1`: run deploy-oriented smoke checks.
 
+## Sending Files To Discord
+
+When the user asks to send, upload, attach, or deliver a file to Discord, start with the repo helper instead of saying there is no file-send path:
+
+```powershell
+py -3 .\send_discord_attachment.py --thread-ref <codex-thread-ref> --content-file .\caption.txt .\artifact.zip
+```
+
+- Prefer `--thread-ref` or `--work-thread` when sending to a mirrored Codex thread; use `--channel-id` only when the user gives a concrete Discord channel/thread id.
+- Use `--content-file` for Korean or multiline captions so PowerShell encoding does not corrupt text.
+- If the mirror target is stale, run `!mirror check` and `!mirror sync` before retrying.
+- Do not use `!delete_archive` or archive deletion commands for file delivery.
+
 ## Interview Workflow
 
 - For vague, broad, risky, or under-specified implementation requests, use the packaged `deep-interview` skill before coding.

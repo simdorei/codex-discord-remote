@@ -287,6 +287,16 @@ Numeric refs follow the same DB-root numbering as `!list`.
 
 See [docs/operations.md](docs/operations.md) for daily workflow details.
 
+## Send Files To Discord
+
+For one-off files, use the helper instead of pasting binary data or saying file delivery is unavailable:
+
+```powershell
+py -3 .\send_discord_attachment.py --thread-ref repo:2 --content-file .\caption.txt .\result.zip
+```
+
+Use `--thread-ref` for a mirrored Codex thread, `--work-thread` for a specific Codex thread id/ref, or `--channel-id` when you already know the Discord channel/thread id. Put Korean or multiline captions in a UTF-8 text file and pass it with `--content-file`.
+
 ## Routing And Mirror Rules
 
 - A mapped Discord thread follows its matching Codex app thread.
