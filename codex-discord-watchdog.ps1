@@ -4,7 +4,10 @@ param(
     [switch]$LogHealthy,
     [switch]$CheckRestartReady,
     [int]$RestartQuietSeconds = 90,
-    [int]$RestartWaitTimeoutSeconds = 900
+    [int]$RestartWaitTimeoutSeconds = 900,
+    [int]$HealthCpuPercent = 95,
+    [int]$HealthFreeMemoryMb = 768,
+    [int]$HealthBadSampleLimit = 2
 )
 
 $ErrorActionPreference = 'Stop'
@@ -15,6 +18,7 @@ $BridgePath = Join-Path $ScriptDir 'codex_desktop_bridge.py'
 $RuntimeLockPath = Join-Path $ScriptDir '.codex_discord_bot.runtime.lock'
 $RestartRequestPath = Join-Path $ScriptDir '.codex_discord_bot.restart'
 $RestartClaimPath = Join-Path $ScriptDir ".codex_discord_bot.restart.claimed.$PID"
+$HealthStatePath = Join-Path $ScriptDir '.codex_discord_bot.health'
 $StopRequestPath = Join-Path $ScriptDir '.codex_discord_bot.stop'
 $DisablePath = Join-Path $ScriptDir '.codex_discord_bot.disabled'
 $HeadlessLauncher = Join-Path $ScriptDir 'codex-discord-bot-headless.vbs'
@@ -25,6 +29,77 @@ $LauncherLogPath = Join-Path $ScriptDir 'discord_launcher.log'
 if (-not (Test-Path -LiteralPath $BotScript)) {
     Write-LauncherLog "watchdog_error reason=bot_script_missing script=$BotScript"
     exit 1
+}
+
+function Get-WatchdogSystemHealthIssue {
+    try {
+        $cpuAverage = (Get-CimInstance Win32_Processor | Measure-Object -Property LoadPercentage -Average).Average
+        $os = Get-CimInstance Win32_OperatingSystem
+        $freeMemoryMb = [math]::Floor([double]$os.FreePhysicalMemory / 1024)
+    } catch {
+        Write-LauncherLog "watchdog_health_probe_failed error=$($_.Exception.GetType().Name)"
+        return ""
+    }
+
+    $issues = @()
+    if ($HealthCpuPercent -gt 0 -and $cpuAverage -ne $null) {
+        $cpuPercent = [math]::Round([double]$cpuAverage, 1)
+        if ($cpuPercent -ge $HealthCpuPercent) {
+            $issues += "cpu_percent=$cpuPercent threshold=$HealthCpuPercent"
+        }
+    }
+    if ($HealthFreeMemoryMb -gt 0 -and $freeMemoryMb -le $HealthFreeMemoryMb) {
+        $issues += "free_memory_mb=$freeMemoryMb threshold=$HealthFreeMemoryMb"
+    }
+    if ($issues.Count -eq 0) {
+        return ""
+    }
+    return ($issues -join ",")
+}
+
+function Get-WatchdogHealthBadSampleCount {
+    if (-not (Test-Path -LiteralPath $HealthStatePath)) {
+        return 0
+    }
+    try {
+        $stateText = Get-Content -LiteralPath $HealthStatePath -Raw -ErrorAction Stop
+        if ($stateText -match 'count=(\d+)') {
+            return [int]$Matches[1]
+        }
+    } catch {
+        Write-LauncherLog "watchdog_health_state_read_failed error=$($_.Exception.GetType().Name)"
+    }
+    return 0
+}
+
+function Set-WatchdogHealthBadSampleCount {
+    param(
+        [int]$Count,
+        [string]$Issue
+    )
+
+    Set-Content -LiteralPath $HealthStatePath -Encoding ASCII -Value "count=$Count issue=$Issue"
+}
+
+function Clear-WatchdogHealthState {
+    Remove-Item -LiteralPath $HealthStatePath -Force -ErrorAction SilentlyContinue
+}
+
+function Get-WatchdogHealthRestartIssue {
+    $issue = Get-WatchdogSystemHealthIssue
+    if (-not $issue) {
+        Clear-WatchdogHealthState
+        return ""
+    }
+
+    $sampleCount = (Get-WatchdogHealthBadSampleCount) + 1
+    $sampleLimit = [math]::Max(1, $HealthBadSampleLimit)
+    Set-WatchdogHealthBadSampleCount -Count $sampleCount -Issue $issue
+    Write-LauncherLog "watchdog_unhealthy_sample count=$sampleCount limit=$sampleLimit $issue"
+    if ($sampleCount -lt $sampleLimit) {
+        return ""
+    }
+    return $issue
 }
 
 if ($CheckRestartReady) {
@@ -80,13 +155,24 @@ if (Test-Path -LiteralPath $RestartRequestPath) {
 }
 
 if (Test-BotProcessAlive) {
-    if ($LogHealthy) {
-        Write-LauncherLog "watchdog_ok script=$BotScript"
+    $healthRestartIssue = ""
+    if (-not $DryRun) {
+        $healthRestartIssue = Get-WatchdogHealthRestartIssue
     }
-    if ($DryRun) {
-        Write-Output "running"
+    if ($healthRestartIssue) {
+        Write-LauncherLog "watchdog_restart_unhealthy reason=$healthRestartIssue"
+        Stop-RuntimeBotProcess
+        Clear-WatchdogHealthState
     }
-    exit 0
+    if (Test-BotProcessAlive) {
+        if ($LogHealthy) {
+            Write-LauncherLog "watchdog_ok script=$BotScript"
+        }
+        if ($DryRun) {
+            Write-Output "running"
+        }
+        exit 0
+    }
 }
 
 if (-not (Test-Path -LiteralPath $HeadlessLauncher)) {

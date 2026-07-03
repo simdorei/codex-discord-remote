@@ -191,6 +191,14 @@ Windows headless launcher:
 wscript.exe .\codex-discord-bot-headless.vbs
 ```
 
+Windows watchdog:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\codex-discord-watchdog.ps1
+```
+
+The watchdog restarts the headless bot if the bot is missing. It also restarts the bot after repeated unhealthy host samples: CPU at or above `95%`, free memory at or below `768MB`, for `2` consecutive checks. Tune those checks with `-HealthCpuPercent`, `-HealthFreeMemoryMb`, and `-HealthBadSampleLimit`. Put `.codex_discord_bot.disabled` in the repo root to pause watchdog restarts.
+
 macOS launcher:
 
 ```sh
