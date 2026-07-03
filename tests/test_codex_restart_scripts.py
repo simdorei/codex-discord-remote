@@ -165,6 +165,18 @@ class RestartScriptTests(unittest.TestCase):
         self.assertIn("watchdog_restart_claimed", text)
         self.assertIn("watchdog_restart_claim_lost", text)
 
+    def test_watchdog_restarts_after_repeated_unhealthy_system_samples(self) -> None:
+        text = _watchdog_text()
+
+        self.assertIn("[int]$HealthCpuPercent = 95", text)
+        self.assertIn("[int]$HealthFreeMemoryMb = 768", text)
+        self.assertIn("[int]$HealthBadSampleLimit = 2", text)
+        self.assertIn(".codex_discord_bot.health", text)
+        self.assertIn("function Get-WatchdogSystemHealthIssue", text)
+        self.assertIn("watchdog_unhealthy_sample", text)
+        self.assertIn("watchdog_restart_unhealthy", text)
+        self.assertIn("Stop-RuntimeBotProcess", text)
+
     def test_status_reports_codex_app_package_update_detection(self) -> None:
         text = PLUGIN_STATUS.read_text(encoding="utf-8")
 
