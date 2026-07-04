@@ -6,9 +6,7 @@ script="$script_dir/codex_discord_bot.py"
 env_file="$script_dir/.env"
 lock_dir="$script_dir/.codex_discord_bot.lock"
 pid_file="$lock_dir/launcher.pid"
-log_path=${CODEX_DISCORD_LOG_PATH:-"$script_dir/codex_discord_bot.log"}
 launcher_log_path="$script_dir/discord_launcher.log"
-python_exe=${PYTHON_EXE:-}
 
 log_launcher() {
   message=$1
@@ -31,6 +29,22 @@ load_env_value() {
     esac
   done < "$env_file"
 }
+
+export_env_value_if_missing() {
+  name=$1
+  eval "current=\${$name:-}"
+  [ -n "$current" ] && return 0
+  value=$(load_env_value "$name" || true)
+  [ -n "$value" ] || return 0
+  export "$name=$value"
+}
+
+for env_name in PYTHON_EXE CODEX_HOME CODEX_EXE CODEX_DESKTOP_EXE CODEX_DISCORD_LOG_PATH; do
+  export_env_value_if_missing "$env_name"
+done
+
+log_path=${CODEX_DISCORD_LOG_PATH:-"$script_dir/codex_discord_bot.log"}
+python_exe=${PYTHON_EXE:-}
 
 resolve_python() {
   if [ -n "$python_exe" ]; then

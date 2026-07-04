@@ -9,14 +9,19 @@ set "LOCK_DIR=%SCRIPT_DIR%.codex_discord_bot.lock"
 set "RUNTIME_LOCK_FILE=%SCRIPT_DIR%.codex_discord_bot.runtime.lock"
 set "PID_FILE=%LOCK_DIR%\launcher.pid"
 set "LAUNCHER_PID="
-set "LOG_PATH=%CODEX_DISCORD_LOG_PATH%"
 set "LAUNCHER_LOG_PATH=%SCRIPT_DIR%discord_launcher.log"
 
-if not defined LOG_PATH set "LOG_PATH=%SCRIPT_DIR%codex_discord_bot.log"
-if not defined PYTHON_EXE if exist "%ENV_FILE%" (
-  set "LOAD_ENV_NAME=PYTHON_EXE"
-  call :load_env_value
+if exist "%ENV_FILE%" (
+  for %%E in (PYTHON_EXE CODEX_HOME CODEX_EXE CODEX_DESKTOP_EXE CODEX_DISCORD_LOG_PATH) do (
+    if not defined %%E (
+      set "LOAD_ENV_NAME=%%E"
+      call :load_env_value
+    )
+  )
 )
+
+set "LOG_PATH=%CODEX_DISCORD_LOG_PATH%"
+if not defined LOG_PATH set "LOG_PATH=%SCRIPT_DIR%codex_discord_bot.log"
 
 for /f %%P in ('powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "$p=Get-CimInstance Win32_Process -Filter ('ProcessId=' + $PID); [Console]::Write($p.ParentProcessId)"') do set "LAUNCHER_PID=%%P"
 

@@ -112,6 +112,8 @@ Installer behavior:
 - Requires Python 3.12.x.
 - On Windows, downloads portable Python 3.12.1 into `.python-portable/` when `PYTHON_EXE` is not already set.
 - Pins the portable Python executable into `.env` as `PYTHON_EXE`.
+- Pins the resolved Codex data directory into `.env` as `CODEX_HOME`.
+- Pins `CODEX_EXE` into `.env` when the `codex` command is available or explicitly passed.
 - Installs Python dependencies from `requirements.txt`.
 - Creates `.env` from `.env.example` if `.env` does not exist.
 - Discovers Codex Desktop and writes `CODEX_DESKTOP_EXE` to `.env`.
@@ -179,6 +181,8 @@ Important fields:
 | `PYTHON_EXE` | Python 3.12 executable path. Windows installer pins the repo-local portable Python automatically. |
 
 Do not commit `.env`.
+
+The launchers read `PYTHON_EXE`, `CODEX_HOME`, `CODEX_EXE`, and `CODEX_DESKTOP_EXE` from `.env` before Python starts, so paths with spaces are passed to the bot as normal environment variables.
 
 ## Run
 

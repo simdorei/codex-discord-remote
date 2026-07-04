@@ -2,6 +2,7 @@
 param(
     [string]$PythonExe = $env:PYTHON_EXE,
     [string]$CodexExe = $env:CODEX_EXE,
+    [string]$CodexHome = $env:CODEX_HOME,
     [switch]$SkipDependencies,
     [switch]$SkipEnvFile,
     [switch]$SkipSteeringConfig,
@@ -236,9 +237,25 @@ function Set-EnvFileValue {
     Set-Content -LiteralPath $EnvPath -Value $lines -Encoding UTF8
 }
 
-function Resolve-CodexCommand {
+function Resolve-CodexHomePath {
+    if (-not [string]::IsNullOrWhiteSpace($CodexHome)) {
+        $expanded = [Environment]::ExpandEnvironmentVariables($CodexHome.Trim().Trim('"').Trim("'"))
+        $homePath = [Environment]::GetFolderPath('UserProfile')
+        if ($expanded -eq '~') {
+            return $homePath
+        }
+        if ($expanded.StartsWith('~/') -or $expanded.StartsWith('~\')) {
+            $expanded = Join-Path $homePath $expanded.Substring(2)
+        }
+        return [System.IO.Path]::GetFullPath($expanded)
+    }
+
+    return (Join-Path ([Environment]::GetFolderPath('UserProfile')) '.codex')
+}
+
+function Find-CodexCommand {
     if (-not [string]::IsNullOrWhiteSpace($CodexExe)) {
-        return $CodexExe
+        return $CodexExe.Trim().Trim('"').Trim("'")
     }
 
     $envCodexExe = Get-EnvFileValue -Name 'CODEX_EXE'
@@ -249,6 +266,15 @@ function Resolve-CodexCommand {
     $codex = Get-Command codex -ErrorAction SilentlyContinue
     if ($codex -ne $null) {
         return $codex.Source
+    }
+
+    return ''
+}
+
+function Resolve-CodexCommand {
+    $command = Find-CodexCommand
+    if (-not [string]::IsNullOrWhiteSpace($command)) {
+        return $command
     }
 
     throw 'Codex CLI was not found. Set CODEX_EXE or install/enable the codex command.'
@@ -293,11 +319,23 @@ if (-not $SkipEnvFile) {
 
     if ($DryRun) {
         Write-Output "Would set PYTHON_EXE to the resolved Python 3.12 executable in .env"
+        Write-Output "Would set CODEX_HOME to the resolved Codex home path in .env"
+        Write-Output "Would set CODEX_EXE in .env when the codex command is available"
     } else {
         $pythonCommand = @(Resolve-PythonCommand)
         $pythonExePath = Get-PythonExecutablePath -Command $pythonCommand
         Set-EnvFileValue -Name 'PYTHON_EXE' -Value $pythonExePath
         Write-Output "Configured PYTHON_EXE=$pythonExePath"
+
+        $codexHomePath = Resolve-CodexHomePath
+        Set-EnvFileValue -Name 'CODEX_HOME' -Value $codexHomePath
+        Write-Output "Configured CODEX_HOME=$codexHomePath"
+
+        $codexCommand = Find-CodexCommand
+        if (-not [string]::IsNullOrWhiteSpace($codexCommand)) {
+            Set-EnvFileValue -Name 'CODEX_EXE' -Value $codexCommand
+            Write-Output "Configured CODEX_EXE=$codexCommand"
+        }
     }
 }
 

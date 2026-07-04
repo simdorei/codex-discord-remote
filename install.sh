@@ -4,6 +4,7 @@ set -eu
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 python_exe=${PYTHON_EXE:-}
 codex_exe=${CODEX_EXE:-}
+codex_home=${CODEX_HOME:-}
 skip_dependencies=0
 skip_env_file=0
 skip_steering_config=0
@@ -13,7 +14,7 @@ required_python_major=3
 required_python_minor=12
 
 usage() {
-  echo "Usage: ./install.sh [--python-exe PATH] [--codex-exe PATH] [--skip-dependencies] [--skip-env-file] [--skip-steering-config] [--skip-codex-plugin] [--dry-run]" >&2
+  echo "Usage: ./install.sh [--python-exe PATH] [--codex-exe PATH] [--codex-home PATH] [--skip-dependencies] [--skip-env-file] [--skip-steering-config] [--skip-codex-plugin] [--dry-run]" >&2
 }
 
 while [ "$#" -gt 0 ]; do
@@ -26,6 +27,11 @@ while [ "$#" -gt 0 ]; do
     --codex-exe)
       [ "$#" -ge 2 ] || { usage; exit 2; }
       codex_exe=$2
+      shift 2
+      ;;
+    --codex-home)
+      [ "$#" -ge 2 ] || { usage; exit 2; }
+      codex_home=$2
       shift 2
       ;;
     --skip-dependencies)
@@ -169,6 +175,16 @@ set_env_value() {
 }
 
 resolve_codex() {
+  codex=$(find_codex)
+  if [ -n "$codex" ]; then
+    printf '%s\n' "$codex"
+    return 0
+  fi
+  echo "Codex CLI was not found. Set CODEX_EXE or install/enable the codex command." >&2
+  return 1
+}
+
+find_codex() {
   if [ -n "$codex_exe" ]; then
     printf '%s\n' "$codex_exe"
     return 0
@@ -182,8 +198,19 @@ resolve_codex() {
     command -v codex
     return 0
   fi
-  echo "Codex CLI was not found. Set CODEX_EXE or install/enable the codex command." >&2
-  return 1
+  return 0
+}
+
+resolve_codex_home() {
+  if [ -n "$codex_home" ]; then
+    case "$codex_home" in
+      "~") printf '%s\n' "$HOME" ;;
+      "~/"*) printf '%s/%s\n' "$HOME" "${codex_home#~/}" ;;
+      *) printf '%s\n' "$codex_home" ;;
+    esac
+    return 0
+  fi
+  printf '%s/.codex\n' "$HOME"
 }
 
 run_codex() {
@@ -217,11 +244,21 @@ if [ "$skip_env_file" -eq 0 ]; then
 
   if [ "$dry_run" -eq 1 ]; then
     echo "Would set PYTHON_EXE to the resolved Python 3.12 executable in .env"
+    echo "Would set CODEX_HOME to the resolved Codex home path in .env"
+    echo "Would set CODEX_EXE in .env when the codex command is available"
   else
     py=$(resolve_python)
     py_path=$(python_executable_path "$py")
     set_env_value PYTHON_EXE "$py_path"
     echo "Configured PYTHON_EXE=$py_path"
+    codex_home_path=$(resolve_codex_home)
+    set_env_value CODEX_HOME "$codex_home_path"
+    echo "Configured CODEX_HOME=$codex_home_path"
+    codex_command=$(find_codex)
+    if [ -n "$codex_command" ]; then
+      set_env_value CODEX_EXE "$codex_command"
+      echo "Configured CODEX_EXE=$codex_command"
+    fi
   fi
 fi
 
