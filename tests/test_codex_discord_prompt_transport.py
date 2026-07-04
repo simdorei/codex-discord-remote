@@ -163,6 +163,38 @@ class PromptTransportTests(unittest.TestCase):
         self.assertIn("app_server_prompt_failed target=thread-1", logs[0])
         self.assertIn("error_type=RuntimeError", logs[0])
 
+    def test_run_transport_prompt_no_wait_falls_back_to_legacy_for_rollout_thread_id_parse_error(self) -> None:
+        logs: list[str] = []
+        legacy_calls: list[tuple[str, str | None]] = []
+
+        def resident(_prompt: str, _target_thread_id: str | None) -> tuple[int, str]:
+            raise RuntimeError(
+                "thread/resume failed: failed to load rollout "
+                "C:\\Users\\SHJ\\.codex\\sessions\\2026\\07\\04\\rollout.jsonl: "
+                "failed to parse thread ID from rollout file"
+            )
+
+        def legacy(prompt: str, target_thread_id: str | None) -> tuple[int, str]:
+            legacy_calls.append((prompt, target_thread_id))
+            return 0, "legacy ipc"
+
+        exit_code, output = prompt_transport.run_transport_prompt_no_wait(
+            "please run",
+            "thread-1",
+            build_deps(
+                run_resident_prompt_no_wait=resident,
+                run_legacy_prompt_no_wait=legacy,
+                log=logs.append,
+            ),
+        )
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(output, "legacy ipc")
+        self.assertEqual(legacy_calls, [("please run", "thread-1")])
+        self.assertEqual(len(logs), 2)
+        self.assertIn("app_server_prompt_failed target=thread-1", logs[0])
+        self.assertIn("app_server_prompt_rollout_parse_failed_ipc_fallback target=thread-1", logs[1])
+
     def test_run_transport_prompt_no_wait_explains_thread_not_found_split_brain(self) -> None:
         def resident(_prompt: str, _target_thread_id: str | None) -> tuple[int, str]:
             raise RuntimeError("turn/start failed: Thread not found: thread-1")

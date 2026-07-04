@@ -86,6 +86,14 @@ def _log_transport_failure(log: LogFunc, *, event: str, target_thread_id: str | 
     log(f"{event} target={target_thread_id or '-'} " + f"error_type={type(exc).__name__} error={str(exc)[:300]}")
 
 
+def is_rollout_thread_id_parse_error(message: str) -> bool:
+    value = message.lower()
+    return (
+        "thread/resume failed" in value
+        and "failed to parse thread id from rollout file" in value
+    )
+
+
 def run_transport_prompt_no_wait(
     prompt: str,
     target_thread_id: str | None,
@@ -102,6 +110,9 @@ def run_transport_prompt_no_wait(
             target_thread_id=target_thread_id,
             exc=exc,
         )
+        if is_rollout_thread_id_parse_error(str(exc)):
+            deps.log(f"app_server_prompt_rollout_parse_failed_ipc_fallback target={target_thread_id or '-'}")
+            return deps.run_legacy_prompt_no_wait(prompt, target_thread_id)
         return 1, _transport_error_output(exc)
 
 
