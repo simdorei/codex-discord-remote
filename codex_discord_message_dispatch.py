@@ -182,12 +182,45 @@ async def process_inbound_discord_message(
     if intake_gate.handled:
         return
     content = message.content or ""
+    has_attachments = bool(getattr(message, "attachments", None))
+    dispatch_deps = PreparedMessageDispatchDeps(
+        format_log_text_len=deps.format_log_text_len,
+        persist_inbound_mirror_thread_channel=deps.persist_inbound_mirror_thread_channel,
+        handle_prefix_command=deps.handle_prefix_command,
+        describe_mirrored_project_channel=deps.describe_mirrored_project_channel,
+        send_chunks=deps.send_chunks,
+        handle_plain_ask=deps.handle_plain_ask,
+        log=deps.log,
+    )
+    if content.strip().startswith("!") or intake_gate.bot_bridge_mention:
+        selected_target = message_target.DiscordMessageTarget(None, "selected")
+        prepared_prefix_content = message_content.prepare_inbound_message_content(
+            content,
+            selected_target,
+            bot_bridge_mention=intake_gate.bot_bridge_mention,
+            bridge_user_ids=deps.get_bridge_mention_user_ids(),
+            has_attachments=has_attachments,
+            channel_id=message.channel.id,
+            user_id=message.author.id,
+            log=deps.log,
+        )
+        if prepared_prefix_content.handled:
+            if prepared_prefix_content.empty_content:
+                await deps.maybe_send_empty_content_notice(message)
+            return
+        if prepared_prefix_content.content.startswith("!"):
+            await dispatch_prepared_message(
+                message,
+                prepared_prefix_content.content,
+                prepared_prefix_content.target,
+                deps=dispatch_deps,
+            )
+            return
     resolved_target = message_target.resolve_discord_message_target(
         deps.get_mirrored_codex_thread_id,
         message.channel.id,
         getattr(message.channel, "parent_id", None),
     )
-    has_attachments = bool(getattr(message, "attachments", None))
     prepared_message_content = message_content.prepare_inbound_message_content(
         content,
         resolved_target,
@@ -219,13 +252,5 @@ async def process_inbound_discord_message(
         message,
         content,
         resolved_target,
-        deps=PreparedMessageDispatchDeps(
-            format_log_text_len=deps.format_log_text_len,
-            persist_inbound_mirror_thread_channel=deps.persist_inbound_mirror_thread_channel,
-            handle_prefix_command=deps.handle_prefix_command,
-            describe_mirrored_project_channel=deps.describe_mirrored_project_channel,
-            send_chunks=deps.send_chunks,
-            handle_plain_ask=deps.handle_plain_ask,
-            log=deps.log,
-        ),
+        deps=dispatch_deps,
     )

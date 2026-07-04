@@ -237,7 +237,22 @@ function Set-EnvFileValue {
     Set-Content -LiteralPath $EnvPath -Value $lines -Encoding UTF8
 }
 
+function Get-DefaultCodexHomePath {
+    return (Join-Path ([Environment]::GetFolderPath('UserProfile')) '.codex')
+}
+
+function Test-CodexRuntimeBinPath {
+    param([string]$Path)
+
+    $normalized = $Path.TrimEnd('\', '/').ToLowerInvariant()
+    return $normalized.Contains('\.sandbox-bin') `
+        -or $normalized.Contains('\plugins\.plugin-appserver') `
+        -or $normalized.EndsWith('\appdata\local\openai\codex\bin') `
+        -or $normalized.EndsWith('\app\resources')
+}
+
 function Resolve-CodexHomePath {
+    $defaultCodexHome = Get-DefaultCodexHomePath
     if (-not [string]::IsNullOrWhiteSpace($CodexHome)) {
         $expanded = [Environment]::ExpandEnvironmentVariables($CodexHome.Trim().Trim('"').Trim("'"))
         $homePath = [Environment]::GetFolderPath('UserProfile')
@@ -247,10 +262,14 @@ function Resolve-CodexHomePath {
         if ($expanded.StartsWith('~/') -or $expanded.StartsWith('~\')) {
             $expanded = Join-Path $homePath $expanded.Substring(2)
         }
-        return [System.IO.Path]::GetFullPath($expanded)
+        $resolved = [System.IO.Path]::GetFullPath($expanded)
+        if (Test-CodexRuntimeBinPath -Path $resolved) {
+            return $defaultCodexHome
+        }
+        return $resolved
     }
 
-    return (Join-Path ([Environment]::GetFolderPath('UserProfile')) '.codex')
+    return $defaultCodexHome
 }
 
 function Find-CodexCommand {
@@ -319,7 +338,8 @@ if (-not $SkipEnvFile) {
 
     if ($DryRun) {
         Write-Output "Would set PYTHON_EXE to the resolved Python 3.12 executable in .env"
-        Write-Output "Would set CODEX_HOME to the resolved Codex home path in .env"
+        $codexHomePath = Resolve-CodexHomePath
+        Write-Output "Would set CODEX_HOME=$codexHomePath in .env"
         Write-Output "Would set CODEX_EXE in .env when the codex command is available"
     } else {
         $pythonCommand = @(Resolve-PythonCommand)

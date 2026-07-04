@@ -202,15 +202,24 @@ find_codex() {
 }
 
 resolve_codex_home() {
+  default_codex_home="$HOME/.codex"
   if [ -n "$codex_home" ]; then
     case "$codex_home" in
-      "~") printf '%s\n' "$HOME" ;;
-      "~/"*) printf '%s/%s\n' "$HOME" "${codex_home#~/}" ;;
-      *) printf '%s\n' "$codex_home" ;;
+      "~") resolved="$HOME" ;;
+      "~/"*) resolved="$HOME/${codex_home#~/}" ;;
+      *) resolved="$codex_home" ;;
+    esac
+    case "$(printf '%s' "$resolved" | tr '[:upper:]' '[:lower:]')" in
+      *'/.sandbox-bin'*|*'/plugins/.plugin-appserver'*|*'/appdata/local/openai/codex/bin'|*'/app/resources')
+        printf '%s\n' "$default_codex_home"
+        ;;
+      *)
+        printf '%s\n' "$resolved"
+        ;;
     esac
     return 0
   fi
-  printf '%s/.codex\n' "$HOME"
+  printf '%s\n' "$default_codex_home"
 }
 
 run_codex() {

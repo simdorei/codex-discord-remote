@@ -197,7 +197,7 @@ def detect_codex_desktop_executable_via_powershell() -> tuple[Path | None, str]:
             )
         )
     )
-    if process_path is not None:
+    if process_path is not None and desktop_process.is_codex_desktop_executable_candidate(process_path):
         return (process_path, "powershell:Get-Process")
 
     install_root = run_powershell_capture(

@@ -28,6 +28,11 @@ class InstallScriptTests(unittest.TestCase):
         self.assertIn("Set-EnvFileValue -Name 'PYTHON_EXE'", text)
         self.assertIn("Set-EnvFileValue -Name 'CODEX_HOME'", text)
         self.assertIn("Set-EnvFileValue -Name 'CODEX_EXE'", text)
+        self.assertIn("Would set CODEX_HOME=$codexHomePath in .env", text)
+        self.assertIn("function Test-CodexRuntimeBinPath", text)
+        self.assertIn("\\.sandbox-bin", text)
+        self.assertIn("\\plugins\\.plugin-appserver", text)
+        self.assertIn("\\appdata\\local\\openai\\codex\\bin", text)
         self.assertNotIn("winget", text)
         self.assertNotIn("Install Python 3.11+", text)
 
@@ -61,6 +66,10 @@ class InstallScriptTests(unittest.TestCase):
         self.assertIn("set_env_value PYTHON_EXE", text)
         self.assertIn("set_env_value CODEX_HOME", text)
         self.assertIn("set_env_value CODEX_EXE", text)
+        self.assertIn("default_codex_home=\"$HOME/.codex\"", text)
+        self.assertIn("/.sandbox-bin", text)
+        self.assertIn("/plugins/.plugin-appserver", text)
+        self.assertIn("/appdata/local/openai/codex/bin", text)
         self.assertNotIn("brew install", text)
         self.assertNotIn("Install Python 3.11+", text)
 

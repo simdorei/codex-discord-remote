@@ -37,13 +37,14 @@ def is_allowed_message_channel(
     is_allowed_channel_func: ChannelIdPredicate,
     is_mirrored_channel_id_func: ChannelIdPredicate,
 ) -> bool:
-    channel_id = channel.id
-    parent_id = channel.parent_id
+    channel_id = getattr(channel, "id", None)
+    parent_id = getattr(channel, "parent_id", None)
     if is_allowed_channel_func(channel_id) or is_allowed_channel_func(parent_id):
         return True
     if is_mirrored_channel_id_func(channel_id) or is_mirrored_channel_id_func(parent_id):
         return True
-    category = channel.category
-    if category is None and channel.parent is not None:
-        category = channel.parent.category
+    category = getattr(channel, "category", None)
+    parent = getattr(channel, "parent", None)
+    if category is None and parent is not None:
+        category = parent.category
     return category is not None and category.name == "Codex"

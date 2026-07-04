@@ -17,6 +17,7 @@ import codex_desktop_bridge_desktop_resolver as desktop_resolver
 class DesktopProcessTests(unittest.TestCase):
     def test_discovery_precedence_and_ensure_persists_env(self) -> None:
         env_path = Path("C:/Codex/env/Codex.exe")
+        cli_path = Path("C:/Codex/app/resources/codex.exe")
         running_path = Path("C:/Codex/running/Codex.exe")
         powershell_path = Path("C:/Codex/pwsh/Codex.exe")
         registry_path = Path("C:/Codex/registry/Codex.exe")
@@ -38,10 +39,16 @@ class DesktopProcessTests(unittest.TestCase):
         self.assertEqual(
             desktop_process.discover_codex_desktop_executable(
                 env_name="CODEX_DESKTOP_EXE",
-                deps=_deps(running=(running_path, "running"), powershell=(powershell_path, "powershell")),
+                deps=_deps(
+                    env_path=cli_path,
+                    running=(cli_path, "running-cli"),
+                    powershell=(powershell_path, "powershell"),
+                ),
             ),
-            (running_path, "running"),
+            (powershell_path, "powershell"),
         )
+        self.assertFalse(desktop_process.is_codex_desktop_executable_candidate(cli_path))
+        self.assertTrue(desktop_process.is_codex_desktop_executable_candidate(env_path))
         self.assertEqual(
             desktop_process.discover_codex_desktop_executable(
                 env_name="CODEX_DESKTOP_EXE",

@@ -113,10 +113,11 @@ Installer behavior:
 - On Windows, downloads portable Python 3.12.1 into `.python-portable/` when `PYTHON_EXE` is not already set.
 - Pins the portable Python executable into `.env` as `PYTHON_EXE`.
 - Pins the resolved Codex data directory into `.env` as `CODEX_HOME`.
+- Ignores runtime-only Codex `bin`, `.sandbox-bin`, `.plugin-appserver`, and `app/resources` paths when resolving `CODEX_HOME`, and falls back to the real user `.codex` directory.
 - Pins `CODEX_EXE` into `.env` when the `codex` command is available or explicitly passed.
 - Installs Python dependencies from `requirements.txt`.
 - Creates `.env` from `.env.example` if `.env` does not exist.
-- Discovers Codex Desktop and writes `CODEX_DESKTOP_EXE` to `.env`.
+- Discovers Codex Desktop and writes `CODEX_DESKTOP_EXE` to `.env`, skipping CLI resource executables such as `app/resources/codex.exe`.
 - Registers the local Codex plugin marketplace when the `codex` command is available.
 
 If the `codex` command is not available, setup still continues. Install the plugin later or set `CODEX_EXE` in `.env`.
@@ -140,6 +141,7 @@ The setup script:
 - asks for the Discord bot token with hidden input
 - checks the token with Discord
 - saves `DISCORD_BOT_TOKEN` to `.env`
+- asks for the general text channel ID for `!` commands, then adds it to `DISCORD_ALLOWED_CHANNEL_IDS` and fills `DISCORD_STARTUP_CHANNEL_ID` when that value is empty
 - prints a Discord invite URL
 
 Open the invite URL, choose the Discord server, and authorize the bot. The invite adds the bot to a server; channel access still depends on Discord permissions and `.env` channel IDs.
@@ -171,6 +173,7 @@ Important fields:
 | `DISCORD_BOT_TOKEN` | Secret bot token. Filled by the setup script. |
 | `DISCORD_GUILD_ID` | Discord server ID. |
 | `DISCORD_ALLOWED_CHANNEL_IDS` | Comma-separated allowlist of channel or thread IDs. |
+| `DISCORD_STARTUP_CHANNEL_ID` | Channel ID for startup notices. Filled by setup when a general channel ID is provided and this field is empty. |
 | `DISCORD_ALLOWED_USER_IDS` | Discord user IDs only. Required for host reboot commands. |
 | `DISCORD_ENABLE_HOST_COMMANDS` | Default `0`. Keep disabled unless trusted users are allowlisted. |
 | `DISCORD_PLAIN_ASK_MENTION_USER_IDS` | Bot user IDs that must be mentioned for plain ask routing outside mapped threads. |
@@ -371,7 +374,7 @@ The macOS smoke workflow checks Python compilation, selected unit tests, `instal
 
 - Check `DISCORD_ENABLE_MESSAGE_CONTENT=1`.
 - Check Message Content Intent in the Discord Developer Portal.
-- Check `DISCORD_ALLOWED_CHANNEL_IDS`.
+- Check `DISCORD_ALLOWED_CHANNEL_IDS`. For normal `!` commands in a general text channel, add that text channel ID directly.
 - In non-mapped channels, mention the bridge user if `DISCORD_PLAIN_ASK_MENTION_USER_IDS` is set.
 
 `macOS cannot click or focus Codex`

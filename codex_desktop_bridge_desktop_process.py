@@ -81,28 +81,38 @@ def iter_default_codex_desktop_candidates(environ: Mapping[str, str]) -> Iterato
                 yield (f"default:{candidate.parent}", candidate)
 
 
+def is_codex_desktop_executable_candidate(path: Path) -> bool:
+    if path.name.lower() != "codex.exe":
+        return True
+    if path.parent.name.lower() != "resources":
+        return True
+    return path.parent.parent.name.lower() != "app"
+
+
 def discover_codex_desktop_executable(
     *,
     env_name: str,
     deps: DesktopProcessDeps,
 ) -> tuple[Path | None, str]:
     env_path = deps.get_optional_env_file_path(env_name)
-    if env_path is not None:
+    if env_path is not None and is_codex_desktop_executable_candidate(env_path):
         return (env_path, f"env:{env_name}")
 
     running_path, running_source = deps.detect_running_codex_desktop_executable()
-    if running_path is not None:
+    if running_path is not None and is_codex_desktop_executable_candidate(running_path):
         return (running_path, running_source)
 
     powershell_path, powershell_source = deps.detect_codex_desktop_executable_via_powershell()
-    if powershell_path is not None:
+    if powershell_path is not None and is_codex_desktop_executable_candidate(powershell_path):
         return (powershell_path, powershell_source)
 
     for source, candidate in deps.iter_codex_desktop_registry_candidates():
-        return (candidate, source)
+        if is_codex_desktop_executable_candidate(candidate):
+            return (candidate, source)
 
     for source, candidate in deps.iter_default_codex_desktop_candidates():
-        return (candidate, source)
+        if is_codex_desktop_executable_candidate(candidate):
+            return (candidate, source)
 
     return (None, "")
 

@@ -24,9 +24,27 @@ class FakeChannel:
     category: FakeCategory | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class FakeTextChannelWithoutParentId:
+    id: int | None
+    parent: FakeParent | None = None
+    category: FakeCategory | None = None
+
+
 class ChannelGateTests(unittest.TestCase):
     def test_allows_direct_allowed_channel_id(self) -> None:
         channel = FakeChannel(id=10)
+
+        result = channel_gate.is_allowed_message_channel(
+            channel,
+            is_allowed_channel_func=lambda channel_id: channel_id == 10,
+            is_mirrored_channel_id_func=lambda channel_id: False,
+        )
+
+        self.assertTrue(result)
+
+    def test_allows_direct_allowed_text_channel_without_parent_id(self) -> None:
+        channel = FakeTextChannelWithoutParentId(id=10)
 
         result = channel_gate.is_allowed_message_channel(
             channel,

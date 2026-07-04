@@ -41,6 +41,10 @@ class EnvFileValueError(SetupDiscordBotError):
     pass
 
 
+class DiscordChannelIdError(SetupDiscordBotError):
+    pass
+
+
 @dataclass(frozen=True, slots=True)
 class DiscordApplication:
     application_id: str
@@ -138,6 +142,49 @@ def set_env_file_value(path: Path, name: str, value: str) -> None:
     path.write_text(newline.join(lines) + newline, encoding="utf-8")
 
 
+def get_env_file_value(path: Path, name: str) -> str:
+    if not path.exists():
+        return ""
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
+        stripped = raw_line.strip()
+        if not stripped or stripped.startswith("#") or "=" not in raw_line:
+            continue
+        key, _, value = raw_line.partition("=")
+        if key.strip() == name:
+            return value.strip()
+    return ""
+
+
+def parse_discord_channel_id(raw: str) -> str:
+    channel_id = raw.strip()
+    if not channel_id:
+        return ""
+    if not channel_id.isdecimal():
+        raise DiscordChannelIdError("Discord general channel ID must contain digits only.")
+    return channel_id
+
+
+def add_csv_value(existing: str, value: str) -> str:
+    items = [item.strip() for item in existing.split(",") if item.strip()]
+    if value not in items:
+        items.append(value)
+    return ",".join(items)
+
+
+def configure_general_channel_id(env_path: Path, channel_id: str) -> None:
+    parsed_channel_id = parse_discord_channel_id(channel_id)
+    if not parsed_channel_id:
+        return
+    allowed = get_env_file_value(env_path, "DISCORD_ALLOWED_CHANNEL_IDS")
+    set_env_file_value(
+        env_path,
+        "DISCORD_ALLOWED_CHANNEL_IDS",
+        add_csv_value(allowed, parsed_channel_id),
+    )
+    if not get_env_file_value(env_path, "DISCORD_STARTUP_CHANNEL_ID"):
+        set_env_file_value(env_path, "DISCORD_STARTUP_CHANNEL_ID", parsed_channel_id)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Configure the Discord bot token and print the invite link.")
     parser.add_argument("--repo-root", type=Path, default=Path(__file__).resolve().parent)
@@ -155,6 +202,7 @@ def run(argv: Sequence[str] | None = None) -> int:
     if args.dry_run:
         print("Dry run: no token was requested and .env was not changed.")
         print(f"Would save DISCORD_BOT_TOKEN to: {env_path}")
+        print("Would ask for the Discord general channel ID for !commands.")
         print("Invite link:")
         print(new_discord_bot_invite_url(str(args.bot_id), permissions))
         return 0
@@ -167,13 +215,23 @@ def run(argv: Sequence[str] | None = None) -> int:
     application = fetch_discord_application(token)
     set_env_file_value(env_path, "DISCORD_BOT_TOKEN", token)
 
+    print("Paste the Discord general text channel ID for !commands. Leave blank to fill it in later.")
+    general_channel_id = input("Discord general channel ID: ").strip()
+    if general_channel_id:
+        configure_general_channel_id(env_path, general_channel_id)
+
     print(f"Discord bot token saved to: {env_path}")
+    if general_channel_id:
+        print(
+            "General channel ID saved to DISCORD_ALLOWED_CHANNEL_IDS"
+            + " and DISCORD_STARTUP_CHANNEL_ID when it was empty."
+        )
     print(f"Application: {application.name} ({application.application_id})")
     print("Invite link:")
     print(new_discord_bot_invite_url(application.application_id, permissions))
     print("Open the invite link, choose your Discord server, and authorize the bot.")
     print("The invite link adds the bot to a server. Channel access still depends on Discord channel permissions and the channel IDs in .env.")
-    print("Next: copy server/channel IDs into .env, restart Codex, then run the platform launcher.")
+    print("Next: copy any remaining server/channel IDs into .env, restart Codex, then run the platform launcher.")
     return 0
 
 
