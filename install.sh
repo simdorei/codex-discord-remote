@@ -9,6 +9,8 @@ skip_env_file=0
 skip_steering_config=0
 skip_codex_plugin=0
 dry_run=0
+required_python_major=3
+required_python_minor=12
 
 usage() {
   echo "Usage: ./install.sh [--python-exe PATH] [--codex-exe PATH] [--skip-dependencies] [--skip-env-file] [--skip-steering-config] [--skip-codex-plugin] [--dry-run]" >&2
@@ -59,15 +61,52 @@ done
 
 resolve_python() {
   if [ -n "$python_exe" ]; then
-    printf '%s\n' "$python_exe"
-  elif command -v python3 >/dev/null 2>&1; then
-    command -v python3
-  elif command -v python >/dev/null 2>&1; then
-    command -v python
-  else
-    echo "Python was not found. Install Python 3.11+ or set PYTHON_EXE." >&2
+    if is_python312 "$python_exe"; then
+      printf '%s\n' "$python_exe"
+      return 0
+    fi
+    echo "PYTHON_EXE must point to Python 3.12.x: $python_exe" >&2
     exit 1
   fi
+
+  for candidate in python3.12 python3 python; do
+    if command -v "$candidate" >/dev/null 2>&1 && is_python312 "$candidate"; then
+      command -v "$candidate"
+      return 0
+    fi
+  done
+
+  require_python312
+  if [ "$dry_run" -eq 1 ]; then
+    printf '%s\n' "python3.12"
+    return 0
+  fi
+  for candidate in python3.12 python3 python; do
+    if command -v "$candidate" >/dev/null 2>&1 && is_python312 "$candidate"; then
+      command -v "$candidate"
+      return 0
+    fi
+  done
+
+  echo "Python 3.12.x was not found. Install Python 3.12, then rerun ./install.sh." >&2
+  exit 1
+}
+
+is_python312() {
+  "$1" -c "import sys; raise SystemExit(0 if sys.version_info[:2] == ($required_python_major, $required_python_minor) else 1)" >/dev/null 2>&1
+}
+
+require_python312() {
+  if [ "$dry_run" -eq 1 ]; then
+    echo "Would require Python 3.12 on PATH or --python-exe" >&2
+    return 0
+  fi
+  echo "Python 3.12.x was not found. Install Python 3.12 or pass --python-exe, then rerun ./install.sh." >&2
+  exit 1
+}
+
+python_executable_path() {
+  "$1" -c "import sys; print(sys.executable)"
 }
 
 run_python() {
@@ -95,6 +134,38 @@ get_env_value() {
         ;;
     esac
   done < "$env_path"
+}
+
+set_env_value() {
+  name=$1
+  value=$2
+  env_path="$script_dir/.env"
+  tmp_path="$env_path.tmp"
+  if [ -f "$env_path" ]; then
+    awk -v name="$name" -v value="$value" '
+      BEGIN { found = 0 }
+      /^[[:space:]]*($|#)/ { print; next }
+      index($0, "=") {
+        key = $0
+        sub(/=.*/, "", key)
+        gsub(/^[[:space:]]+|[[:space:]]+$/, "", key)
+        if (key == name) {
+          print name "=" value
+          found = 1
+          next
+        }
+      }
+      { print }
+      END {
+        if (!found) {
+          print name "=" value
+        }
+      }
+    ' "$env_path" > "$tmp_path"
+    mv "$tmp_path" "$env_path"
+  else
+    printf '%s=%s\n' "$name" "$value" > "$env_path"
+  fi
 }
 
 resolve_codex() {
@@ -142,6 +213,15 @@ if [ "$skip_env_file" -eq 0 ]; then
     fi
   else
     echo ".env.example was not found; skipping .env creation."
+  fi
+
+  if [ "$dry_run" -eq 1 ]; then
+    echo "Would set PYTHON_EXE to the resolved Python 3.12 executable in .env"
+  else
+    py=$(resolve_python)
+    py_path=$(python_executable_path "$py")
+    set_env_value PYTHON_EXE "$py_path"
+    echo "Configured PYTHON_EXE=$py_path"
   fi
 fi
 

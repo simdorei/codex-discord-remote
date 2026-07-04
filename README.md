@@ -50,7 +50,7 @@ The installer can run without the Discord token. Token setup is intentionally po
 ## Requirements
 
 - Windows 10/11 or macOS.
-- Python 3.11 or newer.
+- Python 3.12.x. On Windows, `install.ps1` downloads portable Python 3.12.1 into this repo when missing.
 - Git.
 - Codex Desktop installed and signed in.
 - Discord bot token.
@@ -109,6 +109,9 @@ chmod +x ./install.sh ./setup-discord-bot.sh ./codex-discord-bot.sh
 
 Installer behavior:
 
+- Requires Python 3.12.x.
+- On Windows, downloads portable Python 3.12.1 into `.python-portable/` when `PYTHON_EXE` is not already set.
+- Pins the portable Python executable into `.env` as `PYTHON_EXE`.
 - Installs Python dependencies from `requirements.txt`.
 - Creates `.env` from `.env.example` if `.env` does not exist.
 - Discovers Codex Desktop and writes `CODEX_DESKTOP_EXE` to `.env`.
@@ -173,7 +176,7 @@ Important fields:
 | `DISCORD_ENABLE_ATTACHMENTS` | Saves Discord attachments and includes local paths in Codex prompts. |
 | `CODEX_EXE` | Optional path to Codex CLI/app-server executable. |
 | `CODEX_DESKTOP_EXE` | Optional path to Codex Desktop executable. Installer tries to fill it. |
-| `PYTHON_EXE` | Optional Python executable override. |
+| `PYTHON_EXE` | Python 3.12 executable path. Windows installer pins the repo-local portable Python automatically. |
 
 Do not commit `.env`.
 
@@ -282,6 +285,8 @@ Common prefix commands:
 - `!confirm_delete_archive`
 - `!new`
 - `!interview`
+
+Bundled Codex skill `deep-interview` powers `/interview` and `!interview` for unclear or risky requests.
 
 Numeric refs follow the same DB-root numbering as `!list`.
 

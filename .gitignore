@@ -1,6 +1,7 @@
 .env
 .omo/
 .ruff_cache/
+.python-portable/
 .codex-remote-attachments/
 .startup-backup/
 HANDOFF.md

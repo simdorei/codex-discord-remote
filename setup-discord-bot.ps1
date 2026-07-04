@@ -18,17 +18,12 @@ function Resolve-PythonCommand {
         return @($env:PYTHON_EXE)
     }
 
-    $pyLauncher = Get-Command py -ErrorAction SilentlyContinue
-    if ($pyLauncher -ne $null) {
-        return @($pyLauncher.Source, '-3')
+    $portablePython = Join-Path $RepoRoot '.python-portable\python.exe'
+    if (Test-Path -LiteralPath $portablePython) {
+        return @($portablePython)
     }
 
-    $python = Get-Command python -ErrorAction SilentlyContinue
-    if ($python -ne $null) {
-        return @($python.Source)
-    }
-
-    throw 'Python was not found. Install Python 3.11+ or set PYTHON_EXE.'
+    throw 'Portable Python 3.12 was not found. Run .\install.ps1 first to download it and pin PYTHON_EXE.'
 }
 
 $command = @(Resolve-PythonCommand)

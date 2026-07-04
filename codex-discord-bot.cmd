@@ -73,34 +73,10 @@ if defined LAUNCHER_PID (
 
 if defined PYTHON_EXE if exist "%PYTHON_EXE%" goto run
 
-set "PYTHON_EXE=%LocalAppData%\Programs\Python\Python313\python.exe"
+set "PYTHON_EXE=%SCRIPT_DIR%.python-portable\python.exe"
 if exist "%PYTHON_EXE%" goto run
 
-where py >nul 2>nul
-if %errorlevel%==0 (
-  set "LAUNCHER_LOG_MESSAGE=run launcher=py script=%SCRIPT%"
-  call :log_launcher
-  py -3 "%SCRIPT%" %SCRIPT_ARGS%
-  set "EXIT_CODE=%errorlevel%"
-  set "LAUNCHER_LOG_MESSAGE=exit code=%EXIT_CODE% script=%SCRIPT%"
-  call :log_launcher
-  rmdir /s /q "%LOCK_DIR%" >nul 2>nul
-  exit /b %EXIT_CODE%
-)
-
-where python >nul 2>nul
-if %errorlevel%==0 (
-  set "LAUNCHER_LOG_MESSAGE=run launcher=python script=%SCRIPT%"
-  call :log_launcher
-  python "%SCRIPT%" %SCRIPT_ARGS%
-  set "EXIT_CODE=%errorlevel%"
-  set "LAUNCHER_LOG_MESSAGE=exit code=%EXIT_CODE% script=%SCRIPT%"
-  call :log_launcher
-  rmdir /s /q "%LOCK_DIR%" >nul 2>nul
-  exit /b %EXIT_CODE%
-)
-
-echo ERROR: Python executable not found.
+echo ERROR: Portable Python 3.12 was not found. Run .\install.ps1 to download it and pin PYTHON_EXE.
 set "LAUNCHER_LOG_MESSAGE=python_not_found script=%SCRIPT%"
 call :log_launcher
 rmdir /s /q "%LOCK_DIR%" >nul 2>nul

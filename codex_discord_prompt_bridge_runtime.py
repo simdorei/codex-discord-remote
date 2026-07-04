@@ -27,17 +27,6 @@ GetSteeringBridgeModuleFunc: TypeAlias = Callable[[], discord_steering.SteeringB
 GetAppServerClientFunc: TypeAlias = Callable[[], discord_app_server.AppServerClient]
 
 
-def is_app_server_rollout_thread_id_parse_error(result: discord_steering.SteeringPromptResult) -> bool:
-    if result.exit_code == 0:
-        return False
-    output = result.output.lower()
-    return (
-        "resident app-server transport failed" in output
-        and "thread/resume failed" in output
-        and "failed to parse thread id from rollout file" in output
-    )
-
-
 @dataclass(frozen=True, slots=True)
 class PromptBridgeRuntime:
     script_dir: Path
@@ -173,15 +162,7 @@ class PromptBridgeRuntime:
         target_thread_id: str | None,
     ) -> discord_steering.SteeringPromptResult:
         if self.is_app_server_transport_enabled_func():
-            result = self.run_resident_steering_prompt_func(prompt, target_thread_id)
-            if not is_app_server_rollout_thread_id_parse_error(result):
-                return result
-            fallback_thread_id = result.target_thread_id or target_thread_id
-            self.log(
-                "app_server_steering_rollout_parse_failed_ipc_fallback "
-                f"target={fallback_thread_id or '-'}"
-            )
-            target_thread_id = fallback_thread_id
+            return self.run_resident_steering_prompt_func(prompt, target_thread_id)
         return discord_steering.run_steering_prompt(
             prompt,
             target_thread_id,

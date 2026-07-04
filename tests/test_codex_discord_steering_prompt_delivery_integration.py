@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Protocol, cast
+from collections.abc import Callable
+from typing import Protocol, TypeAlias, cast
 import tempfile
 import unittest
 
@@ -9,12 +10,45 @@ import codex_app_server_transport as app_server_transport
 import codex_desktop_bridge as bridge
 import codex_discord_bot as bot
 import codex_discord_prompt_busy_result as prompt_busy_result
+import codex_discord_steering as discord_steering
 from codex_thread_models import ThreadInfo
 
 from tests.test_codex_discord_bot import EnvPatch
 
 
 AskCall = dict[str, bool | float | str | None]
+ResolveTargetRef: TypeAlias = Callable[[str | None], tuple[str | None, str]]
+RunAsk: TypeAlias = Callable[..., tuple[int, str]]
+RunSteeringPrompt: TypeAlias = Callable[[str, str | None], discord_steering.SteeringPromptResult]
+
+
+class BotRuntimeAdapter:
+    @property
+    def resolve_target_ref(self) -> ResolveTargetRef:
+        return cast(ResolveTargetRef, getattr(bot, "resolve_target_ref"))
+
+    @resolve_target_ref.setter
+    def resolve_target_ref(self, value: ResolveTargetRef) -> None:
+        setattr(bot, "resolve_target_ref", value)
+
+    @property
+    def run_ask(self) -> RunAsk:
+        return cast(RunAsk, getattr(bot, "run_ask"))
+
+    @run_ask.setter
+    def run_ask(self, value: RunAsk) -> None:
+        setattr(bot, "run_ask", value)
+
+    @property
+    def run_steering_prompt(self) -> RunSteeringPrompt:
+        return cast(RunSteeringPrompt, getattr(bot, "run_steering_prompt"))
+
+    @property
+    def STEERING_DELIVERY_CONFIRM_TIMEOUT_SECONDS(self) -> float:
+        return cast(float, getattr(bot, "STEERING_DELIVERY_CONFIRM_TIMEOUT_SECONDS"))
+
+
+bot_runtime = BotRuntimeAdapter()
 
 
 class ChooseThread(Protocol):
@@ -56,10 +90,10 @@ def make_thread(temp_dir: str, session_path: Path) -> ThreadInfo:
 
 class DiscordSteeringPromptDeliveryIntegrationTests(unittest.TestCase):
     def test_run_steering_prompt_treats_delayed_ipc_delivery_as_success(self) -> None:
-        original_resolve_target_ref = bot.resolve_target_ref
+        original_resolve_target_ref = bot_runtime.resolve_target_ref
         original_choose_thread = cast(ChooseThread, getattr(bridge, "choose_thread"))
         original_snapshot = cast(SnapshotRecentSessionOffsets, getattr(bridge, "snapshot_recent_session_offsets"))
-        original_run_ask = bot.run_ask
+        original_run_ask = bot_runtime.run_ask
         original_wait = cast(WaitForPromptDelivery, getattr(bridge, "wait_for_prompt_delivery"))
         try:
             with tempfile.TemporaryDirectory() as temp_dir:
@@ -69,7 +103,7 @@ class DiscordSteeringPromptDeliveryIntegrationTests(unittest.TestCase):
                 recent_offsets: prompt_busy_result.RecentOffsets = {"thread-1": (thread, session_path, 12)}
                 waits: list[float] = []
 
-                bot.resolve_target_ref = lambda target_thread_id: ("thread-1", "taxlab:1")
+                bot_runtime.resolve_target_ref = lambda target_thread_id: ("thread-1", "taxlab:1")
 
                 def fake_choose_thread(thread_id: str | None, cwd: str | None = None) -> ThreadInfo:
                     _ = thread_id, cwd
@@ -117,13 +151,13 @@ class DiscordSteeringPromptDeliveryIntegrationTests(unittest.TestCase):
 
                 setattr(bridge, "choose_thread", fake_choose_thread)
                 setattr(bridge, "snapshot_recent_session_offsets", fake_snapshot_recent_session_offsets)
-                bot.run_ask = fake_run_ask
+                bot_runtime.run_ask = fake_run_ask
                 setattr(bridge, "wait_for_prompt_delivery", fake_wait)
 
                 log_path = Path(temp_dir) / "discord-smoke.log"
                 with EnvPatch("CODEX_DISCORD_LOG_PATH", str(log_path)):
                     with EnvPatch("CODEX_DISCORD_APP_SERVER_TRANSPORT", "0"):
-                        result = bot.run_steering_prompt("please steer", "thread-1")
+                        result = bot_runtime.run_steering_prompt("please steer", "thread-1")
 
             self.assertEqual(result.exit_code, 0)
             self.assertIn("[delivery_verified]", result.output)
@@ -133,20 +167,20 @@ class DiscordSteeringPromptDeliveryIntegrationTests(unittest.TestCase):
             self.assertEqual(ask_calls[0]["wait"], False)
             self.assertEqual(ask_calls[0]["force_while_busy"], True)
             self.assertIsNotNone(ask_calls[0]["timeout_sec"])
-            self.assertGreaterEqual(waits[-1], bot.STEERING_DELIVERY_CONFIRM_TIMEOUT_SECONDS)
+            self.assertGreaterEqual(waits[-1], bot_runtime.STEERING_DELIVERY_CONFIRM_TIMEOUT_SECONDS)
         finally:
-            bot.resolve_target_ref = original_resolve_target_ref
+            bot_runtime.resolve_target_ref = original_resolve_target_ref
             setattr(bridge, "choose_thread", original_choose_thread)
             setattr(bridge, "snapshot_recent_session_offsets", original_snapshot)
-            bot.run_ask = original_run_ask
+            bot_runtime.run_ask = original_run_ask
             setattr(bridge, "wait_for_prompt_delivery", original_wait)
 
     def test_run_steering_prompt_uses_resident_app_server_transport_by_default(self) -> None:
-        original_resolve_target_ref = bot.resolve_target_ref
+        original_resolve_target_ref = bot_runtime.resolve_target_ref
         original_steer = app_server_transport.steer_or_start_no_wait
         calls: list[tuple[str, str | None, app_server_transport.PersistentCodexAppServer]] = []
         try:
-            bot.resolve_target_ref = lambda target_thread_id: ("thread-1", "taxlab:1")
+            bot_runtime.resolve_target_ref = lambda target_thread_id: ("thread-1", "taxlab:1")
 
             def fake_steer(
                 client: app_server_transport.PersistentCodexAppServer,
@@ -170,7 +204,7 @@ class DiscordSteeringPromptDeliveryIntegrationTests(unittest.TestCase):
             app_server_transport.steer_or_start_no_wait = fake_steer
 
             with EnvPatch("CODEX_DISCORD_APP_SERVER_TRANSPORT", "1"):
-                result = bot.run_steering_prompt("please steer", "thread-1")
+                result = bot_runtime.run_steering_prompt("please steer", "thread-1")
 
             self.assertEqual(result.exit_code, 0)
             self.assertIn("resident-app-server", result.output)
@@ -181,15 +215,15 @@ class DiscordSteeringPromptDeliveryIntegrationTests(unittest.TestCase):
             self.assertTrue(result.delivery_pending)
             self.assertEqual(calls, [("please steer", "thread-1", app_server_transport.DEFAULT_CLIENT)])
         finally:
-            bot.resolve_target_ref = original_resolve_target_ref
+            bot_runtime.resolve_target_ref = original_resolve_target_ref
             app_server_transport.steer_or_start_no_wait = original_steer
 
-    def test_run_steering_prompt_falls_back_to_ipc_for_rollout_thread_id_parse_error(self) -> None:
-        original_resolve_target_ref = bot.resolve_target_ref
+    def test_run_steering_prompt_surfaces_rollout_thread_id_parse_error(self) -> None:
+        original_resolve_target_ref = bot_runtime.resolve_target_ref
         original_steer = app_server_transport.steer_or_start_no_wait
         original_choose_thread = cast(ChooseThread, getattr(bridge, "choose_thread"))
         original_snapshot = cast(SnapshotRecentSessionOffsets, getattr(bridge, "snapshot_recent_session_offsets"))
-        original_run_ask = bot.run_ask
+        original_run_ask = bot_runtime.run_ask
         original_wait = cast(WaitForPromptDelivery, getattr(bridge, "wait_for_prompt_delivery"))
         try:
             with tempfile.TemporaryDirectory() as temp_dir:
@@ -199,7 +233,7 @@ class DiscordSteeringPromptDeliveryIntegrationTests(unittest.TestCase):
                 recent_offsets: prompt_busy_result.RecentOffsets = {"thread-1": (thread, session_path, 12)}
                 waits: list[float] = []
 
-                bot.resolve_target_ref = lambda target_thread_id: ("thread-1", "taxlab:1")
+                bot_runtime.resolve_target_ref = lambda target_thread_id: ("thread-1", "taxlab:1")
 
                 def fake_steer(
                     client: app_server_transport.PersistentCodexAppServer,
@@ -235,7 +269,6 @@ class DiscordSteeringPromptDeliveryIntegrationTests(unittest.TestCase):
                     target_thread_id: str | None = None,
                     timeout_sec: float | None = None,
                 ) -> tuple[int, str]:
-                    _ = prompt
                     ask_calls.append(
                         {
                             "force_while_busy": force_while_busy,
@@ -244,10 +277,7 @@ class DiscordSteeringPromptDeliveryIntegrationTests(unittest.TestCase):
                             "timeout_sec": timeout_sec,
                         }
                     )
-                    return (
-                        1,
-                        "ERROR: transport returned a nonzero exit, but the prompt may still be recorded.",
-                    )
+                    raise AssertionError(f"must not open IPC fallback: {prompt}")
 
                 def fake_wait(
                     session_offsets: prompt_busy_result.RecentOffsets,
@@ -261,38 +291,35 @@ class DiscordSteeringPromptDeliveryIntegrationTests(unittest.TestCase):
                 app_server_transport.steer_or_start_no_wait = fake_steer
                 setattr(bridge, "choose_thread", fake_choose_thread)
                 setattr(bridge, "snapshot_recent_session_offsets", fake_snapshot_recent_session_offsets)
-                bot.run_ask = fake_run_ask
+                bot_runtime.run_ask = fake_run_ask
                 setattr(bridge, "wait_for_prompt_delivery", fake_wait)
 
                 log_path = Path(temp_dir) / "discord-smoke.log"
                 with EnvPatch("CODEX_DISCORD_LOG_PATH", str(log_path)):
                     with EnvPatch("CODEX_DISCORD_APP_SERVER_TRANSPORT", "1"):
-                        result = bot.run_steering_prompt("please steer", "thread-1")
+                        result = bot_runtime.run_steering_prompt("please steer", "thread-1")
                 log_text = log_path.read_text(encoding="utf-8")
 
-            self.assertEqual(result.exit_code, 0)
-            self.assertIn("[delivery_verified]", result.output)
+            self.assertEqual(result.exit_code, 1)
+            self.assertIn("ERROR: resident app-server transport failed:", result.output)
+            self.assertIn("failed to parse thread ID from rollout file", result.output)
             self.assertEqual(result.target_thread_id, "thread-1")
-            self.assertEqual(result.session_path, str(session_path))
-            self.assertEqual(result.start_offset, 12)
-            self.assertEqual(ask_calls[0]["target_thread_id"], "thread-1")
-            self.assertEqual(ask_calls[0]["wait"], False)
-            self.assertEqual(ask_calls[0]["force_while_busy"], True)
-            self.assertGreaterEqual(waits[-1], bot.STEERING_DELIVERY_CONFIRM_TIMEOUT_SECONDS)
-            self.assertIn("app_server_steering_rollout_parse_failed_ipc_fallback target=thread-1", log_text)
+            self.assertEqual(ask_calls, [])
+            self.assertEqual(waits, [])
+            self.assertIn("app_server_steering_failed target=thread-1", log_text)
         finally:
-            bot.resolve_target_ref = original_resolve_target_ref
+            bot_runtime.resolve_target_ref = original_resolve_target_ref
             app_server_transport.steer_or_start_no_wait = original_steer
             setattr(bridge, "choose_thread", original_choose_thread)
             setattr(bridge, "snapshot_recent_session_offsets", original_snapshot)
-            bot.run_ask = original_run_ask
+            bot_runtime.run_ask = original_run_ask
             setattr(bridge, "wait_for_prompt_delivery", original_wait)
 
     def test_run_steering_prompt_keeps_watching_pending_ipc_delivery(self) -> None:
-        original_resolve_target_ref = bot.resolve_target_ref
+        original_resolve_target_ref = bot_runtime.resolve_target_ref
         original_choose_thread = cast(ChooseThread, getattr(bridge, "choose_thread"))
         original_snapshot = cast(SnapshotRecentSessionOffsets, getattr(bridge, "snapshot_recent_session_offsets"))
-        original_run_ask = bot.run_ask
+        original_run_ask = bot_runtime.run_ask
         original_wait = cast(WaitForPromptDelivery, getattr(bridge, "wait_for_prompt_delivery"))
         try:
             with tempfile.TemporaryDirectory() as temp_dir:
@@ -302,7 +329,7 @@ class DiscordSteeringPromptDeliveryIntegrationTests(unittest.TestCase):
                 recent_offsets: prompt_busy_result.RecentOffsets = {"thread-1": (thread, session_path, 12)}
                 waits: list[float] = []
 
-                bot.resolve_target_ref = lambda target_thread_id: ("thread-1", "taxlab:1")
+                bot_runtime.resolve_target_ref = lambda target_thread_id: ("thread-1", "taxlab:1")
 
                 def fake_choose_thread(thread_id: str | None, cwd: str | None = None) -> ThreadInfo:
                     _ = thread_id, cwd
@@ -342,13 +369,13 @@ class DiscordSteeringPromptDeliveryIntegrationTests(unittest.TestCase):
 
                 setattr(bridge, "choose_thread", fake_choose_thread)
                 setattr(bridge, "snapshot_recent_session_offsets", fake_snapshot_recent_session_offsets)
-                bot.run_ask = fake_run_ask
+                bot_runtime.run_ask = fake_run_ask
                 setattr(bridge, "wait_for_prompt_delivery", fake_wait)
 
                 log_path = Path(temp_dir) / "discord-smoke.log"
                 with EnvPatch("CODEX_DISCORD_LOG_PATH", str(log_path)):
                     with EnvPatch("CODEX_DISCORD_APP_SERVER_TRANSPORT", "0"):
-                        result = bot.run_steering_prompt("please steer", "thread-1")
+                        result = bot_runtime.run_steering_prompt("please steer", "thread-1")
                 log_text = log_path.read_text(encoding="utf-8")
 
                 self.assertEqual(result.exit_code, 0)
@@ -361,10 +388,10 @@ class DiscordSteeringPromptDeliveryIntegrationTests(unittest.TestCase):
                 self.assertEqual(waits, [])
                 self.assertIn("steering_ipc_delivery_pending exit=1 target=thread-1 confirm_timeout=0.0", log_text)
         finally:
-            bot.resolve_target_ref = original_resolve_target_ref
+            bot_runtime.resolve_target_ref = original_resolve_target_ref
             setattr(bridge, "choose_thread", original_choose_thread)
             setattr(bridge, "snapshot_recent_session_offsets", original_snapshot)
-            bot.run_ask = original_run_ask
+            bot_runtime.run_ask = original_run_ask
             setattr(bridge, "wait_for_prompt_delivery", original_wait)
 
 

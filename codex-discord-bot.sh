@@ -34,20 +34,31 @@ load_env_value() {
 
 resolve_python() {
   if [ -n "$python_exe" ]; then
-    printf '%s\n' "$python_exe"
+    if is_python312 "$python_exe"; then
+      printf '%s\n' "$python_exe"
+      return 0
+    fi
+    echo "ERROR: PYTHON_EXE must point to Python 3.12.x: $python_exe" >&2
+    exit 1
   else
     env_python=$(load_env_value PYTHON_EXE || true)
-    if [ -n "$env_python" ]; then
+    if [ -n "$env_python" ] && is_python312 "$env_python"; then
       printf '%s\n' "$env_python"
-    elif command -v python3 >/dev/null 2>&1; then
-      command -v python3
-    elif command -v python >/dev/null 2>&1; then
-      command -v python
-    else
-      echo "ERROR: Python executable not found." >&2
-      exit 1
+      return 0
     fi
+    for candidate in python3.12 python3 python; do
+      if command -v "$candidate" >/dev/null 2>&1 && is_python312 "$candidate"; then
+        command -v "$candidate"
+        return 0
+      fi
+    done
+    echo "ERROR: Python 3.12 was not found. Run ./install.sh to install and pin PYTHON_EXE." >&2
+    exit 1
   fi
+}
+
+is_python312() {
+  "$1" -c 'import sys; raise SystemExit(0 if sys.version_info[:2] == (3, 12) else 1)' >/dev/null 2>&1
 }
 
 pid_alive() {
