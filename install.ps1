@@ -26,6 +26,7 @@ $PortablePythonZip = Join-Path $PortablePythonDir "python-${PortablePythonVersio
 $PortablePythonUrl = "https://www.python.org/ftp/python/${PortablePythonVersion}/python-${PortablePythonVersion}-embed-amd64.zip"
 $GetPipUrl = 'https://bootstrap.pypa.io/get-pip.py'
 $GetPipPath = Join-Path $PortablePythonDir 'get-pip.py'
+$GetPipLogPath = Join-Path $PortablePythonDir 'get-pip.log'
 
 function Test-PythonCommand {
     param([string[]]$Command)
@@ -82,22 +83,42 @@ function Enable-PortablePythonSite {
     }
     $pthPath = $pthFiles[0].FullName
     $lines = @(Get-Content -LiteralPath $pthPath)
+    $updatedLines = [System.Collections.Generic.List[string]]::new()
+    $hasRepoRoot = $false
     $hasImportSite = $false
-    for ($i = 0; $i -lt $lines.Count; $i++) {
-        if (([string]$lines[$i]).Trim() -eq 'import site') {
-            $hasImportSite = $true
-            break
+    foreach ($lineValue in $lines) {
+        $line = [string]$lineValue
+        $trimmed = $line.Trim()
+        if ($trimmed -eq '..') {
+            $hasRepoRoot = $true
         }
-        if (([string]$lines[$i]).Trim() -eq '#import site') {
-            $lines[$i] = 'import site'
+        if ($trimmed -eq 'import site') {
+            if (-not $hasRepoRoot) {
+                $updatedLines.Add('..')
+                $hasRepoRoot = $true
+            }
             $hasImportSite = $true
-            break
+            $updatedLines.Add($line)
+            continue
         }
+        if ($trimmed -eq '#import site') {
+            if (-not $hasRepoRoot) {
+                $updatedLines.Add('..')
+                $hasRepoRoot = $true
+            }
+            $hasImportSite = $true
+            $updatedLines.Add('import site')
+            continue
+        }
+        $updatedLines.Add($line)
+    }
+    if (-not $hasRepoRoot) {
+        $updatedLines.Add('..')
     }
     if (-not $hasImportSite) {
-        $lines += 'import site'
+        $updatedLines.Add('import site')
     }
-    Set-Content -LiteralPath $pthPath -Value $lines -Encoding ASCII
+    Set-Content -LiteralPath $pthPath -Value $updatedLines -Encoding ASCII
 }
 
 function Install-PortablePython312 {
@@ -112,11 +133,15 @@ function Install-PortablePython312 {
     Remove-Item -LiteralPath $PortablePythonZip -Force
     Enable-PortablePythonSite
     Invoke-WebRequest -Uri $GetPipUrl -OutFile $GetPipPath
-    & $PortablePythonExe $GetPipPath --no-warn-script-location
+    if (Test-Path -LiteralPath $GetPipLogPath) {
+        Remove-Item -LiteralPath $GetPipLogPath -Force
+    }
+    & $PortablePythonExe $GetPipPath --no-warn-script-location *> $GetPipLogPath
     if ($LASTEXITCODE -ne 0) {
-        throw "get-pip.py failed for portable Python with exit code ${LASTEXITCODE}."
+        throw "get-pip.py failed for portable Python with exit code ${LASTEXITCODE}. See $GetPipLogPath."
     }
     Remove-Item -LiteralPath $GetPipPath -Force
+    Remove-Item -LiteralPath $GetPipLogPath -Force
 }
 
 function Resolve-PythonCommand {

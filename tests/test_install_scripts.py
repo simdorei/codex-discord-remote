@@ -18,6 +18,8 @@ class InstallScriptTests(unittest.TestCase):
         self.assertIn("python-${PortablePythonVersion}-embed-amd64.zip", text)
         self.assertIn("python.org/ftp/python/${PortablePythonVersion}", text)
         self.assertIn("get-pip.py", text)
+        self.assertIn("get-pip.log", text)
+        self.assertIn("$updatedLines.Add('..')", text)
         self.assertIn("Set-EnvFileValue -Name 'PYTHON_EXE'", text)
         self.assertNotIn("winget", text)
         self.assertNotIn("Install Python 3.11+", text)
