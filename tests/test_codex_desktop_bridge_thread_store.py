@@ -1,10 +1,15 @@
 from __future__ import annotations
 
+import sqlite3
+import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
+import codex_desktop_bridge_session_files as session_file_threads
 import codex_desktop_bridge_state as bridge_state
 import codex_desktop_bridge_thread_store as thread_store
+import codex_desktop_bridge_thread_store_db as thread_store_db
 from codex_thread_models import ThreadInfo
 
 
@@ -105,6 +110,62 @@ class ThreadStoreErrorTests(unittest.TestCase):
         self.assertEqual(chosen, target)
 
 
+class ThreadStoreDbScopeTests(unittest.TestCase):
+    def test_user_root_scope_excludes_non_codex_chats_and_subagents(self) -> None:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp_dir:
+            db_path = Path(temp_dir) / "state.sqlite"
+            with sqlite3.connect(db_path) as conn:
+                _ = conn.execute(
+                    """
+                    CREATE TABLE threads (
+                        id TEXT PRIMARY KEY,
+                        title TEXT,
+                        cwd TEXT,
+                        updated_at INTEGER,
+                        rollout_path TEXT,
+                        model TEXT,
+                        reasoning_effort TEXT,
+                        tokens_used INTEGER,
+                        archived INTEGER,
+                        source TEXT,
+                        thread_source TEXT
+                    )
+                    """
+                )
+                _ = conn.executemany(
+                    """
+                    INSERT INTO threads (
+                        id, title, cwd, updated_at, rollout_path, model,
+                        reasoning_effort, tokens_used, archived, source, thread_source
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    [
+                        _db_thread_row("codex-project", r"C:\repo", "vscode", "user", 4),
+                        _db_thread_row(
+                            "codex-projectless",
+                            r"C:\Users\User\Documents\Codex\2026-07-10\new-chat",
+                            "vscode",
+                            "",
+                            3,
+                        ),
+                        _db_thread_row("chatgpt", r"C:\repo", "chatgpt", "user", 2),
+                        _db_thread_row("codex-subagent", r"C:\repo", "vscode", "subagent", 1),
+                    ],
+                )
+
+            with (
+                patch.object(bridge_state, "STATE_DB_PATH", db_path),
+                patch.object(
+                    session_file_threads,
+                    "load_missing_vscode_rollout_threads",
+                    return_value=[],
+                ),
+            ):
+                threads = thread_store_db.load_user_root_threads()
+
+        self.assertEqual([thread.id for thread in threads], ["codex-project", "codex-projectless"])
+
+
 def _thread(thread_id: str, cwd: str) -> ThreadInfo:
     return ThreadInfo(
         id=thread_id,
@@ -115,6 +176,28 @@ def _thread(thread_id: str, cwd: str) -> ThreadInfo:
         model="gpt",
         reasoning_effort="high",
         tokens_used=0,
+    )
+
+
+def _db_thread_row(
+    thread_id: str,
+    cwd: str,
+    source: str,
+    thread_source: str,
+    updated_at: int,
+) -> tuple[str, str, str, int, str, str, str, int, int, str, str]:
+    return (
+        thread_id,
+        f"Thread {thread_id}",
+        cwd,
+        updated_at,
+        f"{thread_id}.jsonl",
+        "gpt",
+        "high",
+        0,
+        0,
+        source,
+        thread_source,
     )
 
 

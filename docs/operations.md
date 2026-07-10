@@ -83,3 +83,10 @@ Explicit routing:
 - A `codex/session: <thread-id>` line overrides the mapped or selected thread for handoff packets.
 - Exact Codex thread ids are resolved against the full local active thread database, not only the recent list, so older but still unarchived threads can be targeted safely.
 - Mirror sync and mirror list commands still use the narrower mirror scope; do not use them as a cleanup mechanism for all local Codex history.
+
+Mirror source boundary:
+
+- Mirror discovery is intentionally limited to active local Codex user-root threads (`source=vscode`, `thread_source=user` or the legacy empty value).
+- Projectless Codex threads under `Documents/Codex/<date>/new-chat` remain in scope and are grouped as the Codex chat project.
+- Regular ChatGPT/GPT conversations outside Codex and Codex subagent sessions are out of scope and must not be mirrored.
+- Keep this boundary fail-closed. A new source or conversation kind requires an explicit product decision and regression-test update before it can enter mirror sync.

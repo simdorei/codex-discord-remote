@@ -93,12 +93,15 @@ def load_recent_threads(limit: int = 20) -> list[ThreadInfo]:
 
 
 def load_user_root_threads(limit: int = 0) -> list[ThreadInfo]:
+    # Keep mirror discovery fail-closed to local Codex user threads. Other app
+    # conversations and subagent sessions require an explicit contract change.
     query = "\n".join(
         (
             "SELECT id, title, cwd, updated_at, rollout_path, model, reasoning_effort, tokens_used",
             "FROM threads",
             "WHERE archived = 0",
             "  AND source = 'vscode'",
+            "  AND COALESCE(thread_source, '') IN ('', 'user')",
             "  AND title != ''",
             "ORDER BY updated_at DESC",
         )

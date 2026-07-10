@@ -315,6 +315,8 @@ Use `--thread-ref` for a mirrored Codex thread, `--work-thread` for a specific C
 ## Routing And Mirror Rules
 
 - A mapped Discord thread follows its matching Codex app thread.
+- Mirror discovery includes only local Codex user-root threads. Regular ChatGPT/GPT conversations outside Codex are intentionally excluded.
+- Projectless Codex `new-chat` threads remain included as the Codex chat project.
 - Plain Discord messages inside a mapped thread go to that mapped Codex thread, not the currently selected Codex tab.
 - Codex text output mirrors as Discord text.
 - Codex image and structured file output mirrors as Discord attachments.
