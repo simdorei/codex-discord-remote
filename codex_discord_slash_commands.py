@@ -1,8 +1,16 @@
 from __future__ import annotations
 
+import asyncio  # noqa: ANYIO_OK
+from typing import cast
+
+import discord
+from discord import app_commands
+
 import codex_discord_commands as discord_commands
+import codex_discord_settings_commands as settings_commands
 from codex_discord_slash_types import (
     BasicSlashCommandDeps,
+    BasicSlashInteraction,
     ContextMessageBuilder,
     ContextRefreshMessageBuilder,
     InteractionBridgeRunner,
@@ -12,11 +20,14 @@ from codex_discord_slash_types import (
     SlashCommandBot,
     SlashCommandTree,
     SlashInteraction,
+    SettingsModelCatalog,
+    SettingsModelCatalogLoader,
     WeeklyUsageMessageBuilder,
 )
 
 __all__ = [
     "BasicSlashCommandDeps",
+    "BasicSlashInteraction",
     "ContextMessageBuilder",
     "ContextRefreshMessageBuilder",
     "InteractionBridgeRunner",
@@ -26,6 +37,8 @@ __all__ = [
     "SlashCommandBot",
     "SlashCommandTree",
     "SlashInteraction",
+    "SettingsModelCatalog",
+    "SettingsModelCatalogLoader",
     "WeeklyUsageMessageBuilder",
     "register_basic_slash_commands",
 ]
@@ -43,6 +56,35 @@ async def _prepare_basic_slash_interaction(
 
 
 def register_basic_slash_commands(bot: SlashCommandBot, deps: BasicSlashCommandDeps) -> None:
+    async def settings_model_autocomplete(
+        interaction: discord.Interaction,
+        current: str,
+    ) -> list[app_commands.Choice[str]]:
+        if not deps.check_allowed(interaction):
+            return []
+        catalog = await asyncio.to_thread(deps.load_settings_model_catalog)
+        return [
+            app_commands.Choice(name=value, value=value)
+            for value in settings_commands.build_model_autocomplete_values(catalog, current)
+        ]
+
+    async def settings_effort_autocomplete(
+        interaction: discord.Interaction,
+        current: str,
+    ) -> list[app_commands.Choice[str]]:
+        if not deps.check_allowed(interaction):
+            return []
+        catalog = await asyncio.to_thread(deps.load_settings_model_catalog)
+        selected_model = cast(str | None, interaction.namespace.model)
+        return [
+            app_commands.Choice(name=value, value=value)
+            for value in settings_commands.build_effort_autocomplete_values(
+                catalog,
+                current,
+                model=selected_model,
+            )
+        ]
+
     @bot.tree.command(name="help", description="Show Discord Codex commands.")
     async def slash_help(interaction: SlashInteraction) -> None:
         if not await _prepare_basic_slash_interaction(interaction, deps):
@@ -87,6 +129,10 @@ def register_basic_slash_commands(bot: SlashCommandBot, deps: BasicSlashCommandD
         _ = await deps.run_bridge(interaction, argv, "Status")
 
     @bot.tree.command(name="settings", description="Update Codex thread model, effort, or speed.")
+    @app_commands.autocomplete(
+        model=settings_model_autocomplete,
+        effort=settings_effort_autocomplete,
+    )
     async def slash_settings(
         interaction: SlashInteraction,
         ref: str = "",

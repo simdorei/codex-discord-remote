@@ -1,11 +1,16 @@
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Protocol, TypeAlias
+
+import discord
+
+from codex_model_catalog import JsonValue
 
 __all__ = [
     "BasicSlashCommandDeps",
+    "BasicSlashInteraction",
     "ContextMessageBuilder",
     "ContextRefreshMessageBuilder",
     "InteractionBridgeRunner",
@@ -15,6 +20,8 @@ __all__ = [
     "SlashCommandBot",
     "SlashCommandTree",
     "SlashInteraction",
+    "SettingsModelCatalog",
+    "SettingsModelCatalogLoader",
     "WeeklyUsageMessageBuilder",
 ]
 
@@ -41,8 +48,16 @@ class InteractionResponse(Protocol):
 
 
 class SlashInteraction(Protocol):
-    channel_id: int | None
-    response: InteractionResponse
+    @property
+    def channel_id(self) -> int | None: ...
+
+    @property
+    def response(self) -> InteractionResponse: ...
+
+
+SettingsModelCatalog: TypeAlias = Mapping[str, JsonValue]
+SettingsModelCatalogLoader: TypeAlias = Callable[[], SettingsModelCatalog]
+BasicSlashInteraction: TypeAlias = SlashInteraction | discord.Interaction
 
 
 class InteractionChunksSender(Protocol):
@@ -84,7 +99,7 @@ class WeeklyUsageMessageBuilder(Protocol):
 
 @dataclass(frozen=True, slots=True)
 class BasicSlashCommandDeps:
-    check_allowed: Callable[[SlashInteraction], bool]
+    check_allowed: Callable[[BasicSlashInteraction], bool]
     send_not_allowed: Callable[[SlashInteraction], Awaitable[None]]
     send_chunks: InteractionChunksSender
     run_bridge: InteractionBridgeRunner
@@ -95,3 +110,4 @@ class BasicSlashCommandDeps:
     build_weekly_usage: WeeklyUsageMessageBuilder
     clamp_context_refresh_limit: Callable[[int], int]
     resolve_target_args: Callable[[int | None, str | None], list[str]]
+    load_settings_model_catalog: SettingsModelCatalogLoader

@@ -15,7 +15,7 @@ ResolvedInteractionT = TypeVar("ResolvedInteractionT")
 ResolvedInteractionT_co = TypeVar("ResolvedInteractionT_co", covariant=True)
 ResolvedInteractionT_contra = TypeVar("ResolvedInteractionT_contra", contravariant=True)
 SlashInteractionCandidate: TypeAlias = (
-    discord_slash_commands.SlashInteraction
+    discord_slash_commands.BasicSlashInteraction
     | discord_slash_runtime_commands.RuntimeSlashInteraction
     | discord_slash_prompt_commands.PromptSlashInteraction
 )
@@ -87,6 +87,7 @@ class SlashRegistrationDeps(Generic[BotT, ResolvedInteractionT]):
     build_weekly_usage_message: discord_slash_commands.WeeklyUsageMessageBuilder
     clamp_context_refresh_limit: Callable[[int], int]
     resolve_discord_thread_target_args: Callable[[int | None, str | None], list[str]]
+    load_settings_model_catalog: discord_slash_commands.SettingsModelCatalogLoader
     build_mirror_check: Callable[[], str]
     build_runtime_discord_doctor_message: discord_slash_runtime_commands.RuntimeDoctorMessageBuilder
     build_runners_message: Callable[[], Awaitable[str]]
@@ -103,7 +104,7 @@ class SlashRegistrationDeps(Generic[BotT, ResolvedInteractionT]):
 def register_commands(bot: BotT, deps: SlashRegistrationDeps[BotT, ResolvedInteractionT]) -> None:
     slash_bot = cast(discord_slash_commands.SlashCommandBot, bot)
 
-    def basic_allowed(interaction: discord_slash_commands.SlashInteraction) -> bool:
+    def basic_allowed(interaction: discord_slash_commands.BasicSlashInteraction) -> bool:
         return deps.check_interaction_allowed(bot, deps.require_discord_interaction(interaction))
 
     async def send_basic_not_allowed(interaction: discord_slash_commands.SlashInteraction) -> None:
@@ -142,6 +143,7 @@ def register_commands(bot: BotT, deps: SlashRegistrationDeps[BotT, ResolvedInter
             build_weekly_usage=deps.build_weekly_usage_message,
             clamp_context_refresh_limit=deps.clamp_context_refresh_limit,
             resolve_target_args=deps.resolve_discord_thread_target_args,
+            load_settings_model_catalog=deps.load_settings_model_catalog,
         ),
     )
 

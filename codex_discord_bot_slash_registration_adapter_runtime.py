@@ -1,21 +1,59 @@
 from __future__ import annotations
 
+import threading
+import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from types import ModuleType
-from typing import Protocol, cast, TypeAlias
+from typing import Final, Protocol, cast, TypeAlias
 
 import codex_discord_help as discord_help
 import codex_discord_slash_commands as discord_slash_commands
 import codex_discord_slash_registration as discord_slash_registration
 import codex_discord_slash_runtime_commands as discord_slash_runtime_commands
+from codex_model_catalog import JsonObject
 ModuleValue: TypeAlias = object
+SETTINGS_MODEL_CATALOG_CACHE_SECONDS: Final = 30.0
 
 
 class RuntimeConfigModule(Protocol):
     def discord_qa_commands_enabled(self) -> bool: ...
 
     def discord_host_commands_enabled(self) -> bool: ...
+
+
+class AppServerModelCatalogClient(Protocol):
+    def request(
+        self,
+        method: str,
+        params: JsonObject,
+        *,
+        timeout_sec: float,
+    ) -> JsonObject: ...
+
+
+class AppServerTransportModule(Protocol):
+    DEFAULT_CLIENT: AppServerModelCatalogClient
+
+
+class SettingsModelCatalogCache:
+    """Coalesces autocomplete catalog reads and refreshes them on a short TTL."""
+
+    def __init__(self, load_catalog: Callable[[], JsonObject]) -> None:
+        self._load_catalog: Callable[[], JsonObject] = load_catalog
+        self._lock: threading.Lock = threading.Lock()
+        self._catalog: JsonObject | None = None
+        self._expires_at: float = 0.0
+
+    def get(self) -> JsonObject:
+        with self._lock:
+            now = time.monotonic()
+            if self._catalog is not None and now < self._expires_at:
+                return self._catalog
+            catalog = self._load_catalog()
+            self._catalog = catalog
+            self._expires_at = time.monotonic() + SETTINGS_MODEL_CATALOG_CACHE_SECONDS
+            return catalog
 
 
 @dataclass(frozen=True, slots=True)
@@ -30,6 +68,7 @@ class BotSlashRegistrationAdapterRuntime:
         )
 
     def register_commands(self, bot: discord_slash_commands.SlashCommandBot) -> None:
+        model_catalog_cache = SettingsModelCatalogCache(self.load_settings_model_catalog)
         discord_slash_registration.register_commands(
             bot,
             discord_slash_registration.SlashRegistrationDeps(
@@ -79,6 +118,7 @@ class BotSlashRegistrationAdapterRuntime:
                     Callable[[int | None, str | None], list[str]],
                     self._module_func("resolve_discord_thread_target_args"),
                 ),
+                load_settings_model_catalog=model_catalog_cache.get,
                 build_mirror_check=cast(Callable[[], str], self._module_func("build_mirror_check")),
                 build_runtime_discord_doctor_message=cast(
                     discord_slash_runtime_commands.RuntimeDoctorMessageBuilder,
@@ -120,6 +160,10 @@ class BotSlashRegistrationAdapterRuntime:
     def discord_qa_commands_enabled(self) -> bool:
         runtime_config = cast(RuntimeConfigModule, getattr(self.module, "discord_runtime_config"))
         return runtime_config.discord_qa_commands_enabled()
+
+    def load_settings_model_catalog(self) -> JsonObject:
+        transport = cast(AppServerTransportModule, getattr(self.module, "app_server_transport"))
+        return transport.DEFAULT_CLIENT.request("model/list", {}, timeout_sec=2.0)
 
     def _module_func(self, name: str) -> ModuleValue:
         return cast(object, getattr(self.module, name))

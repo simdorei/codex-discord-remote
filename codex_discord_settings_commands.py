@@ -1,8 +1,13 @@
 from __future__ import annotations
 
 import shlex
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
-from typing import Callable
+from typing import Callable, Final
+
+import codex_model_catalog as model_catalog
+
+DISCORD_AUTOCOMPLETE_LIMIT: Final = 25
 
 SETTINGS_USAGE = (
     "Usage: !settings [ref] [--model <model>] "
@@ -15,6 +20,30 @@ class SettingsBridgeAction:
     argv: list[str] | None
     title: str
     usage: str | None = None
+
+
+def _filter_autocomplete_values(values: Iterable[str], current: str) -> tuple[str, ...]:
+    query = current.strip().casefold()
+    matches = (value for value in values if not query or query in value.casefold())
+    return tuple(matches)[:DISCORD_AUTOCOMPLETE_LIMIT]
+
+
+def build_model_autocomplete_values(
+    catalog: Mapping[str, model_catalog.JsonValue],
+    current: str,
+) -> tuple[str, ...]:
+    return _filter_autocomplete_values(model_catalog.available_model_ids(catalog), current)
+
+
+def build_effort_autocomplete_values(
+    catalog: Mapping[str, model_catalog.JsonValue],
+    current: str,
+    *,
+    model: str | None,
+) -> tuple[str, ...]:
+    selected_model = model.strip() if model else None
+    efforts = model_catalog.available_reasoning_efforts(catalog, model=selected_model)
+    return _filter_autocomplete_values(efforts, current)
 
 
 def build_settings_option_argv(option: str) -> list[str]:

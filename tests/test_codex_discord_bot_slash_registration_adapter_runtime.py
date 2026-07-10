@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import unittest
-from collections.abc import Awaitable, Callable
 from types import ModuleType
 from unittest.mock import patch
 
@@ -17,10 +16,32 @@ class FakeRuntimeConfig:
         return False
 
 
+class FakeAppServerClient:
+    def __init__(self) -> None:
+        self.last_request: tuple[str, dict[str, str], float] | None = None
+        self.request_count: int = 0
+
+    def request(
+        self,
+        method: str,
+        params: dict[str, str],
+        *,
+        timeout_sec: float,
+    ) -> dict[str, list[dict[str, str | bool]]]:
+        self.request_count += 1
+        self.last_request = (method, params, timeout_sec)
+        return {"data": [{"model": "gpt-5.6-terra", "hidden": False}]}
+
+
+class FakeAppServerTransport:
+    DEFAULT_CLIENT: FakeAppServerClient = FakeAppServerClient()
+
+
 class SlashRegistrationAdapterRuntimeTests(unittest.TestCase):
     def test_register_commands_builds_deps_without_runtime_generic_error(self) -> None:
         module = self.make_module()
         adapter = adapter_runtime.BotSlashRegistrationAdapterRuntime(module=module)
+        FakeAppServerTransport.DEFAULT_CLIENT.request_count = 0
         captured: list[slash_registration.SlashRegistrationDeps[object, object]] = []
 
         def fake_register_commands(
@@ -35,10 +56,24 @@ class SlashRegistrationAdapterRuntimeTests(unittest.TestCase):
 
         self.assertEqual(len(captured), 1)
         self.assertEqual(captured[0].build_help().splitlines()[0], "Codex Discord commands")
+        self.assertEqual(
+            captured[0].load_settings_model_catalog(),
+            {"data": [{"model": "gpt-5.6-terra", "hidden": False}]},
+        )
+        self.assertEqual(
+            captured[0].load_settings_model_catalog(),
+            {"data": [{"model": "gpt-5.6-terra", "hidden": False}]},
+        )
+        self.assertEqual(FakeAppServerTransport.DEFAULT_CLIENT.request_count, 1)
+        self.assertEqual(
+            FakeAppServerTransport.DEFAULT_CLIENT.last_request,
+            ("model/list", {}, 2.0),
+        )
 
     def make_module(self) -> ModuleType:
         module = ModuleType("fake_slash_registration_adapter_module")
         module.discord_runtime_config = FakeRuntimeConfig()
+        module.app_server_transport = FakeAppServerTransport()
 
         def check_interaction_allowed(bot: object, interaction: object) -> bool:
             _ = (bot, interaction)
