@@ -55,6 +55,11 @@ class InstallScriptTests(unittest.TestCase):
 
         self.assertIn(r".python-portable\python.exe", powershell)
         self.assertIn("Portable Python 3.12 was not found", powershell)
+        self.assertIn("Register-ScheduledTask", powershell)
+        self.assertIn("'Codex Discord Bot'", powershell)
+        self.assertIn("codex-discord-watchdog.ps1", powershell)
+        self.assertIn("RepetitionInterval", powershell)
+        self.assertIn("MultipleInstances IgnoreNew", powershell)
         self.assertIn("python3.12", shell)
         self.assertIn("Python 3.12 was not found", shell)
 
@@ -112,6 +117,8 @@ class InstallScriptTests(unittest.TestCase):
                 encoding="utf-8",
             )
             env = os.environ.copy()
+            for name in ("PYTHON_EXE", "CODEX_HOME", "CODEX_EXE", "CODEX_DESKTOP_EXE"):
+                env.pop(name, None)
             env["HARNESS_CAPTURE"] = str(capture)
 
             completed = subprocess.run(
