@@ -1,10 +1,7 @@
 import asyncio
-import datetime
 import io
 import json
 import os
-import re
-import sys
 import tempfile
 import threading
 import time
@@ -16,10 +13,7 @@ from types import SimpleNamespace
 
 import codex_discord_bot as bot
 import codex_discord_busy as discord_busy
-import codex_discord_commands as commands
 import codex_discord_message_gate as message_gate
-import codex_discord_runtime as discord_runtime
-import codex_discord_store as discord_store
 import codex_desktop_bridge as bridge
 import codex_desktop_bridge_sidecar_resolver as sidecar_resolver
 import codex_windows_harness as harness
@@ -2024,9 +2018,15 @@ class DiscordBotHelperTests(unittest.IsolatedAsyncioTestCase):
 
             with tempfile.TemporaryDirectory() as temp_dir:
                 log_path = Path(temp_dir) / "discord-smoke.log"
-                with EnvPatch("CODEX_DISCORD_LOG_PATH", str(log_path)):
-                    with EnvPatch("DISCORD_PLAIN_ASK_CONTEXT_FALLBACK", "1"):
-                        await bot.CodexDiscordBot.on_message(client, message)
+                with (
+                    EnvPatch("CODEX_DISCORD_LOG_PATH", str(log_path)),
+                    EnvPatch("DISCORD_PLAIN_ASK_CONTEXT_FALLBACK", "1"),
+                    EnvPatch(
+                        "DISCORD_PLAIN_ASK_CONTEXT_KEYWORDS",
+                        message_gate.DEFAULT_PLAIN_ASK_CONTEXT_KEYWORDS,
+                    ),
+                ):
+                    await bot.CodexDiscordBot.on_message(client, message)
                 log_text = log_path.read_text(encoding="utf-8")
 
             self.assertEqual(message.channel.messages, [])
@@ -2056,9 +2056,15 @@ class DiscordBotHelperTests(unittest.IsolatedAsyncioTestCase):
 
             with tempfile.TemporaryDirectory() as temp_dir:
                 log_path = Path(temp_dir) / "discord-smoke.log"
-                with EnvPatch("CODEX_DISCORD_LOG_PATH", str(log_path)):
-                    with EnvPatch("DISCORD_PLAIN_ASK_CONTEXT_FALLBACK", "1"):
-                        await bot.CodexDiscordBot.on_message(client, message)
+                with (
+                    EnvPatch("CODEX_DISCORD_LOG_PATH", str(log_path)),
+                    EnvPatch("DISCORD_PLAIN_ASK_CONTEXT_FALLBACK", "1"),
+                    EnvPatch(
+                        "DISCORD_PLAIN_ASK_CONTEXT_KEYWORDS",
+                        message_gate.DEFAULT_PLAIN_ASK_CONTEXT_KEYWORDS,
+                    ),
+                ):
+                    await bot.CodexDiscordBot.on_message(client, message)
                 log_text = log_path.read_text(encoding="utf-8")
 
             self.assertEqual(message.channel.messages, [])
@@ -2102,9 +2108,15 @@ class DiscordBotHelperTests(unittest.IsolatedAsyncioTestCase):
 
             with tempfile.TemporaryDirectory() as temp_dir:
                 log_path = Path(temp_dir) / "discord-smoke.log"
-                with EnvPatch("CODEX_DISCORD_LOG_PATH", str(log_path)):
-                    with EnvPatch("DISCORD_PLAIN_ASK_CONTEXT_FALLBACK", "1"):
-                        await bot.CodexDiscordBot.on_message(client, message)
+                with (
+                    EnvPatch("CODEX_DISCORD_LOG_PATH", str(log_path)),
+                    EnvPatch("DISCORD_PLAIN_ASK_CONTEXT_FALLBACK", "1"),
+                    EnvPatch(
+                        "DISCORD_PLAIN_ASK_CONTEXT_KEYWORDS",
+                        message_gate.DEFAULT_PLAIN_ASK_CONTEXT_KEYWORDS,
+                    ),
+                ):
+                    await bot.CodexDiscordBot.on_message(client, message)
                 log_text = log_path.read_text(encoding="utf-8")
 
             self.assertEqual(calls, [(message, message.content, None)])

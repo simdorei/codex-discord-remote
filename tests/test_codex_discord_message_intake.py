@@ -84,7 +84,13 @@ class DiscordMessageIntakeTests(unittest.IsolatedAsyncioTestCase):
     def test_prepare_plain_ask_content_accepts_context_fallback(self) -> None:
         message = SimpleNamespace(raw_mentions=[], mentions=[])
 
-        with patch.dict("os.environ", {"DISCORD_PLAIN_ASK_CONTEXT_FALLBACK": "1"}):
+        with patch.dict(
+            "os.environ",
+            {
+                "DISCORD_PLAIN_ASK_CONTEXT_FALLBACK": "1",
+                "DISCORD_PLAIN_ASK_CONTEXT_KEYWORDS": message_gate.DEFAULT_PLAIN_ASK_CONTEXT_KEYWORDS,
+            },
+        ):
             result = message_gate.prepare_plain_ask_content(
                 _mention_message(message),
                 "codex explain this in Korean",
