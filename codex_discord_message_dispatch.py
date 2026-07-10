@@ -137,7 +137,11 @@ async def dispatch_prepared_message(
         + f"target_source={target_source} target={target_thread_id or '-'} "
         + f"text_len={deps.format_log_text_len(content)}"
     )
-    if target_source == "mirror" and target_thread_id is not None:
+    if (
+        target_source == "mirror"
+        and target_thread_id is not None
+        and target.persist_mirror_channel
+    ):
         deps.persist_inbound_mirror_thread_channel(target_thread_id, int(channel_id))
         deps.log(f"inbound_mirror_channel_persisted target={target_thread_id} channel={channel_id}")
     if content.startswith("!"):

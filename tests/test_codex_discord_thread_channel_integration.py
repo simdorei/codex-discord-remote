@@ -117,6 +117,7 @@ class DiscordThreadChannelIntegrationTests(unittest.IsolatedAsyncioTestCase):
         class FakeThread:
             def __init__(self) -> None:
                 self.id = 222
+                self.parent_id = 111
                 self.name = "old title"
                 self.edits: list[dict[str, str]] = []
 

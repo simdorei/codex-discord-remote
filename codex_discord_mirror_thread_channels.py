@@ -108,6 +108,8 @@ def _is_stale_mirror_thread_error(message: str) -> bool:
         "Forbidden",
         "NotFound",
         "not found",
+        "not Thread",
+        "not project channel",
         "404",
         "403",
     )

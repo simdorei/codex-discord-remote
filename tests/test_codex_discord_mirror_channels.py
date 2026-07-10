@@ -118,6 +118,7 @@ class MirrorThreadChannelHelperTests(unittest.IsolatedAsyncioTestCase):
         class FakeThread:
             def __init__(self, thread_id: int) -> None:
                 self.id: int = thread_id
+                self.parent_id: int = 222
 
         class FakeGuild:
             def __init__(self) -> None:
@@ -160,6 +161,35 @@ class MirrorThreadChannelHelperTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs(cached, channel.guild.cached)
         self.assertIs(fetched, channel.guild.fetched)
         self.assertEqual(channel.guild.fetch_calls, [444])
+
+    async def test_fetch_stored_discord_thread_rejects_thread_from_other_project(self) -> None:
+        original_thread = discord.Thread
+
+        class FakeThread:
+            def __init__(self) -> None:
+                self.id: int = 333
+                self.parent_id: int = 999
+
+        class FakeGuild:
+            def get_thread(self, _thread_id: int) -> FakeThread:
+                return FakeThread()
+
+        class FakeTextChannel:
+            def __init__(self) -> None:
+                self.id: int = 222
+                self.guild: FakeGuild = FakeGuild()
+
+        try:
+            discord.Thread = FakeThread
+            with self.assertRaisesRegex(RuntimeError, "belongs to Discord channel 999"):
+                _ = await mirror_thread_store.fetch_stored_discord_thread(
+                    self._thread_info(),
+                    cast(discord.TextChannel, cast(object, FakeTextChannel())),
+                    333,
+                    deps=self._deps(),
+                )
+        finally:
+            discord.Thread = original_thread
 
     async def test_fetch_stored_discord_thread_wraps_fetch_failures(self) -> None:
         original_thread = discord.Thread
