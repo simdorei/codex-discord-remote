@@ -31,12 +31,16 @@ class AppServerDeliveryClient(Protocol):
     def get_active_turn_id(self, thread_id: str) -> str | None: ...
 
 
+# The facade exports implementation functions dynamically, so static analysis cannot see them.
+_DEFAULT_BRIDGE_MODULE: BridgeModule = bridge  # pyright: ignore[reportAssignmentType]
+
+
 def start_turn_no_wait(
     client: AppServerDeliveryClient,
     prompt: str,
     target_thread_id: str | None,
     *,
-    bridge_module: BridgeModule = bridge,
+    bridge_module: BridgeModule = _DEFAULT_BRIDGE_MODULE,
     confirm_timeout_sec: float = 6.0,
 ) -> AppServerDeliveryResult:
     context = build_delivery_context(
@@ -60,7 +64,7 @@ def start_turn_no_wait(
             turn_id=turn_id,
             bridge_module=bridge_module,
         )
-    delivery_pending = delivered_thread is None
+    delivery_pending = delivered_thread is None and turn_id is None
     return successful_delivery_result(
         context,
         method="turn/start",
@@ -76,7 +80,7 @@ def steer_or_start_no_wait(
     prompt: str,
     target_thread_id: str | None,
     *,
-    bridge_module: BridgeModule = bridge,
+    bridge_module: BridgeModule = _DEFAULT_BRIDGE_MODULE,
     confirm_timeout_sec: float = 6.0,
 ) -> AppServerDeliveryResult:
     context = build_delivery_context(
@@ -106,7 +110,7 @@ def steer_or_start_no_wait(
             turn_id=turn_id,
             bridge_module=bridge_module,
         )
-    delivery_pending = delivered_thread is None
+    delivery_pending = delivered_thread is None and turn_id is None
     return successful_delivery_result(
         context,
         method=method,

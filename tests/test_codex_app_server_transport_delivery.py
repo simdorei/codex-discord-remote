@@ -73,13 +73,59 @@ class AppServerDeliveryFlowTests(unittest.TestCase):
         self.assertIn("Prompt landed in a different thread after app-server delivery.", result.output)
         self.assertIn("Expected label:thread-1, but it was recorded in label:other-thread.", result.output)
 
-    def test_zero_confirm_timeout_returns_pending_without_waiting(self) -> None:
+    def test_start_turn_id_is_authoritative_when_rollout_confirmation_is_delayed(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            session_path = Path(temp_dir) / "session.jsonl"
+            _ = session_path.write_text("", encoding="utf-8")
+            thread = _thread(session_path)
+            bridge = FakeBridge(thread, delivered_thread=None)
+            client = FakeDeliveryClient(start_result={"turn": {"id": "turn-1"}})
+
+            result = delivery.start_turn_no_wait(
+                client,
+                "hello",
+                None,
+                bridge_module=bridge,
+                confirm_timeout_sec=25.0,
+            )
+
+        self.assertEqual(result.exit_code, 0)
+        self.assertEqual(result.turn_id, "turn-1")
+        self.assertFalse(result.delivery_pending)
+        self.assertEqual(bridge.waited_prompts, ["hello"])
+        self.assertIn("[app_server_delivery] turn_id=turn-1", result.output)
+        self.assertNotIn("[delivery_pending]", result.output)
+
+    def test_active_turn_id_is_authoritative_when_rollout_confirmation_is_delayed(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            session_path = Path(temp_dir) / "session.jsonl"
+            _ = session_path.write_text("", encoding="utf-8")
+            thread = _thread(session_path)
+            bridge = FakeBridge(thread, delivered_thread=None)
+            client = FakeDeliveryClient(active_turn_id="active-1")
+
+            result = delivery.steer_or_start_no_wait(
+                client,
+                "hello",
+                thread.id,
+                bridge_module=bridge,
+                confirm_timeout_sec=25.0,
+            )
+
+        self.assertEqual(result.exit_code, 0)
+        self.assertEqual(result.turn_id, "active-1")
+        self.assertFalse(result.delivery_pending)
+        self.assertEqual(bridge.waited_prompts, ["hello"])
+        self.assertEqual(client.steered, [(thread.id, "hello", "active-1")])
+        self.assertNotIn("[delivery_pending]", result.output)
+
+    def test_zero_confirm_timeout_without_turn_id_returns_pending(self) -> None:
         with TemporaryDirectory() as temp_dir:
             session_path = Path(temp_dir) / "session.jsonl"
             _ = session_path.write_text("", encoding="utf-8")
             thread = _thread(session_path)
             bridge = FakeBridge(thread, delivered_thread=thread)
-            client = FakeDeliveryClient(start_result={"turn": {"id": "turn-1"}})
+            client = FakeDeliveryClient()
 
             result = delivery.start_turn_no_wait(
                 client,
@@ -90,6 +136,7 @@ class AppServerDeliveryFlowTests(unittest.TestCase):
             )
 
         self.assertEqual(result.exit_code, 0)
+        self.assertIsNone(result.turn_id)
         self.assertTrue(result.delivery_pending)
         self.assertEqual(bridge.waited_prompts, [])
         self.assertIn("[delivery_pending]", result.output)
