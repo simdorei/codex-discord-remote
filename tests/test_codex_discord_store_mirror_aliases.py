@@ -144,6 +144,18 @@ class StoreMirrorAliasTests(unittest.TestCase):
             )
             self.assertIsNone(store.get_mirror_thread_row_by_codex_thread_id(db_path, "missing"))
 
+            with sqlite3.connect(db_path) as conn:
+                _ = conn.execute(
+                    "INSERT INTO mirror_threads ("
+                    + "codex_thread_id, project_key, thread_title, discord_channel_id, "
+                    + "discord_thread_id, updated_at, managed_by, lifecycle_state"
+                    + ") VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    ("gpt-hidden", "codex:chats", "GPT", 111, 556, 31.0, "gpt_chat", "inactive"),
+                )
+
+            self.assertIsNone(store.get_mirrored_codex_thread_id(db_path, 556))
+            self.assertIsNone(store.get_mirror_thread_row_by_codex_thread_id(db_path, "gpt-hidden"))
+
     def test_exact_alias_merge_updates_threads_and_read_helpers(self) -> None:
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp_dir:
             db_path = self._db_path(temp_dir)

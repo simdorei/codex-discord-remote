@@ -25,6 +25,7 @@ class StoreSchemaTests(unittest.TestCase):
             }
 
         self.assertEqual(tables, set(store_schema.STORE_SCHEMA_TABLES))
+        self.assertIn("gpt_chat_creation_ops", tables)
 
     def test_public_init_mirror_db_preserves_representative_columns(self) -> None:
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp_dir:
@@ -45,6 +46,14 @@ class StoreSchemaTests(unittest.TestCase):
                         "PRAGMA table_info(codex_session_mirror_events)"
                     ).fetchall(),
                 )
+                mirror_thread_rows = cast(
+                    list[tuple[int, str, str, int, object, int]],
+                    conn.execute("PRAGMA table_info(mirror_threads)").fetchall(),
+                )
+                creation_op_rows = cast(
+                    list[tuple[int, str, str, int, object, int]],
+                    conn.execute("PRAGMA table_info(gpt_chat_creation_ops)").fetchall(),
+                )
                 project_columns = {
                     row[1] for row in project_rows
                 }
@@ -54,6 +63,8 @@ class StoreSchemaTests(unittest.TestCase):
                 session_event_columns = {
                     row[1] for row in session_event_rows
                 }
+                mirror_thread_columns = {row[1] for row in mirror_thread_rows}
+                creation_op_columns = {row[1] for row in creation_op_rows}
 
         self.assertEqual(
             project_columns,
@@ -76,6 +87,33 @@ class StoreSchemaTests(unittest.TestCase):
         self.assertEqual(
             session_event_columns,
             {"event_digest", "codex_thread_id", "created_at"},
+        )
+        self.assertEqual(
+            mirror_thread_columns,
+            {
+                "codex_thread_id",
+                "project_key",
+                "thread_title",
+                "discord_channel_id",
+                "discord_thread_id",
+                "updated_at",
+                "managed_by",
+                "lifecycle_state",
+            },
+        )
+        self.assertEqual(
+            creation_op_columns,
+            {
+                "codex_thread_id",
+                "project_key",
+                "thread_title",
+                "discord_parent_channel_id",
+                "nonce",
+                "status",
+                "discord_thread_id",
+                "created_at",
+                "updated_at",
+            },
         )
 
 

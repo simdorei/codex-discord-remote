@@ -5,6 +5,36 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
+from codex_discord_gpt_ownership import (
+    CodexThreadId as CodexThreadId,
+    DiscordChannelId as DiscordChannelId,
+    DiscordOwnershipConflictError as DiscordOwnershipConflictError,
+    DiscordThreadId as DiscordThreadId,
+    GptOwnershipOverwriteError as GptOwnershipOverwriteError,
+    MirrorThreadLifecycleState as MirrorThreadLifecycleState,
+    MirrorThreadManagedBy as MirrorThreadManagedBy,
+    MirrorThreadOwnership as MirrorThreadOwnership,
+    get_active_gpt_mirror_thread_by_discord_thread_id as get_active_gpt_mirror_thread_by_discord_thread_id,
+    get_mirror_thread_owner_by_codex_thread_id as get_mirror_thread_owner_by_codex_thread_id,
+    get_mirror_thread_owner_by_discord_thread_id as get_mirror_thread_owner_by_discord_thread_id,
+    list_ordinary_mirror_threads as list_ordinary_mirror_threads,
+)
+from codex_discord_gpt_lifecycle import (
+    GPT_CHAT_CAPACITY as GPT_CHAT_CAPACITY,
+    GptCapacityAudit as GptCapacityAudit,
+    GptCapacityExceededError as GptCapacityExceededError,
+    GptCapacityRequestError as GptCapacityRequestError,
+    GptLifecycleError as GptLifecycleError,
+    GptLifecycleOperation as GptLifecycleOperation,
+    GptLifecycleOwnerError as GptLifecycleOwnerError,
+    GptLifecycleProjectError as GptLifecycleProjectError,
+    GptLifecycleStateError as GptLifecycleStateError,
+    GptLifecycleTransition as GptLifecycleTransition,
+    GptLifecycleTransitionError as GptLifecycleTransitionError,
+    GptMappingNotFoundError as GptMappingNotFoundError,
+    audit_gpt_capacity as audit_gpt_capacity,
+    transition_gpt_lifecycle as transition_gpt_lifecycle,
+)
 from codex_discord_store_busy import (
     claim_busy_choice_record as claim_busy_choice_record,
     claim_persistent_component_interaction as claim_persistent_component_interaction,
@@ -34,7 +64,10 @@ from codex_discord_store_mirror_map import (
 from codex_discord_store_mirror_threads import (
     get_mirror_thread_row_by_codex_thread_id as get_mirror_thread_row_by_codex_thread_id,
     get_mirrored_codex_thread_id as get_mirrored_codex_thread_id,
+    get_ordinary_mirror_thread_row_by_codex_thread_id as get_ordinary_mirror_thread_row_by_codex_thread_id,
+    get_ordinary_mirrored_codex_thread_id as get_ordinary_mirrored_codex_thread_id,
     update_mirror_thread_discord_thread_id as update_mirror_thread_discord_thread_id,
+    upsert_ordinary_mirror_thread as upsert_ordinary_mirror_thread,
     upsert_mirror_thread as upsert_mirror_thread,
 )
 from codex_discord_store_processed_messages import (

@@ -79,6 +79,18 @@ class StoreMirrorMapTests(unittest.TestCase):
             store_mirror_map.get_mirror_thread_row_by_codex_thread_id,
             store_mirror_threads.get_mirror_thread_row_by_codex_thread_id,
         )
+        self.assertIs(
+            store.get_ordinary_mirrored_codex_thread_id,
+            store_mirror_threads.get_ordinary_mirrored_codex_thread_id,
+        )
+        self.assertIs(
+            store_mirror_map.get_ordinary_mirror_thread_row_by_codex_thread_id,
+            store_mirror_threads.get_ordinary_mirror_thread_row_by_codex_thread_id,
+        )
+        self.assertIs(
+            store.get_mirror_thread_owner_by_discord_thread_id,
+            store_mirror_map.get_mirror_thread_owner_by_discord_thread_id,
+        )
 
     def _db_path(self, temp_dir: str) -> Path:
         db_path = Path(temp_dir) / "mirror.sqlite"

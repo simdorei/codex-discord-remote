@@ -6,6 +6,12 @@ from pathlib import Path
 from typing import cast
 
 from codex_discord_store_schema import init_store_schema
+from codex_discord_gpt_ownership import (
+    CodexThreadId,
+    DiscordThreadId,
+    GptOwnershipOverwriteError,
+    get_mirror_thread_owner_by_discord_thread_id,
+)
 
 
 def _init_mirror_db(db_path: Path) -> None:
@@ -13,26 +19,22 @@ def _init_mirror_db(db_path: Path) -> None:
         init_store_schema(conn)
 
 
-def get_mirrored_codex_thread_id(db_path: Path, discord_channel_id: int | None) -> str | None:
+def get_ordinary_mirrored_codex_thread_id(
+    db_path: Path,
+    discord_channel_id: int | None,
+) -> str | None:
     if not discord_channel_id:
         return None
-    _init_mirror_db(db_path)
+    owner = get_mirror_thread_owner_by_discord_thread_id(db_path, discord_channel_id)
+    if owner is not None:
+        return str(owner.codex_thread_id) if owner.is_ordinary else None
     with sqlite3.connect(db_path) as conn:
-        row = cast(
-            tuple[str] | None,
-            conn.execute(
-                "SELECT codex_thread_id FROM mirror_threads WHERE discord_thread_id = ?",
-                (int(discord_channel_id),),
-            ).fetchone(),
-        )
-        if row:
-            return str(row[0])
         rows = cast(
             list[tuple[str]],
             conn.execute(
                 "SELECT codex_thread_id "
                 + "FROM mirror_threads "
-                + "WHERE discord_channel_id = ? "
+                + "WHERE discord_channel_id = ? AND managed_by = 'ordinary' "
                 + "ORDER BY updated_at DESC "
                 + "LIMIT 2",
                 (int(discord_channel_id),),
@@ -41,6 +43,9 @@ def get_mirrored_codex_thread_id(db_path: Path, discord_channel_id: int | None) 
     if len(rows) == 1:
         return str(rows[0][0])
     return None
+
+
+get_mirrored_codex_thread_id = get_ordinary_mirrored_codex_thread_id
 
 
 def upsert_mirror_thread(
@@ -56,11 +61,22 @@ def upsert_mirror_thread(
     current = time.time() if now is None else now
     _init_mirror_db(db_path)
     with sqlite3.connect(db_path) as conn:
-        _ = conn.execute(
-            "INSERT OR REPLACE INTO mirror_threads "
+        cursor = conn.execute(
+            "INSERT INTO mirror_threads "
             + "(codex_thread_id, project_key, thread_title, discord_channel_id, "
             + "discord_thread_id, updated_at) "
-            + "VALUES (?, ?, ?, ?, ?, ?)",
+            + "SELECT ?, ?, ?, ?, ?, ? "
+            + "WHERE NOT EXISTS ("
+            + "SELECT 1 FROM mirror_threads "
+            + "WHERE managed_by = 'gpt_chat' "
+            + "AND (codex_thread_id = ? OR discord_thread_id = ?)) "
+            + "ON CONFLICT(codex_thread_id) DO UPDATE SET "
+            + "project_key = excluded.project_key, "
+            + "thread_title = excluded.thread_title, "
+            + "discord_channel_id = excluded.discord_channel_id, "
+            + "discord_thread_id = excluded.discord_thread_id, "
+            + "updated_at = excluded.updated_at "
+            + "WHERE mirror_threads.managed_by = 'ordinary'",
             (
                 str(codex_thread_id),
                 canonical_project_key,
@@ -68,11 +84,21 @@ def upsert_mirror_thread(
                 int(project_channel_id),
                 int(discord_thread_id),
                 current,
+                str(codex_thread_id),
+                int(discord_thread_id),
             ),
         )
+        if cursor.rowcount != 1:
+            raise GptOwnershipOverwriteError(
+                codex_thread_id=CodexThreadId(str(codex_thread_id)),
+                discord_thread_id=DiscordThreadId(int(discord_thread_id)),
+            )
 
 
-def get_mirror_thread_row_by_codex_thread_id(
+upsert_ordinary_mirror_thread = upsert_mirror_thread
+
+
+def get_ordinary_mirror_thread_row_by_codex_thread_id(
     db_path: Path,
     codex_thread_id: str,
 ) -> tuple[int, int] | None:
@@ -83,13 +109,16 @@ def get_mirror_thread_row_by_codex_thread_id(
             conn.execute(
                 "SELECT discord_channel_id, discord_thread_id "
                 + "FROM mirror_threads "
-                + "WHERE codex_thread_id = ?",
+                + "WHERE codex_thread_id = ? AND managed_by = 'ordinary'",
                 (str(codex_thread_id),),
             ).fetchone(),
         )
     if not row:
         return None
     return int(row[0]), int(row[1])
+
+
+get_mirror_thread_row_by_codex_thread_id = get_ordinary_mirror_thread_row_by_codex_thread_id
 
 
 def update_mirror_thread_discord_thread_id(
@@ -107,16 +136,30 @@ def update_mirror_thread_discord_thread_id(
             conn.execute(
                 "SELECT discord_channel_id, discord_thread_id "
                 + "FROM mirror_threads "
-                + "WHERE codex_thread_id = ?",
+                + "WHERE codex_thread_id = ? AND managed_by = 'ordinary'",
                 (str(codex_thread_id),),
             ).fetchone(),
         )
         if row is None:
             return None
-        _ = conn.execute(
+        cursor = conn.execute(
             "UPDATE mirror_threads "
             + "SET discord_thread_id = ?, updated_at = ? "
-            + "WHERE codex_thread_id = ?",
-            (int(discord_thread_id), current, str(codex_thread_id)),
+            + "WHERE codex_thread_id = ? AND managed_by = 'ordinary' "
+            + "AND NOT EXISTS ("
+            + "SELECT 1 FROM mirror_threads AS gpt_owner "
+            + "WHERE gpt_owner.managed_by = 'gpt_chat' "
+            + "AND gpt_owner.discord_thread_id = ?)",
+            (
+                int(discord_thread_id),
+                current,
+                str(codex_thread_id),
+                int(discord_thread_id),
+            ),
         )
+        if cursor.rowcount != 1:
+            raise GptOwnershipOverwriteError(
+                codex_thread_id=CodexThreadId(str(codex_thread_id)),
+                discord_thread_id=DiscordThreadId(int(discord_thread_id)),
+            )
     return int(row[0]), int(row[1])

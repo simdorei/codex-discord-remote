@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import sqlite3
 
+from codex_discord_gpt_migration import migrate_gpt_schema
+
 STORE_SCHEMA_TABLES: tuple[str, ...] = (
     "mirror_projects",
     "mirror_threads",
@@ -10,6 +12,7 @@ STORE_SCHEMA_TABLES: tuple[str, ...] = (
     "discord_processed_messages",
     "codex_session_mirror_offsets",
     "codex_session_mirror_events",
+    "gpt_chat_creation_ops",
 )
 
 STORE_SCHEMA_STATEMENTS: tuple[str, ...] = (
@@ -71,3 +74,4 @@ STORE_SCHEMA_STATEMENTS: tuple[str, ...] = (
 def init_store_schema(conn: sqlite3.Connection) -> None:
     for statement in STORE_SCHEMA_STATEMENTS:
         _ = conn.execute(statement)
+    migrate_gpt_schema(conn)
