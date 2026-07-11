@@ -16,15 +16,18 @@ from send_discord_attachment_http import (
     attachment_filenames,
     build_attachment_form,
     get_message_content,
+    post_attachment,
     validate_channel_access,
 )
 from send_discord_attachment_target import (
     DEFAULT_MIRROR_DB_PATH,
     MIRROR_DB_ENV,
     mirror_db_path,
+    resolve_attachment_target,
     resolve_mirrored_channel_id,
     resolve_target_channel_id,
     resolve_thread_from_ref,
+    revalidate_attachment_target,
 )
 from send_discord_attachment_types import (
     AttachmentArgNamespace,
@@ -35,6 +38,23 @@ from send_discord_attachment_types import (
     DiscordSendFailedError,
     MissingDiscordBotTokenError,
     JsonValue,
+)
+
+__all__ = (
+    "AttachmentCliArgs",
+    "AttachmentTargetError",
+    "DEFAULT_MIRROR_DB_PATH",
+    "DiscordChannelAccessError",
+    "DiscordSendFailedError",
+    "MIRROR_DB_ENV",
+    "MissingDiscordBotTokenError",
+    "ThreadInfo",
+    "discord_store",
+    "get_message_content",
+    "mirror_db_path",
+    "resolve_attachment_target",
+    "resolve_target_channel_id",
+    "thread_store",
 )
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -70,7 +90,9 @@ async def send_discord_attachment(args: AttachmentCliArgs) -> DiscordMessageResp
     if missing:
         raise FileNotFoundError(", ".join(missing))
 
-    channel_id, mirror_target = resolve_target_channel_id(args)
+    db_path = _mirror_db_path()
+    target = resolve_attachment_target(args, db_path=db_path)
+    channel_id = target.channel_id
     headers = {"Authorization": f"Bot {token}"}
     url = f"https://discord.com/api/v10/channels/{channel_id}/messages"
     async with ClientSession() as session:
@@ -78,24 +100,48 @@ async def send_discord_attachment(args: AttachmentCliArgs) -> DiscordMessageResp
             session,
             channel_id=channel_id,
             headers=headers,
-            mirror_target=mirror_target,
+            mirror_target=target.mirror_target,
         )
-        async with session.post(url, headers=headers, data=build_attachment_form(args, files)) as response:
-            text = await response.text()
-            if response.status < 200 or response.status >= 300:
-                raise DiscordSendFailedError(status=response.status, response_text=text[:1000])
-            decoded = _decode_json_value(text)
-            return decoded if isinstance(decoded, dict) else {}
+        response = await post_attachment(
+            session,
+            url=url,
+            headers=headers,
+            form=build_attachment_form(args, files),
+            final_target_check=lambda: revalidate_attachment_target(
+                args,
+                target,
+                db_path=db_path,
+            ),
+        )
+        if response.status < 200 or response.status >= 300:
+            raise DiscordSendFailedError(
+                status=response.status,
+                response_text=response.text[:1000],
+            )
+        decoded = _decode_json_value(response.text)
+        return decoded if isinstance(decoded, dict) else {}
 
 
 def parse_args() -> AttachmentCliArgs:
-    parser = argparse.ArgumentParser(description="Send UTF-8 Discord message content with file attachments.")
+    parser = argparse.ArgumentParser(
+        description="Send UTF-8 Discord message content with file attachments."
+    )
     target = parser.add_mutually_exclusive_group(required=True)
-    _ = target.add_argument("--channel-id", help="Discord channel or thread ID to send into.")
-    _ = target.add_argument("--thread-ref", help="Active or archived Codex thread ref whose mirror thread receives files.")
-    _ = target.add_argument("--work-thread", help="Codex work thread ID or ref whose mirror thread receives files.")
+    _ = target.add_argument(
+        "--channel-id", help="Discord channel or thread ID to send into."
+    )
+    _ = target.add_argument(
+        "--thread-ref",
+        help="Active or archived Codex thread ref whose mirror thread receives files.",
+    )
+    _ = target.add_argument(
+        "--work-thread",
+        help="Codex work thread ID or ref whose mirror thread receives files.",
+    )
     _ = parser.add_argument("--content", default="", help="UTF-8 message content.")
-    _ = parser.add_argument("--content-file", help="UTF-8 text file to use as message content.")
+    _ = parser.add_argument(
+        "--content-file", help="UTF-8 text file to use as message content."
+    )
     _ = parser.add_argument("files", nargs="+", help="One or more files to attach.")
     namespace = AttachmentArgNamespace()
     _ = parser.parse_args(namespace=namespace)

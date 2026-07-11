@@ -3,11 +3,48 @@ from __future__ import annotations
 import discord
 
 import codex_discord_mirror_names as discord_mirror_names
+import codex_discord_project_paths as project_paths
 import codex_discord_mirror_thread_store as mirror_thread_store
 import codex_discord_store as discord_store
 from codex_discord_mirror_channel_store import MirrorChannelDeps, upsert_mirror_thread
 from codex_discord_mirror_thread_reuse import find_existing_thread_channel
 from codex_thread_models import ThreadInfo
+
+
+def _raise_for_gpt_discord_owner(
+    codex_thread: ThreadInfo,
+    discord_thread_id: int,
+    *,
+    deps: MirrorChannelDeps,
+) -> None:
+    owner = discord_store.get_mirror_thread_owner_by_discord_thread_id(
+        deps.db_path,
+        discord_thread_id,
+    )
+    if owner is not None and not owner.is_ordinary:
+        raise discord_store.GptOwnershipOverwriteError(
+            codex_thread_id=discord_store.CodexThreadId(codex_thread.id),
+            discord_thread_id=discord_store.DiscordThreadId(discord_thread_id),
+        )
+
+
+def _stored_ordinary_row(
+    codex_thread: ThreadInfo,
+    *,
+    deps: MirrorChannelDeps,
+) -> tuple[int, int] | None:
+    owner = discord_store.get_mirror_thread_owner_by_codex_thread_id(
+        deps.db_path,
+        codex_thread.id,
+    )
+    if owner is None:
+        return None
+    if not owner.is_ordinary:
+        raise discord_store.GptOwnershipOverwriteError(
+            codex_thread_id=discord_store.CodexThreadId(codex_thread.id),
+            discord_thread_id=owner.discord_thread_id,
+        )
+    return int(owner.discord_channel_id), int(owner.discord_thread_id)
 
 
 def get_mirror_thread_name(
@@ -33,6 +70,8 @@ async def ensure_mirror_thread_channel(
     *,
     deps: MirrorChannelDeps,
 ) -> discord.Thread:
+    project_paths.require_ordinary_project_key(project_key)
+    _raise_for_gpt_discord_owner(codex_thread, int(discord_thread.id), deps=deps)
     if str(getattr(discord_thread, "name", "") or "") != thread_name:
         _ = await discord_thread.edit(name=thread_name, reason="Codex thread mirror sync")
         deps.log(
@@ -124,14 +163,18 @@ async def _reuse_existing_mirror_thread_channel(
     *,
     deps: MirrorChannelDeps,
 ) -> discord.Thread | None:
+    project_paths.require_ordinary_project_key(project_key)
     existing_thread = await find_existing_thread_channel(project_channel, thread_name, deps=deps)
     if existing_thread is None:
         return None
-    existing_owner = discord_store.get_mirrored_codex_thread_id(deps.db_path, int(existing_thread.id))
-    if existing_owner is not None and existing_owner != codex_thread.id:
+    existing_owner = discord_store.get_mirror_thread_owner_by_discord_thread_id(
+        deps.db_path,
+        int(existing_thread.id),
+    )
+    if existing_owner is not None and str(existing_owner.codex_thread_id) != codex_thread.id:
         deps.log(
             f"mirror_thread_reuse_skipped codex_thread={codex_thread.id} "
-            + f"discord_thread={existing_thread.id} existing_codex_thread={existing_owner}"
+            + f"discord_thread={existing_thread.id} existing_codex_thread={existing_owner.codex_thread_id}"
         )
         return None
     ensured_thread = await ensure_mirror_thread_channel(
@@ -157,6 +200,8 @@ async def _create_mirror_thread_channel(
     *,
     deps: MirrorChannelDeps,
 ) -> discord.Thread:
+    project_paths.require_ordinary_project_key(project_key)
+    _ = _stored_ordinary_row(codex_thread, deps=deps)
     discord_thread = await project_channel.create_thread(
         name=thread_name,
         type=discord.ChannelType.public_thread,
@@ -181,11 +226,9 @@ async def get_or_create_thread_channel(
     *,
     deps: MirrorChannelDeps,
 ) -> discord.Thread:
+    project_paths.require_ordinary_project_key(project_key)
     thread_name = get_mirror_thread_name(codex_thread, deps=deps)
-    row = discord_store.get_mirror_thread_row_by_codex_thread_id(
-        deps.db_path,
-        codex_thread.id,
-    )
+    row = _stored_ordinary_row(codex_thread, deps=deps)
 
     if row:
         return await _ensure_stored_mirror_thread_channel(

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import mimetypes
+from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 
 from aiohttp import ClientSession, FormData
@@ -11,6 +13,12 @@ from send_discord_attachment_types import (
     DiscordChannelAccessError,
     DiscordMessageResponse,
 )
+
+
+@dataclass(frozen=True, slots=True)
+class AttachmentPostResult:
+    status: int
+    text: str
 
 
 def get_message_content(args: AttachmentCliArgs) -> str:
@@ -23,7 +31,9 @@ def build_attachment_form(args: AttachmentCliArgs, files: list[Path]) -> FormDat
     form = FormData()
     payload = {
         "content": get_message_content(args),
-        "attachments": [{"id": index, "filename": path.name} for index, path in enumerate(files)],
+        "attachments": [
+            {"id": index, "filename": path.name} for index, path in enumerate(files)
+        ],
     }
     form.add_field(
         "payload_json",
@@ -35,12 +45,15 @@ def build_attachment_form(args: AttachmentCliArgs, files: list[Path]) -> FormDat
             f"files[{index}]",
             path.read_bytes(),
             filename=path.name,
-            content_type=mimetypes.guess_type(path.name)[0] or "application/octet-stream",
+            content_type=mimetypes.guess_type(path.name)[0]
+            or "application/octet-stream",
         )
     return form
 
 
-def access_error_message(*, channel_id: str, status: int, response_text: str, mirror_target: bool) -> str:
+def access_error_message(
+    *, channel_id: str, status: int, response_text: str, mirror_target: bool
+) -> str:
     label = f"HTTP {status}"
     if status == 403:
         label = "Forbidden"
@@ -79,6 +92,20 @@ async def validate_channel_access(
                 mirror_target=mirror_target,
             ),
         )
+
+
+async def post_attachment(
+    session: ClientSession,
+    *,
+    url: str,
+    headers: dict[str, str],
+    form: FormData,
+    final_target_check: Callable[[], None],
+) -> AttachmentPostResult:
+    """Recheck cross-process identity immediately before starting the POST."""
+    final_target_check()
+    async with session.post(url, headers=headers, data=form) as response:
+        return AttachmentPostResult(response.status, await response.text())
 
 
 def attachment_filenames(result: DiscordMessageResponse) -> list[str]:

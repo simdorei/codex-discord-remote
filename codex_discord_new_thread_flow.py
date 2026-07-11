@@ -7,6 +7,8 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Generic, Protocol, TypeVar
 
+import codex_discord_project_paths as project_paths
+
 BotT = TypeVar("BotT")
 BotT_contra = TypeVar("BotT_contra", contravariant=True)
 CodexThreadT = TypeVar("CodexThreadT")
@@ -77,9 +79,11 @@ async def _mirror_new_thread(
 ) -> str:
     preferred_project_channel_id = None
     codex_thread = await asyncio.to_thread(deps.choose_thread, new_thread_id, None)
+    project_key = deps.get_project_key(codex_thread)
+    project_paths.require_ordinary_project_key(project_key)
     preferred_project_channel_id = deps.resolve_project_channel_id(
         discord_channel_id,
-        deps.get_project_key(codex_thread),
+        project_key,
     )
     discord_thread = await deps.mirror_single_codex_thread(
         bot,
@@ -123,6 +127,9 @@ async def run_discord_new_thread(
                     deps=deps,
                 )
             )
+        except project_paths.GptChatOrdinaryMirrorError as exc:
+            deps.log("new_thread_mirror_skipped reason=gpt_chat_owned")
+            parts.append(f"Mirror update skipped: {exc}")
         except deps.delivery_exceptions as caught_exc:
             exc = caught_exc
             deps.log("new_thread_mirror_failed\n" + traceback.format_exc())

@@ -7,11 +7,13 @@ from typing import Protocol
 import codex_discord_message_content as message_content
 import codex_discord_message_intake_gate as message_intake_gate
 import codex_discord_message_target as message_target
+import codex_discord_project_runtime as project_runtime
 
 
 FormatLogTextLenFunc = Callable[[str], int | str]
 MirrorChannelPersister = Callable[[str, int], None]
 ProjectChannelDescriber = Callable[[int], str | None]
+ExactResolver = Callable[[int | None, str | None], project_runtime.ExactChannelDecision]
 
 
 class DispatchAuthor(Protocol):
@@ -36,6 +38,9 @@ class InboundMessageChannel(Protocol):
     @property
     def id(self) -> int: ...
 
+    @property
+    def name(self) -> str: ...
+
 
 class InboundMessage(Protocol):
     @property
@@ -49,7 +54,7 @@ class InboundMessage(Protocol):
 
 
 class PrefixCommandHandler(Protocol):
-    def __call__(self, message: DispatchMessage, command: str) -> Awaitable[None]: ...
+    def __call__(self, message: DispatchMessage, value: str, /) -> Awaitable[None]: ...
 
 
 class PlainAskHandler(Protocol):
@@ -57,17 +62,18 @@ class PlainAskHandler(Protocol):
         self,
         message: DispatchMessage,
         content: str,
+        /,
         *,
         target_thread_id: str | None = None,
     ) -> Awaitable[None]: ...
 
 
 class ChunkSender(Protocol):
-    def __call__(self, target: DispatchChannel, text: str) -> Awaitable[int]: ...
+    def __call__(self, target: DispatchChannel, text: str, /) -> Awaitable[int]: ...
 
 
 class MessageableChannelResolver(Protocol):
-    def __call__(self, channel: InboundMessageChannel) -> DispatchChannel: ...
+    def __call__(self, channel: InboundMessageChannel, /) -> DispatchChannel: ...
 
 
 class BotBridgeMentionPredicate(Protocol):
@@ -84,6 +90,7 @@ class PlainAskContentPreparer(Protocol):
         message: InboundMessage,
         content: str,
         target_thread_id: str | None,
+        /,
         *,
         has_attachments: bool,
     ) -> Awaitable[str | None]: ...
@@ -92,7 +99,9 @@ class PlainAskContentPreparer(Protocol):
 @dataclass(frozen=True, slots=True)
 class InboundDiscordMessageProcessDeps:
     require_messageable_channel: MessageableChannelResolver
-    is_allowed_message_channel: message_intake_gate.AllowedChannelPredicate[DispatchChannel]
+    is_allowed_message_channel: message_intake_gate.AllowedChannelPredicate[
+        DispatchChannel
+    ]
     is_bot_authored_bridge_mention: BotBridgeMentionPredicate
     is_allowed_user: Callable[[int], bool]
     is_stopping: Callable[[], bool]
@@ -108,6 +117,7 @@ class InboundDiscordMessageProcessDeps:
     handle_plain_ask: PlainAskHandler
     format_log_text_len: FormatLogTextLenFunc
     log: Callable[[str], None]
+    resolve_exact_channel_decision: ExactResolver | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -129,21 +139,23 @@ async def dispatch_prepared_message(
     deps: PreparedMessageDispatchDeps,
 ) -> None:
     target_thread_id = target.target_thread_id
-    target_source = target.target_source
     channel_id = message.channel.id
+    if target.blocked_reason is not None:
+        deps.log(
+            f"message_blocked chat={channel_id} user={message.author.id} reason={target.blocked_reason}"
+        )
+        return
     deps.log(
         f"message chat={channel_id} user={message.author.id} "
         + f"prefix={content.startswith('!')} "
-        + f"target_source={target_source} target={target_thread_id or '-'} "
+        + f"target_source={target.target_source} target={target_thread_id or '-'} "
         + f"text_len={deps.format_log_text_len(content)}"
     )
-    if (
-        target_source == "mirror"
-        and target_thread_id is not None
-        and target.persist_mirror_channel
-    ):
+    if target.persist_mirror_channel and target_thread_id is not None:
         deps.persist_inbound_mirror_thread_channel(target_thread_id, int(channel_id))
-        deps.log(f"inbound_mirror_channel_persisted target={target_thread_id} channel={channel_id}")
+        deps.log(
+            f"inbound_mirror_channel_persisted target={target_thread_id} channel={channel_id}"
+        )
     if content.startswith("!"):
         await deps.handle_prefix_command(message, content[1:].strip())
         return
@@ -163,10 +175,9 @@ async def process_inbound_discord_message(
     deps: InboundDiscordMessageProcessDeps,
 ) -> None:
     message_channel = deps.require_messageable_channel(message.channel)
-    intake_deps: message_intake_gate.MessageIntakeGateDeps[
-        DispatchChannel,
-        InboundMessage,
-    ] = message_intake_gate.MessageIntakeGateDeps(
+    intake_deps = message_intake_gate.MessageIntakeGateDeps[
+        DispatchChannel, InboundMessage
+    ](
         is_allowed_message_channel=deps.is_allowed_message_channel,
         is_bot_authored_bridge_mention=deps.is_bot_authored_bridge_mention,
         is_allowed_user=deps.is_allowed_user,
@@ -184,6 +195,20 @@ async def process_inbound_discord_message(
         log=deps.log,
     )
     if intake_gate.handled:
+        return
+    exact_safety = (
+        project_runtime.ExactChannelUnknown()
+        if deps.resolve_exact_channel_decision is None
+        else deps.resolve_exact_channel_decision(
+            message.channel.id, message.channel.name
+        )
+    )
+    blocked_reason = message_target.exact_channel_block_reason(exact_safety)
+    if blocked_reason is not None:
+        deps.log(
+            f"message_blocked chat={message.channel.id} user={message.author.id} "
+            + f"reason={blocked_reason}"
+        )
         return
     content = message.content or ""
     has_attachments = bool(getattr(message, "attachments", None))
@@ -224,6 +249,7 @@ async def process_inbound_discord_message(
         deps.get_mirrored_codex_thread_id,
         message.channel.id,
         getattr(message.channel, "parent_id", None),
+        exact_channel_decision=exact_safety,
     )
     prepared_message_content = message_content.prepare_inbound_message_content(
         content,

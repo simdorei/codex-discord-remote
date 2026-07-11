@@ -1,9 +1,17 @@
 from __future__ import annotations
 
+import asyncio  # noqa: ANYIO_OK
 from dataclasses import dataclass
 import unittest
 
+import codex_discord_gpt_delivery as gpt_delivery
 import codex_discord_session_mirror_delivery_flow as delivery_flow
+from codex_discord_gpt_ownership import (
+    CodexThreadId,
+    DiscordThreadId,
+    MirrorThreadLifecycleState,
+    MirrorThreadManagedBy,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -14,8 +22,39 @@ class FakeChannel:
 SendCall = tuple[FakeChannel, delivery_flow.SessionMirrorItem, str, str]
 
 
+class SendFailedError(RuntimeError):
+    pass
+
+
+def active_delivery_lease_deps() -> tuple[
+    asyncio.Lock,
+    gpt_delivery.ActiveDeliveryLeaseDeps,
+    gpt_delivery.ActiveDeliveryIdentity,
+]:
+    lock = asyncio.Lock()
+    identity = gpt_delivery.ActiveDeliveryIdentity(
+        codex_thread_id=CodexThreadId("thread-1"),
+        discord_channel_id=111,
+        discord_thread_id=DiscordThreadId(333),
+        project_key="project",
+        managed_by=MirrorThreadManagedBy.ORDINARY,
+        lifecycle_state=MirrorThreadLifecycleState.ACTIVE,
+        updated_at=1.0,
+    )
+
+    async def reread(_codex_thread_id: str) -> gpt_delivery.ActiveDeliveryIdentity:
+        return identity
+
+    return lock, gpt_delivery.ActiveDeliveryLeaseDeps(lock, reread), identity
+
+
 class SessionMirrorDeliveryFlowTests(unittest.IsolatedAsyncioTestCase):
-    async def test_deliver_and_commit_sends_claims_updates_cursor_and_logs(self) -> None:
+    async def test_deliver_and_commit_sends_claims_updates_cursor_and_logs(
+        self,
+    ) -> None:
+        configured_channel_lock, lease_deps, delivery_identity = (
+            active_delivery_lease_deps()
+        )
         channel = FakeChannel(channel_id=333)
         items: list[delivery_flow.SessionMirrorItem] = [
             {"kind": "final", "text": "done", "digest": "digest-1"}
@@ -51,7 +90,9 @@ class SessionMirrorDeliveryFlowTests(unittest.IsolatedAsyncioTestCase):
             claims.append((digest, codex_thread_id))
             return True
 
-        async def update_cursor(codex_thread_id: str, rollout_path: str, cursor: int) -> None:
+        async def update_cursor(
+            codex_thread_id: str, rollout_path: str, cursor: int
+        ) -> None:
             updates.append((codex_thread_id, rollout_path, cursor))
 
         delivered = await delivery_flow.deliver_and_commit_session_mirror_items(
@@ -59,9 +100,12 @@ class SessionMirrorDeliveryFlowTests(unittest.IsolatedAsyncioTestCase):
             "session.jsonl",
             42,
             discord_thread_id=333,
+            expected_identity=delivery_identity,
             event_count=2,
             items=items,
             deps=delivery_flow.SessionMirrorDeliveryFlowDeps(
+                configured_channel_lock=configured_channel_lock,
+                active_delivery_lease_deps=lease_deps,
                 resolve_session_mirror_channel=resolve_channel,
                 resolve_target_ref=resolve_target_ref,
                 has_session_mirror_event=has_event,
@@ -81,10 +125,15 @@ class SessionMirrorDeliveryFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(deactivated, ["thread-1"])
         self.assertEqual(
             logs,
-            ["session_mirror_sent target=thread-1 channel=333 events=2 items=1 cursor=42"],
+            [
+                "session_mirror_sent target=thread-1 channel=333 events=2 items=1 cursor=42"
+            ],
         )
 
     async def test_missing_channel_returns_without_delivery_or_commit(self) -> None:
+        configured_channel_lock, lease_deps, delivery_identity = (
+            active_delivery_lease_deps()
+        )
         items: list[delivery_flow.SessionMirrorItem] = [
             {"kind": "final", "text": "done", "digest": "digest-1"}
         ]
@@ -98,7 +147,9 @@ class SessionMirrorDeliveryFlowTests(unittest.IsolatedAsyncioTestCase):
             raise AssertionError(f"target ref should not resolve: {codex_thread_id}")
 
         async def has_event(digest: str, codex_thread_id: str) -> bool:
-            raise AssertionError(f"claim check should not run: {digest} {codex_thread_id}")
+            raise AssertionError(
+                f"claim check should not run: {digest} {codex_thread_id}"
+            )
 
         async def send_item(
             channel: FakeChannel,
@@ -107,13 +158,19 @@ class SessionMirrorDeliveryFlowTests(unittest.IsolatedAsyncioTestCase):
             target_thread_id: str,
             target_ref: str,
         ) -> None:
-            raise AssertionError(f"send should not run: {channel} {item} {target_thread_id} {target_ref}")
+            raise AssertionError(
+                f"send should not run: {channel} {item} {target_thread_id} {target_ref}"
+            )
 
         async def claim_event(digest: str, codex_thread_id: str) -> bool:
             raise AssertionError(f"claim should not run: {digest} {codex_thread_id}")
 
-        async def update_cursor(codex_thread_id: str, rollout_path: str, cursor: int) -> None:
-            raise AssertionError(f"cursor should not update: {codex_thread_id} {rollout_path} {cursor}")
+        async def update_cursor(
+            codex_thread_id: str, rollout_path: str, cursor: int
+        ) -> None:
+            raise AssertionError(
+                f"cursor should not update: {codex_thread_id} {rollout_path} {cursor}"
+            )
 
         def deactivate(codex_thread_id: str) -> None:
             raise AssertionError(f"target should not deactivate: {codex_thread_id}")
@@ -126,9 +183,12 @@ class SessionMirrorDeliveryFlowTests(unittest.IsolatedAsyncioTestCase):
             "session.jsonl",
             42,
             discord_thread_id=333,
+            expected_identity=delivery_identity,
             event_count=2,
             items=items,
             deps=delivery_flow.SessionMirrorDeliveryFlowDeps(
+                configured_channel_lock=configured_channel_lock,
+                active_delivery_lease_deps=lease_deps,
                 resolve_session_mirror_channel=resolve_channel,
                 resolve_target_ref=resolve_target_ref,
                 has_session_mirror_event=has_event,
@@ -143,7 +203,12 @@ class SessionMirrorDeliveryFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(delivered)
         self.assertEqual(resolved_channels, [333])
 
-    async def test_send_failure_propagates_without_claim_or_cursor_advance(self) -> None:
+    async def test_send_failure_propagates_without_claim_or_cursor_advance(
+        self,
+    ) -> None:
+        configured_channel_lock, lease_deps, delivery_identity = (
+            active_delivery_lease_deps()
+        )
         channel = FakeChannel(channel_id=333)
         items: list[delivery_flow.SessionMirrorItem] = [
             {"kind": "final", "text": "done", "digest": "digest-1"}
@@ -173,24 +238,29 @@ class SessionMirrorDeliveryFlowTests(unittest.IsolatedAsyncioTestCase):
             target_ref: str,
         ) -> None:
             _ = (channel, item, target_thread_id, target_ref)
-            raise RuntimeError("send failed")
+            raise SendFailedError("send failed")
 
         async def claim_event(digest: str, codex_thread_id: str) -> bool:
             claims.append((digest, codex_thread_id))
             return True
 
-        async def update_cursor(codex_thread_id: str, rollout_path: str, cursor: int) -> None:
+        async def update_cursor(
+            codex_thread_id: str, rollout_path: str, cursor: int
+        ) -> None:
             updates.append((codex_thread_id, rollout_path, cursor))
 
-        with self.assertRaisesRegex(RuntimeError, "send failed"):
+        with self.assertRaisesRegex(SendFailedError, "send failed"):
             _ = await delivery_flow.deliver_and_commit_session_mirror_items(
                 "thread-1",
                 "session.jsonl",
                 42,
                 discord_thread_id=333,
+                expected_identity=delivery_identity,
                 event_count=2,
                 items=items,
                 deps=delivery_flow.SessionMirrorDeliveryFlowDeps(
+                    configured_channel_lock=configured_channel_lock,
+                    active_delivery_lease_deps=lease_deps,
                     resolve_session_mirror_channel=resolve_channel,
                     resolve_target_ref=resolve_target_ref,
                     has_session_mirror_event=has_event,

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio  # noqa: ANYIO_OK
 import os
 import traceback
 from collections.abc import Awaitable, Callable
@@ -7,9 +8,11 @@ from pathlib import Path
 from typing import Protocol, TypeVar
 
 import codex_discord_bot_session_mirror_runtime as session_mirror_runtime
+import codex_discord_gpt_delivery as gpt_delivery
 import codex_discord_session_mirror as discord_session_mirror
+import codex_discord_session_mirror_delivery_flow as discord_session_mirror_delivery_flow
 import codex_discord_session_mirror_item_delivery as discord_session_mirror_item_delivery
-import codex_discord_session_mirror_target as discord_session_mirror_target
+import codex_discord_store_session_mirror as session_mirror_store
 from codex_discord_text import env_flag, parse_bounded_int_arg
 from codex_session_events import JsonEvent
 from codex_thread_models import ThreadContextUsage, ThreadInfo
@@ -19,18 +22,23 @@ ChannelT = TypeVar("ChannelT")
 
 
 class SessionMirrorEventsBridge(Protocol):
-    choose_thread: discord_session_mirror_target.ChooseThreadSync[ThreadInfo]
-    read_new_session_events: discord_session_mirror_target.ReadNewSessionEventsSync[JsonEvent]
+    choose_thread: discord_session_mirror_delivery_flow.ChooseThreadSync[ThreadInfo]
+    read_new_session_events: (
+        discord_session_mirror_delivery_flow.ReadNewSessionEventsSync[JsonEvent]
+    )
 
     def get_thread_context_usage(self, thread: ThreadInfo) -> ThreadContextUsage: ...
 
-    def should_recommend_archive(self, thread: ThreadInfo, usage: ThreadContextUsage) -> bool: ...
+    def should_recommend_archive(
+        self, thread: ThreadInfo, usage: ThreadContextUsage
+    ) -> bool: ...
 
     def is_thread_busy(self, session_path: Path) -> bool: ...
 
 
 def make_session_mirror_runtime(
     *,
+    configured_channel_lock: asyncio.Lock,
     target_limit: int,
     archive_backlog_max_events_default: int,
     delivery_exceptions: tuple[type[BaseException], ...],
@@ -41,11 +49,21 @@ def make_session_mirror_runtime(
     sleep: Callable[[float], Awaitable[None]],
     is_messageable: Callable[[ChannelT], bool],
     parse_interactive_notice: discord_session_mirror_item_delivery.ParseInteractiveNotice,
-    send_interactive_prompt: discord_session_mirror_item_delivery.SessionMirrorInteractiveSender[ChannelT],
-    send_chunks: discord_session_mirror_item_delivery.SessionMirrorChunkSender[ChannelT],
-    send_attachment: discord_session_mirror_item_delivery.SessionMirrorAttachmentSender[ChannelT],
-    collect_session_mirror_items: discord_session_mirror_target.SessionMirrorItemCollector[JsonEvent],
-    get_archive_skip_logged: Callable[[session_mirror_runtime.SessionMirrorOwner[ChannelT]], set[str]],
+    send_interactive_prompt: discord_session_mirror_item_delivery.SessionMirrorInteractiveSender[
+        ChannelT
+    ],
+    send_chunks: discord_session_mirror_item_delivery.SessionMirrorChunkSender[
+        ChannelT
+    ],
+    send_attachment: discord_session_mirror_item_delivery.SessionMirrorAttachmentSender[
+        ChannelT
+    ],
+    collect_session_mirror_items: discord_session_mirror_delivery_flow.SessionMirrorItemCollector[
+        JsonEvent
+    ],
+    get_archive_skip_logged: Callable[
+        [session_mirror_runtime.SessionMirrorOwner[ChannelT]], set[str]
+    ],
     resolve_target_ref: Callable[[str], tuple[str | None, str]],
     is_active_output_target: Callable[[str], bool],
     is_pending_cursor_target: Callable[[str], bool],
@@ -57,8 +75,17 @@ def make_session_mirror_runtime(
     deactivate_session_mirror_output_target: Callable[[str], None],
     events_bridge: SessionMirrorEventsBridge,
     log: Callable[[str], None],
-    send_typing_pulse: Callable[[ChannelT, str], Awaitable[None]] | None = None,
+    send_typing_pulse: Callable[[ChannelT, str, str], Awaitable[None]] | None = None,
 ) -> session_mirror_runtime.SessionMirrorRuntime[ChannelT]:
+    async def reread_active_delivery_identity(
+        codex_thread_id: str,
+    ) -> gpt_delivery.ActiveDeliveryIdentity | None:
+        return await asyncio.to_thread(
+            session_mirror_store.get_session_mirror_delivery_identity,
+            get_db_path(),
+            codex_thread_id,
+        )
+
     def read_new_session_events(
         session_path: Path,
         cursor: int,
@@ -67,10 +94,17 @@ def make_session_mirror_runtime(
     ) -> tuple[list[JsonEvent], int]:
         if max_events is None:
             return events_bridge.read_new_session_events(session_path, cursor)
-        return events_bridge.read_new_session_events(session_path, cursor, max_events=max_events)
+        return events_bridge.read_new_session_events(
+            session_path, cursor, max_events=max_events
+        )
 
     return session_mirror_runtime.SessionMirrorRuntime(
         session_mirror_runtime.SessionMirrorRuntimeDeps(
+            configured_channel_lock=configured_channel_lock,
+            active_delivery_lease_deps=gpt_delivery.ActiveDeliveryLeaseDeps(
+                configured_channel_lock=configured_channel_lock,
+                reread_active_delivery_identity=reread_active_delivery_identity,
+            ),
             mirror_enabled=lambda: env_flag("DISCORD_SESSION_MIRROR", default=True),
             target_limit=target_limit,
             delivery_exceptions=delivery_exceptions,
@@ -88,9 +122,15 @@ def make_session_mirror_runtime(
             send_attachment=send_attachment,
             format_session_mirror_text=format_session_mirror_delivery_text,
             parse_session_mirror_target=discord_session_mirror.parse_session_mirror_target,
-            choose_thread=lambda thread_id, cwd: events_bridge.choose_thread(thread_id, cwd),
-            get_thread_context_usage=lambda thread: events_bridge.get_thread_context_usage(thread),
-            should_recommend_archive=lambda thread, usage: events_bridge.should_recommend_archive(thread, usage),
+            choose_thread=lambda thread_id, cwd: events_bridge.choose_thread(
+                thread_id, cwd
+            ),
+            get_thread_context_usage=lambda thread: (
+                events_bridge.get_thread_context_usage(thread)
+            ),
+            should_recommend_archive=lambda thread, usage: (
+                events_bridge.should_recommend_archive(thread, usage)
+            ),
             get_thread_rollout_path=lambda codex_thread: str(codex_thread.rollout_path),
             is_active_output_target=is_active_output_target,
             is_pending_cursor_target=is_pending_cursor_target,
@@ -111,8 +151,11 @@ def make_session_mirror_runtime(
             claim_session_mirror_event=claim_session_mirror_event,
             deactivate_session_mirror_output_target=deactivate_session_mirror_output_target,
             log=log,
-            send_typing_pulse=send_typing_pulse or session_mirror_runtime.noop_send_typing_pulse,
-            is_thread_busy=lambda session_path: events_bridge.is_thread_busy(session_path),
+            send_typing_pulse=send_typing_pulse
+            or session_mirror_runtime.noop_send_typing_pulse,
+            is_thread_busy=lambda session_path: events_bridge.is_thread_busy(
+                session_path
+            ),
         )
     )
 

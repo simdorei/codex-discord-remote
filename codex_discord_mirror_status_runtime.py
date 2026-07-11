@@ -9,6 +9,7 @@ from typing import Protocol, cast
 import codex_discord_mirror_access as discord_mirror_access
 import codex_discord_mirror_scope as discord_mirror_scope
 import codex_discord_mirror_status as discord_mirror_status
+import codex_discord_project_paths as project_paths
 from codex_thread_models import ThreadInfo
 
 
@@ -33,6 +34,17 @@ class MirrorStatusRuntimeDeps:
     get_project_name: Callable[[ThreadInfo], str]
 
 
+def _ordinary_threads(
+    threads: list[ThreadInfo],
+    deps: MirrorStatusRuntimeDeps,
+) -> list[ThreadInfo]:
+    return [
+        thread
+        for thread in threads
+        if not project_paths.is_gpt_chat_project_key(deps.get_project_key(thread))
+    ]
+
+
 def resolve_mirror_list_scope(
     limit: int | None = None,
     *,
@@ -41,7 +53,7 @@ def resolve_mirror_list_scope(
 ) -> tuple[int, list[str] | None]:
     scoped_thread_ids = None
     if limit is None or channel_id is not None:
-        scoped_threads = deps.load_mirror_scope_threads(limit)
+        scoped_threads = _ordinary_threads(deps.load_mirror_scope_threads(limit), deps)
         scoped_threads = deps.filter_threads_for_discord_channel(scoped_threads, channel_id)
         resolved_limit = len(scoped_threads)
         scoped_thread_ids = [thread.id for thread in scoped_threads]
@@ -118,7 +130,8 @@ def build_mirror_check(
     access_statuses: discord_mirror_status.MirrorAccessStatusMap | None = None,
     deps: MirrorStatusRuntimeDeps,
 ) -> str:
-    threads = deps.filter_mirrorable_threads(deps.load_mirror_scope_threads(limit))
+    threads = _ordinary_threads(deps.load_mirror_scope_threads(limit), deps)
+    threads = _ordinary_threads(deps.filter_mirrorable_threads(threads), deps)
     threads = deps.filter_threads_for_discord_channel(threads, channel_id)
     mirrorable_count = len(threads)
     threads = deps.filter_app_server_available_threads(threads)

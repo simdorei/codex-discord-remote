@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import codex_discord_store as discord_store
+import codex_discord_project_paths as project_paths
 from codex_thread_models import ThreadInfo
 
 FetchFailureTypes = tuple[type[Exception], ...]
@@ -32,6 +33,7 @@ def upsert_mirror_project(
     deps: MirrorChannelDeps,
 ) -> None:
     canonical_project_key = deps.normalize_project_key(project_key)
+    project_paths.require_ordinary_project_key(canonical_project_key)
     merged_aliases = discord_store.upsert_mirror_project(
         deps.db_path,
         canonical_project_key,
@@ -52,6 +54,7 @@ def find_mirror_project_row_by_key(
     deps: MirrorChannelDeps,
 ) -> tuple[int, str] | None:
     canonical_project_key = deps.normalize_project_key(project_key)
+    project_paths.require_ordinary_project_key(canonical_project_key)
     return discord_store.find_mirror_project_row_by_key(
         deps.db_path,
         canonical_project_key,
@@ -69,6 +72,7 @@ def upsert_mirror_thread(
     deps: MirrorChannelDeps,
 ) -> None:
     canonical_project_key = deps.normalize_project_key(project_key)
+    project_paths.require_ordinary_project_key(canonical_project_key)
     discord_store.upsert_mirror_thread(
         deps.db_path,
         codex_thread.id,

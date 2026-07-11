@@ -52,8 +52,12 @@ class StoreMirrorCleanupTests(unittest.TestCase):
             with sqlite3.connect(db_path) as conn:
                 self._insert_project(conn, "keep-project", "Keep", 111)
                 self._insert_project(conn, "stale-project", "Stale", 222)
-                self._insert_thread(conn, "thread-keep", "keep-project", "Keep Thread", 111, 1001)
-                self._insert_thread(conn, "thread-stale", "stale-project", "Stale Thread", 222, 1002)
+                self._insert_thread(
+                    conn, "thread-keep", "keep-project", "Keep Thread", 111, 1001
+                )
+                self._insert_thread(
+                    conn, "thread-stale", "stale-project", "Stale Thread", 222, 1002
+                )
 
             self.assertEqual(
                 store.get_stale_mirror_thread_rows(db_path, {"thread-keep"}),
@@ -89,7 +93,9 @@ class StoreMirrorCleanupTests(unittest.TestCase):
                 self._insert_project(conn, "canonical", "taxlab", 111)
                 self._insert_project(conn, "stale-project", "old", 333)
                 self._insert_thread(conn, "thread-1", "canonical", "current", 111, 222)
-                self._insert_thread(conn, "thread-stale", "stale-project", "old", 333, 444)
+                self._insert_thread(
+                    conn, "thread-stale", "stale-project", "old", 333, 444
+                )
 
             self.assertEqual(
                 store.get_stale_mirror_thread_rows(db_path, {"thread-1"}),
@@ -140,8 +146,12 @@ class StoreMirrorCleanupTests(unittest.TestCase):
             with sqlite3.connect(db_path) as conn:
                 self._insert_project(conn, "project-1", "Project 1", 111)
                 self._insert_project(conn, "project-2", "Project 2", 222)
-                self._insert_thread(conn, "thread-1", "project-1", "Thread 1", 111, 1001)
-                self._insert_thread(conn, "thread-2", "project-2", "Thread 2", 222, 1002)
+                self._insert_thread(
+                    conn, "thread-1", "project-1", "Thread 1", 111, 1001
+                )
+                self._insert_thread(
+                    conn, "thread-2", "project-2", "Thread 2", 222, 1002
+                )
             store.update_session_mirror_cursor(
                 db_path,
                 "thread-1",
@@ -161,7 +171,11 @@ class StoreMirrorCleanupTests(unittest.TestCase):
 
             self.assertEqual(
                 store.delete_archived_mirror_state(db_path, "thread-1"),
-                {"mirror_threads": 1, "session_mirror_offsets": 1},
+                {
+                    "mirror_threads": 1,
+                    "session_mirror_offsets": 1,
+                    "destructive_cleanup_allowed": 1,
+                },
             )
             self.assertEqual(
                 store.get_remaining_mirror_discord_ids(db_path),
@@ -169,6 +183,40 @@ class StoreMirrorCleanupTests(unittest.TestCase):
             )
             self.assertFalse(store.is_mirrored_channel_id(db_path, 1001))
             self.assertTrue(store.is_mirrored_channel_id(db_path, 111))
+
+    def test_duplicate_discord_owners_fail_closed_for_stale_and_archive_cleanup(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp_dir:
+            db_path = self._db_path(temp_dir)
+            with sqlite3.connect(db_path) as conn:
+                self._insert_project(conn, "ordinary", "Ordinary", 111)
+                self._insert_thread(conn, "ordinary", "ordinary", "Ordinary", 111, 500)
+                _ = conn.execute(
+                    "INSERT INTO mirror_threads VALUES "
+                    + "('gpt', 'codex:chats', 'GPT', 900, 500, 20.0, 'gpt_chat', 'active')"
+                )
+            store.update_session_mirror_cursor(db_path, "ordinary", "ordinary.jsonl", 7)
+
+            self.assertEqual(store.get_stale_mirror_thread_rows(db_path, set()), [])
+            store.delete_stale_mirror_rows(db_path, set(), {"ordinary"})
+            self.assertEqual(
+                store.delete_archived_mirror_state(db_path, "ordinary"),
+                {
+                    "mirror_threads": 0,
+                    "session_mirror_offsets": 0,
+                    "destructive_cleanup_allowed": 0,
+                },
+            )
+            with sqlite3.connect(db_path) as conn:
+                owners = conn.execute(
+                    "SELECT codex_thread_id FROM mirror_threads ORDER BY codex_thread_id"
+                ).fetchall()
+                cursor = conn.execute(
+                    "SELECT codex_thread_id FROM codex_session_mirror_offsets"
+                ).fetchall()
+            self.assertEqual(owners, [("gpt",), ("ordinary",)])
+            self.assertEqual(cursor, [("ordinary",)])
 
 
 if __name__ == "__main__":

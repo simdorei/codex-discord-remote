@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import os
-from typing import Protocol
+from typing import Protocol, assert_never
 
+import codex_discord_project_runtime as project_runtime
 from codex_discord_text import parse_int_set
 
 
@@ -22,6 +23,9 @@ class InteractionChannelLike(Protocol):
     @property
     def id(self) -> DiscordIdValue: ...
 
+    @property
+    def name(self) -> str: ...
+
 
 class InteractionLike(Protocol):
     @property
@@ -40,6 +44,15 @@ class CommandNameFunc(Protocol):
 
 class MirroredChannelFunc(Protocol):
     def __call__(self, channel_id: DiscordIdValue, /) -> bool: ...
+
+
+class ExactChannelDecisionFunc(Protocol):
+    def __call__(
+        self,
+        channel_id: DiscordIdValue,
+        channel_name: str | None,
+        /,
+    ) -> project_runtime.ExactChannelDecision: ...
 
 
 class InteractionGateBot(Protocol):
@@ -64,6 +77,7 @@ def check_interaction_allowed(
     log_func: LogFunc,
     get_interaction_command_name_func: CommandNameFunc,
     is_mirrored_channel_id_func: MirroredChannelFunc,
+    resolve_exact_channel_decision_func: ExactChannelDecisionFunc | None = None,
 ) -> bool:
     command_name = get_interaction_command_name_func(interaction)
     user = interaction.user
@@ -75,15 +89,36 @@ def check_interaction_allowed(
             + f"user={user_id} channel={channel_id}"
         )
         return False
-    if bot.is_allowed_channel(channel_id):
-        return True
-    if is_mirrored_channel_id_func(channel_id):
-        return True
     channel = interaction.channel
-    if channel is not None and bot.is_allowed_message_channel(channel):
-        return True
-    log_func(
-        f"slash_ignored command={command_name} reason=channel_not_allowed "
-        + f"user={user_id} channel={channel_id}"
+    exact_safety = (
+        project_runtime.ExactChannelUnknown()
+        if resolve_exact_channel_decision_func is None
+        else resolve_exact_channel_decision_func(
+            channel_id,
+            None if channel is None else channel.name,
+        )
     )
-    return False
+
+    match exact_safety:
+        case project_runtime.ExactChannelActive():
+            return True
+        case project_runtime.ExactChannelBlocked(reason=reason):
+            log_func(
+                f"slash_ignored command={command_name} reason={reason} "
+                + f"user={user_id} channel={channel_id}"
+            )
+            return False
+        case project_runtime.ExactChannelUnknown():
+            if bot.is_allowed_channel(channel_id):
+                return True
+            if is_mirrored_channel_id_func(channel_id):
+                return True
+            if channel is not None and bot.is_allowed_message_channel(channel):
+                return True
+            log_func(
+                f"slash_ignored command={command_name} reason=channel_not_allowed "
+                + f"user={user_id} channel={channel_id}"
+            )
+            return False
+        case _:
+            assert_never(exact_safety)

@@ -2,10 +2,29 @@ from __future__ import annotations
 
 import os
 import unittest
-from types import SimpleNamespace
+from dataclasses import dataclass
 from unittest.mock import patch
 
 import codex_discord_interaction_gate as gate
+import codex_discord_project_runtime as project_runtime
+
+
+@dataclass(frozen=True, slots=True)
+class FakeUser:
+    id: int
+
+
+@dataclass(frozen=True, slots=True)
+class FakeChannel:
+    id: int
+    name: str = "channel"
+
+
+@dataclass(frozen=True, slots=True)
+class FakeInteraction:
+    user: FakeUser | None
+    channel_id: int
+    channel: FakeChannel | None
 
 
 class FakeBot:
@@ -20,27 +39,46 @@ class FakeBot:
         self.allowed_channels: set[int] = allowed_channels or {11}
         self.allowed_message_channels: set[int] = allowed_message_channels or set()
 
-    def is_allowed_user(self, user_id: object) -> bool:
-        return user_id in self.allowed_users
+    def is_allowed_user(self, user_id: gate.DiscordIdValue) -> bool:
+        return user_id is not None and int(user_id) in self.allowed_users
 
-    def is_allowed_channel(self, channel_id: object) -> bool:
-        return channel_id in self.allowed_channels
+    def is_allowed_channel(self, channel_id: gate.DiscordIdValue) -> bool:
+        return channel_id is not None and int(channel_id) in self.allowed_channels
 
-    def is_allowed_message_channel(self, channel: object) -> bool:
-        return getattr(channel, "id", None) in self.allowed_message_channels
+    def is_allowed_message_channel(self, channel: gate.InteractionChannelLike) -> bool:
+        return int(channel.id or 0) in self.allowed_message_channels
 
 
-def command_name(_interaction: object) -> str:
+def command_name(_interaction: gate.InteractionLike) -> str:
     return "ask"
 
 
 class InteractionGateTests(unittest.TestCase):
+    def test_unknown_configured_general_channel_preserves_allowed_behavior(
+        self,
+    ) -> None:
+        logs: list[str] = []
+        interaction = FakeInteraction(FakeUser(7), 11, None)
+
+        allowed = gate.check_interaction_allowed(
+            FakeBot(),
+            interaction,
+            log_func=logs.append,
+            get_interaction_command_name_func=command_name,
+            is_mirrored_channel_id_func=lambda _channel_id: False,
+        )
+
+        self.assertTrue(allowed)
+        self.assertEqual(logs, [])
+
     def test_discord_user_allowlist_uses_env_when_present(self) -> None:
         with patch.dict(os.environ, {}, clear=True):
             self.assertTrue(gate.is_discord_user_allowed(None))
             self.assertTrue(gate.is_discord_user_allowed(7))
 
-        with patch.dict(os.environ, {"DISCORD_ALLOWED_USER_IDS": "7, bad, 8"}, clear=True):
+        with patch.dict(
+            os.environ, {"DISCORD_ALLOWED_USER_IDS": "7, bad, 8"}, clear=True
+        ):
             self.assertTrue(gate.is_discord_user_allowed(7))
             self.assertTrue(gate.is_discord_user_allowed(8))
             self.assertFalse(gate.is_discord_user_allowed(9))
@@ -48,7 +86,7 @@ class InteractionGateTests(unittest.TestCase):
 
     def test_rejects_disallowed_user_and_logs_reason(self) -> None:
         logs: list[str] = []
-        interaction = SimpleNamespace(user=SimpleNamespace(id=8), channel_id=11, channel=None)
+        interaction = FakeInteraction(FakeUser(8), 11, None)
 
         allowed = gate.check_interaction_allowed(
             FakeBot(),
@@ -66,7 +104,7 @@ class InteractionGateTests(unittest.TestCase):
 
     def test_allows_explicit_allowed_channel(self) -> None:
         logs: list[str] = []
-        interaction = SimpleNamespace(user=SimpleNamespace(id=7), channel_id=11, channel=None)
+        interaction = FakeInteraction(FakeUser(7), 11, None)
 
         allowed = gate.check_interaction_allowed(
             FakeBot(),
@@ -81,7 +119,7 @@ class InteractionGateTests(unittest.TestCase):
 
     def test_allows_mirrored_channel(self) -> None:
         logs: list[str] = []
-        interaction = SimpleNamespace(user=SimpleNamespace(id=7), channel_id=22, channel=None)
+        interaction = FakeInteraction(FakeUser(7), 22, None)
 
         allowed = gate.check_interaction_allowed(
             FakeBot(),
@@ -96,8 +134,8 @@ class InteractionGateTests(unittest.TestCase):
 
     def test_allows_allowed_message_channel_object(self) -> None:
         logs: list[str] = []
-        channel = SimpleNamespace(id=33)
-        interaction = SimpleNamespace(user=SimpleNamespace(id=7), channel_id=33, channel=channel)
+        channel = FakeChannel(33)
+        interaction = FakeInteraction(FakeUser(7), 33, channel)
 
         allowed = gate.check_interaction_allowed(
             FakeBot(allowed_message_channels={33}),
@@ -112,7 +150,7 @@ class InteractionGateTests(unittest.TestCase):
 
     def test_rejects_disallowed_channel_and_logs_reason(self) -> None:
         logs: list[str] = []
-        interaction = SimpleNamespace(user=SimpleNamespace(id=7), channel_id=44, channel=None)
+        interaction = FakeInteraction(FakeUser(7), 44, None)
 
         allowed = gate.check_interaction_allowed(
             FakeBot(),
@@ -127,3 +165,37 @@ class InteractionGateTests(unittest.TestCase):
             logs,
             ["slash_ignored command=ask reason=channel_not_allowed user=7 channel=44"],
         )
+
+    def test_exact_active_owner_allows_and_blocked_owner_stops_before_fallback(
+        self,
+    ) -> None:
+        active = FakeInteraction(FakeUser(7), 55, None)
+        blocked = FakeInteraction(FakeUser(7), 56, None)
+        logs: list[str] = []
+
+        active_allowed = gate.check_interaction_allowed(
+            FakeBot(),
+            active,
+            log_func=logs.append,
+            get_interaction_command_name_func=command_name,
+            is_mirrored_channel_id_func=lambda _channel_id: False,
+            resolve_exact_channel_decision_func=lambda _channel_id, _channel_name: (
+                project_runtime.ExactChannelActive("gpt-thread")
+            ),
+        )
+        blocked_allowed = gate.check_interaction_allowed(
+            FakeBot(allowed_channels={56}),
+            blocked,
+            log_func=logs.append,
+            get_interaction_command_name_func=command_name,
+            is_mirrored_channel_id_func=lambda _channel_id: True,
+            resolve_exact_channel_decision_func=lambda _channel_id, _channel_name: (
+                project_runtime.ExactChannelBlocked(
+                    project_runtime.ExactChannelBlockReason.INACTIVE.value
+                )
+            ),
+        )
+
+        self.assertTrue(active_allowed)
+        self.assertFalse(blocked_allowed)
+        self.assertIn("reason=gpt_inactive", logs[-1])

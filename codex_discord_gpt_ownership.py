@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextlib import closing
 import sqlite3
 from dataclasses import dataclass
 from enum import StrEnum, unique
@@ -88,7 +89,7 @@ _OWNERSHIP_COLUMNS: Final = (
 
 
 def _init_db(db_path: Path) -> None:
-    with sqlite3.connect(db_path) as conn:
+    with closing(sqlite3.connect(db_path)) as conn, conn:
         init_store_schema(conn)
 
 
@@ -114,9 +115,11 @@ def get_mirror_thread_owner_by_discord_thread_id(
         return None
     normalized_id = DiscordThreadId(int(discord_thread_id))
     _init_db(db_path)
-    with sqlite3.connect(db_path) as conn:
+    with closing(sqlite3.connect(db_path)) as conn, conn:
         rows: list[OwnershipRow] = conn.execute(
-            "SELECT " + _OWNERSHIP_COLUMNS + " FROM mirror_threads "
+            "SELECT "
+            + _OWNERSHIP_COLUMNS
+            + " FROM mirror_threads "
             + "WHERE discord_thread_id = ? ORDER BY codex_thread_id",
             (normalized_id,),
         ).fetchall()
@@ -136,9 +139,11 @@ def get_mirror_thread_owner_by_codex_thread_id(
 ) -> MirrorThreadOwnership | None:
     """Return an exact Codex owner without hiding inactive or transitional state."""
     _init_db(db_path)
-    with sqlite3.connect(db_path) as conn:
+    with closing(sqlite3.connect(db_path)) as conn, conn:
         rows: list[OwnershipRow] = conn.execute(
-            "SELECT " + _OWNERSHIP_COLUMNS + " FROM mirror_threads "
+            "SELECT "
+            + _OWNERSHIP_COLUMNS
+            + " FROM mirror_threads "
             + "WHERE codex_thread_id = ?",
             (str(codex_thread_id),),
         ).fetchall()
@@ -161,9 +166,11 @@ def get_active_gpt_mirror_thread_by_discord_thread_id(
 def list_ordinary_mirror_threads(db_path: Path) -> tuple[MirrorThreadOwnership, ...]:
     """List ordinary mappings only, newest first, for legacy status surfaces."""
     _init_db(db_path)
-    with sqlite3.connect(db_path) as conn:
+    with closing(sqlite3.connect(db_path)) as conn, conn:
         rows: list[OwnershipRow] = conn.execute(
-            "SELECT " + _OWNERSHIP_COLUMNS + " FROM mirror_threads "
+            "SELECT "
+            + _OWNERSHIP_COLUMNS
+            + " FROM mirror_threads "
             + "WHERE managed_by = 'ordinary' "
             + "ORDER BY updated_at DESC, codex_thread_id"
         ).fetchall()

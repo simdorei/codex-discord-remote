@@ -5,45 +5,62 @@ from collections.abc import Awaitable, Callable, Coroutine, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Generic, Protocol, TypeAlias, TypeVar
+from typing import Generic, Protocol, TypeVar
 
+import codex_discord_gpt_delivery as gpt_delivery
 import codex_discord_session_mirror as discord_session_mirror
 import codex_discord_session_mirror_channels as discord_session_mirror_channels
+import codex_discord_session_mirror_delivery_flow as discord_session_mirror_delivery_flow
 import codex_discord_session_mirror_item_delivery as discord_session_mirror_item_delivery
 import codex_discord_session_mirror_target as discord_session_mirror_target
+from codex_discord_session_mirror import (
+    SessionMirrorTargetMapping as SessionMirrorTargetMapping,
+)
 from codex_session_events import JsonEvent
 from codex_thread_models import ThreadContextUsage, ThreadInfo
-ModuleValue: TypeAlias = object
 
 
 ChannelT = TypeVar("ChannelT")
-SessionMirrorTargetMapping: TypeAlias = discord_session_mirror.SessionMirrorTargetMapping
-LoadTargetsInThread = Callable[[Path, int], Awaitable[Sequence[SessionMirrorTargetMapping]]]
-CreateTaskFunc = Callable[[Coroutine[object, object, None]], asyncio.Task[None]]
-LogFunc = Callable[[str], None]
+LoadTargetsInThread = Callable[
+    [Path, int], Awaitable[Sequence[SessionMirrorTargetMapping]]
+]
+CreateTaskFunc = Callable[[Coroutine[None, None, None]], asyncio.Task[None]]
 
 
-async def noop_send_typing_pulse(channel: object, context: str) -> None:
-    _ = channel
-    _ = context
+noop_send_typing_pulse = discord_session_mirror_delivery_flow.noop_send_typing_pulse
 
 
-class SessionMirrorOwner(Protocol[ChannelT]):
+class SessionMirrorArchiveOwner(Protocol):
+    _session_mirror_archive_skip_logged: set[str]
+
+    def session_mirror_archive_skip_logged(self) -> set[str]:
+        return self._session_mirror_archive_skip_logged
+
+
+class SessionMirrorOwner(SessionMirrorArchiveOwner, Protocol[ChannelT]):
     session_mirror_poll_seconds: float
 
     def is_closed(self) -> bool: ...
 
-    def get_cached_channel_or_thread(self, channel_id: int) -> tuple[ChannelT | None, str]: ...
+    def get_cached_channel_or_thread(
+        self, channel_id: int
+    ) -> tuple[ChannelT | None, str]: ...
 
     async def fetch_channel(self, channel_id: int) -> ChannelT: ...
 
-    def get_session_mirror_seen_agent_messages(self, codex_thread_id: str) -> dict[str, float]: ...
+    def get_session_mirror_seen_agent_messages(
+        self, codex_thread_id: str
+    ) -> dict[str, float]: ...
 
-    def get_session_mirror_seen_user_messages(self, codex_thread_id: str) -> dict[str, float]: ...
+    def get_session_mirror_seen_user_messages(
+        self, codex_thread_id: str
+    ) -> dict[str, float]: ...
 
     async def session_mirror_loop(self) -> None: ...
 
-    async def resolve_session_mirror_channel(self, discord_thread_id: int) -> ChannelT | None: ...
+    async def resolve_session_mirror_channel(
+        self, discord_thread_id: int
+    ) -> ChannelT | None: ...
 
     async def send_session_mirror_item(
         self,
@@ -54,11 +71,15 @@ class SessionMirrorOwner(Protocol[ChannelT]):
         target_ref: str,
     ) -> None: ...
 
-    async def mirror_session_target(self, target: SessionMirrorTargetMapping) -> None: ...
+    async def mirror_session_target(
+        self, target: SessionMirrorTargetMapping
+    ) -> None: ...
 
 
 @dataclass(frozen=True, slots=True)
 class SessionMirrorRuntimeDeps(Generic[ChannelT]):
+    configured_channel_lock: asyncio.Lock
+    active_delivery_lease_deps: gpt_delivery.ActiveDeliveryLeaseDeps
     mirror_enabled: Callable[[], bool]
     target_limit: int
     delivery_exceptions: tuple[type[BaseException], ...]
@@ -70,16 +91,24 @@ class SessionMirrorRuntimeDeps(Generic[ChannelT]):
     now_iso: Callable[[], str]
     format_traceback: Callable[[], str]
     is_messageable: Callable[[ChannelT], bool]
-    parse_interactive_notice: discord_session_mirror_item_delivery.ParseInteractiveNotice
-    send_interactive_prompt: discord_session_mirror_item_delivery.SessionMirrorInteractiveSender[ChannelT]
+    parse_interactive_notice: (
+        discord_session_mirror_item_delivery.ParseInteractiveNotice
+    )
+    send_interactive_prompt: (
+        discord_session_mirror_item_delivery.SessionMirrorInteractiveSender[ChannelT]
+    )
     send_chunks: discord_session_mirror_item_delivery.SessionMirrorChunkSender[ChannelT]
-    send_attachment: discord_session_mirror_item_delivery.SessionMirrorAttachmentSender[ChannelT]
-    format_session_mirror_text: discord_session_mirror_item_delivery.FormatSessionMirrorText
+    send_attachment: discord_session_mirror_item_delivery.SessionMirrorAttachmentSender[
+        ChannelT
+    ]
+    format_session_mirror_text: (
+        discord_session_mirror_item_delivery.FormatSessionMirrorText
+    )
     parse_session_mirror_target: Callable[
         [SessionMirrorTargetMapping],
         discord_session_mirror.SessionMirrorTarget | None,
     ]
-    choose_thread: discord_session_mirror_target.ChooseThreadSync[ThreadInfo]
+    choose_thread: discord_session_mirror_delivery_flow.ChooseThreadSync[ThreadInfo]
     get_thread_context_usage: Callable[[ThreadInfo], ThreadContextUsage]
     should_recommend_archive: Callable[[ThreadInfo, ThreadContextUsage], bool]
     get_thread_rollout_path: Callable[[ThreadInfo], str]
@@ -88,33 +117,49 @@ class SessionMirrorRuntimeDeps(Generic[ChannelT]):
     clear_pending_cursor_target: Callable[[str], None]
     update_session_mirror_cursor: Callable[[str, str, int], None]
     get_or_init_session_mirror_cursor: Callable[[str, str, int], int]
-    read_new_session_events: discord_session_mirror_target.ReadNewSessionEventsSync[JsonEvent]
+    read_new_session_events: (
+        discord_session_mirror_delivery_flow.ReadNewSessionEventsSync[JsonEvent]
+    )
     get_archive_backlog_max_events: Callable[[], int]
-    collect_session_mirror_items: discord_session_mirror_target.SessionMirrorItemCollector[JsonEvent]
+    collect_session_mirror_items: (
+        discord_session_mirror_delivery_flow.SessionMirrorItemCollector[JsonEvent]
+    )
     get_archive_skip_logged: Callable[[SessionMirrorOwner[ChannelT]], set[str]]
     resolve_target_ref: Callable[[str], tuple[str | None, str]]
     has_session_mirror_event: Callable[[str, str], bool]
     claim_session_mirror_event: Callable[[str, str], bool]
     deactivate_session_mirror_output_target: Callable[[str], None]
-    log: LogFunc
-    send_typing_pulse: Callable[[ChannelT, str], Awaitable[None]] = noop_send_typing_pulse
+    log: Callable[[str], None]
+    send_typing_pulse: Callable[[ChannelT, str, str], Awaitable[None]] = (
+        noop_send_typing_pulse
+    )
     is_thread_busy: Callable[[Path], bool] = lambda session_path: True
+
+    def __post_init__(self) -> None:
+        gpt_delivery.require_configured_channel_lock(
+            self.configured_channel_lock,
+            self.active_delivery_lease_deps,
+        )
 
 
 @dataclass(frozen=True, slots=True)
 class SessionMirrorRuntime(Generic[ChannelT]):
     deps: SessionMirrorRuntimeDeps[ChannelT]
 
-    async def start_session_mirroring(self, owner: SessionMirrorOwner[ChannelT]) -> None:
+    async def start_session_mirroring(
+        self, owner: SessionMirrorOwner[ChannelT]
+    ) -> None:
         if not self.deps.mirror_enabled():
             self.deps.log("session_mirror_disabled")
             return
-        task = _session_mirror_task(owner)
-        if task and not task.done():
+        if _session_mirror_task_running(owner):
             self.deps.log("session_mirror_already_running")
             return
-        setattr(owner, "_session_mirror_task", self.deps.create_task(owner.session_mirror_loop()))
-        self.deps.log(f"session_mirror_started seconds={owner.session_mirror_poll_seconds:g}")
+        mirror_task = self.deps.create_task(owner.session_mirror_loop())
+        setattr(owner, "_session_mirror_task", mirror_task)
+        self.deps.log(
+            f"session_mirror_started seconds={owner.session_mirror_poll_seconds:g}"
+        )
 
     async def session_mirror_loop(self, owner: SessionMirrorOwner[ChannelT]) -> None:
         async def load_targets() -> Sequence[SessionMirrorTargetMapping]:
@@ -127,7 +172,9 @@ class SessionMirrorRuntime(Generic[ChannelT]):
             discord_session_mirror.SessionMirrorLoopDeps(
                 poll_seconds=owner.session_mirror_poll_seconds,
                 is_closed=owner.is_closed,
-                set_last_at=lambda value: setattr(owner, "_session_mirror_last_at", value),
+                set_last_at=lambda value: setattr(
+                    owner, "_session_mirror_last_at", value
+                ),
                 now_iso=self.deps.now_iso,
                 load_targets=load_targets,
                 mirror_session_target=owner.mirror_session_target,
@@ -190,6 +237,8 @@ class SessionMirrorRuntime(Generic[ChannelT]):
             JsonEvent,
             ChannelT,
         ] = discord_session_mirror_target.SessionMirrorTargetDeps(
+            configured_channel_lock=self.deps.configured_channel_lock,
+            active_delivery_lease_deps=self.deps.active_delivery_lease_deps,
             parse_session_mirror_target=self.deps.parse_session_mirror_target,
             choose_thread=self.deps.choose_thread,
             get_thread_context_usage=self.deps.get_thread_context_usage,
@@ -219,11 +268,9 @@ class SessionMirrorRuntime(Generic[ChannelT]):
         await discord_session_mirror_target.mirror_session_target(target, deps=deps)
 
 
-def _session_mirror_task(owner: SessionMirrorOwner[ChannelT]) -> asyncio.Task[ModuleValue] | None:
+def _session_mirror_task_running(owner: SessionMirrorOwner[ChannelT]) -> bool:
     value = getattr(owner, "_session_mirror_task", None)
-    if isinstance(value, asyncio.Task):
-        return value
-    return None
+    return isinstance(value, asyncio.Task) and not value.done()
 
 
 def utc_now_iso_seconds() -> str:

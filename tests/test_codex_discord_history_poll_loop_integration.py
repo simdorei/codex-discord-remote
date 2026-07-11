@@ -10,6 +10,7 @@ import unittest
 from unittest import mock
 
 import codex_discord_bot as bot
+import codex_discord_store_startup_probe as startup_probe
 
 
 class HistoryPollTargetsUnavailableError(RuntimeError):
@@ -21,7 +22,12 @@ class PollHistoryChannel(Protocol):
 
 
 class HistoryPollClient:
-    def __init__(self, poll_history_channel: PollHistoryChannel, *, close_after_checks: int | None = None) -> None:
+    def __init__(
+        self,
+        poll_history_channel: PollHistoryChannel,
+        *,
+        close_after_checks: int | None = None,
+    ) -> None:
         self.allowed_channel_ids: set[int] = {333}
         self.startup_channel_id: None = None
         self.history_poll_seconds: float = 0.01
@@ -32,7 +38,10 @@ class HistoryPollClient:
 
     def is_closed(self) -> bool:
         self._closed_checks += 1
-        return self._close_after_checks is not None and self._closed_checks > self._close_after_checks
+        return (
+            self._close_after_checks is not None
+            and self._closed_checks > self._close_after_checks
+        )
 
 
 class HistoryPollLoop(Protocol):
@@ -48,6 +57,31 @@ def _raise_type_error(message: str) -> Never:
 
 
 class DiscordHistoryPollLoopIntegrationTests(unittest.IsolatedAsyncioTestCase):
+    async def test_history_targets_require_reconciliation_before_store_access(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db_path = Path(temp_dir) / "history.sqlite"
+            with self.assertRaises(startup_probe.ReconciliationRequiredError):
+                startup_probe.get_reconciled_startup_probe_targets(
+                    None,
+                    db_path,
+                    {333},
+                    None,
+                )
+            self.assertFalse(db_path.exists())
+
+            prerequisite = startup_probe.ReconciliationComplete(asyncio.Lock())
+            targets = startup_probe.get_reconciled_startup_probe_targets(
+                prerequisite,
+                db_path,
+                {333},
+                None,
+            )
+
+        self.assertIs(targets.prerequisite, prerequisite)
+        self.assertEqual(targets.targets, (("allowed", 333),))
+
     async def test_history_poll_loop_continues_after_cycle_error(self) -> None:
         calls: list[str] = []
         sleeps = 0

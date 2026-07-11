@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio  # noqa: ANYIO_OK
 import os
 import sqlite3
 import tempfile
@@ -14,7 +15,9 @@ from tests.mirror_sync_bridge_types import bridge_module, codex_discord_bot
 
 
 class MirrorSyncCleanupTests(unittest.IsolatedAsyncioTestCase):
-    def make_thread(self, thread_id: str, cwd: str, title: str = "thread") -> ThreadInfo:
+    def make_thread(
+        self, thread_id: str, cwd: str, title: str = "thread"
+    ) -> ThreadInfo:
         return ThreadInfo(
             id=thread_id,
             title=title,
@@ -26,7 +29,9 @@ class MirrorSyncCleanupTests(unittest.IsolatedAsyncioTestCase):
             tokens_used=1,
         )
 
-    async def test_sync_codex_mirror_removes_db_rows_when_db_root_has_no_active_threads(self) -> None:
+    async def test_sync_codex_mirror_removes_db_rows_when_db_root_has_no_active_threads(
+        self,
+    ) -> None:
         old_db_path = bot.MIRROR_DB_PATH
         bridge = bridge_module()
         old_load_user_root_threads = bridge.load_user_root_threads
@@ -49,7 +54,9 @@ class MirrorSyncCleanupTests(unittest.IsolatedAsyncioTestCase):
         try:
             with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp_dir:
                 bot.MIRROR_DB_PATH = Path(temp_dir) / "mirror.sqlite"
-                os.environ["CODEX_DISCORD_LOG_PATH"] = str(Path(temp_dir) / "discord.log")
+                os.environ["CODEX_DISCORD_LOG_PATH"] = str(
+                    Path(temp_dir) / "discord.log"
+                )
                 bot.init_mirror_db()
                 with sqlite3.connect(bot.MIRROR_DB_PATH) as conn:
                     conn.execute(
@@ -78,8 +85,12 @@ class MirrorSyncCleanupTests(unittest.IsolatedAsyncioTestCase):
                 output = await bot.sync_codex_mirror(codex_discord_bot(fake_bot))
 
                 with sqlite3.connect(bot.MIRROR_DB_PATH) as conn:
-                    thread_rows = conn.execute("SELECT codex_thread_id FROM mirror_threads").fetchall()
-                    project_rows = conn.execute("SELECT project_key FROM mirror_projects").fetchall()
+                    thread_rows = conn.execute(
+                        "SELECT codex_thread_id FROM mirror_threads"
+                    ).fetchall()
+                    project_rows = conn.execute(
+                        "SELECT project_key FROM mirror_projects"
+                    ).fetchall()
 
             self.assertIn("Mirror sync complete.", output)
             self.assertIn("`rec archive` threads are not removed by sync.", output)
@@ -104,7 +115,9 @@ class MirrorSyncCleanupTests(unittest.IsolatedAsyncioTestCase):
         bridge = bridge_module()
         old_load_recent_threads = bridge.load_recent_threads
         old_filter_mirrorable_threads = bot.filter_mirrorable_threads
-        old_filter_app_server_available_threads = bot.filter_app_server_available_threads
+        old_filter_app_server_available_threads = (
+            bot.filter_app_server_available_threads
+        )
         old_get_project_channel = bot.get_or_create_project_channel
         old_get_thread_channel = bot.get_or_create_thread_channel
         old_log_path = os.environ.get("CODEX_DISCORD_LOG_PATH")
@@ -126,10 +139,16 @@ class MirrorSyncCleanupTests(unittest.IsolatedAsyncioTestCase):
         try:
             with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp_dir:
                 bot.MIRROR_DB_PATH = Path(temp_dir) / "mirror.sqlite"
-                os.environ["CODEX_DISCORD_LOG_PATH"] = str(Path(temp_dir) / "discord.log")
+                os.environ["CODEX_DISCORD_LOG_PATH"] = str(
+                    Path(temp_dir) / "discord.log"
+                )
                 bot.init_mirror_db()
-                scoped_thread = self.make_thread("scoped-thread", str(Path(temp_dir)), "scoped")
-                hidden_active_thread = self.make_thread("hidden-active-thread", str(Path(temp_dir)), "hidden")
+                scoped_thread = self.make_thread(
+                    "scoped-thread", str(Path(temp_dir)), "scoped"
+                )
+                hidden_active_thread = self.make_thread(
+                    "hidden-active-thread", str(Path(temp_dir)), "hidden"
+                )
                 with sqlite3.connect(bot.MIRROR_DB_PATH) as conn:
                     conn.execute(
                         "INSERT INTO mirror_projects "
@@ -160,12 +179,18 @@ class MirrorSyncCleanupTests(unittest.IsolatedAsyncioTestCase):
                         return [scoped_thread, hidden_active_thread]
                     return [scoped_thread]
 
-                async def fake_get_project_channel(guild, category, project_key, project_name):
+                async def fake_get_project_channel(
+                    guild, category, project_key, project_name
+                ):
                     bot.upsert_mirror_project(project_key, project_name, 111)
                     return SimpleNamespace(id=111)
 
-                async def fake_get_thread_channel(codex_thread, project_key, project_channel):
-                    bot.upsert_mirror_thread(codex_thread, project_key, codex_thread.title, 111, 333)
+                async def fake_get_thread_channel(
+                    codex_thread, project_key, project_channel
+                ):
+                    bot.upsert_mirror_thread(
+                        codex_thread, project_key, codex_thread.title, 111, 333
+                    )
                     return SimpleNamespace(id=333)
 
                 bridge.load_recent_threads = fake_load_recent_threads
@@ -181,7 +206,9 @@ class MirrorSyncCleanupTests(unittest.IsolatedAsyncioTestCase):
                     get_guild=lambda guild_id: guild,
                 )
 
-                output = await bot.sync_codex_mirror(codex_discord_bot(fake_bot), limit=7)
+                output = await bot.sync_codex_mirror(
+                    codex_discord_bot(fake_bot), limit=7
+                )
 
                 with sqlite3.connect(bot.MIRROR_DB_PATH) as conn:
                     rows = conn.execute(
@@ -197,7 +224,9 @@ class MirrorSyncCleanupTests(unittest.IsolatedAsyncioTestCase):
             bot.MIRROR_DB_PATH = old_db_path
             bridge.load_recent_threads = old_load_recent_threads
             bot.filter_mirrorable_threads = old_filter_mirrorable_threads
-            bot.filter_app_server_available_threads = old_filter_app_server_available_threads
+            bot.filter_app_server_available_threads = (
+                old_filter_app_server_available_threads
+            )
             bot.get_or_create_project_channel = old_get_project_channel
             bot.get_or_create_thread_channel = old_get_thread_channel
             if old_log_path is None:
@@ -205,19 +234,99 @@ class MirrorSyncCleanupTests(unittest.IsolatedAsyncioTestCase):
             else:
                 os.environ["CODEX_DISCORD_LOG_PATH"] = old_log_path
 
-    async def test_full_cleanup_does_not_delete_project_channel_shared_by_valid_row(self) -> None:
+    async def test_full_sync_preserves_app_server_unavailable_gpt_source_row(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp_dir:
+            db_path = Path(temp_dir) / "mirror.sqlite"
+            mirror_sync.discord_store.init_mirror_db(db_path)
+            unavailable = self.make_thread("unavailable", temp_dir)
+            with sqlite3.connect(db_path) as conn:
+                _ = conn.execute(
+                    "INSERT INTO mirror_projects VALUES ('codex:chats', 'GPT', 900, 1.0)"
+                )
+                _ = conn.execute(
+                    "INSERT INTO mirror_threads VALUES "
+                    "('unavailable', 'codex:chats', 'unavailable', 900, 101, 1.0, "
+                    "'gpt_chat', 'active')"
+                )
+
+            class FakeGuild:
+                def get_channel(self, _channel_id: int) -> None:
+                    return None
+
+                async def fetch_channel(self, _channel_id: int) -> None:
+                    raise RuntimeError("unavailable parent")
+
+            async def get_guild(_bot: SimpleNamespace) -> FakeGuild:
+                return FakeGuild()
+
+            async def get_category(_guild: FakeGuild) -> SimpleNamespace:
+                return SimpleNamespace()
+
+            async def unexpected_project_create(
+                _guild: FakeGuild,
+                _category: SimpleNamespace,
+                _project_key: str,
+                _project_name: str,
+            ) -> SimpleNamespace:
+                raise AssertionError("unavailable source reached Discord creation")
+
+            async def unexpected_thread_create(
+                _thread: ThreadInfo,
+                _project_key: str,
+                _project_channel: SimpleNamespace,
+            ) -> SimpleNamespace:
+                raise AssertionError("unavailable source reached Discord creation")
+
+            output = await mirror_sync.sync_codex_mirror(
+                SimpleNamespace(),
+                deps=mirror_sync.CodexMirrorSyncDeps(
+                    db_path=db_path,
+                    get_mirror_guild=get_guild,
+                    get_or_create_mirror_category=get_category,
+                    load_mirror_scope_threads=lambda _limit: [unavailable],
+                    filter_mirrorable_threads=list,
+                    filter_app_server_available_threads=lambda _threads: [],
+                    get_project_key=lambda _thread: "codex:chats",
+                    get_project_name=lambda _thread: "GPT",
+                    get_or_create_project_channel=unexpected_project_create,
+                    get_or_create_thread_channel=unexpected_thread_create,
+                    get_bot_user_id=lambda _bot: None,
+                    log=lambda _message: None,
+                ),
+            )
+
+            with sqlite3.connect(db_path) as conn:
+                rows = conn.execute(
+                    "SELECT codex_thread_id FROM mirror_threads"
+                ).fetchall()
+        self.assertEqual(rows, [("unavailable",)])
+        self.assertIn("app_server_unavailable_threads: 1", output)
+
+    async def test_full_cleanup_does_not_delete_project_channel_shared_by_valid_row(
+        self,
+    ) -> None:
         old_db_path = bot.MIRROR_DB_PATH
-        old_delete_threads = mirror_sync.discord_mirror_stale.delete_stale_discord_threads
-        old_delete_projects = mirror_sync.discord_mirror_stale.delete_stale_project_channels
-        old_resolve_projects = mirror_sync.discord_mirror_channels.resolve_orphan_cleanup_project_channels
-        old_cleanup_orphans = mirror_sync.discord_mirror_orphans.cleanup_orphan_discord_threads
+        old_delete_threads = (
+            mirror_sync.discord_mirror_stale.delete_stale_discord_threads
+        )
+        old_delete_projects = (
+            mirror_sync.discord_mirror_stale.delete_stale_project_channels
+        )
+        old_resolve_projects = (
+            mirror_sync.discord_mirror_channels.resolve_orphan_cleanup_project_channels
+        )
+        old_cleanup_orphans = mirror_sync.discord_mirror_orphans.cleanup_configured_channel_orphan_discord_threads
 
         try:
             with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp_dir:
                 db_path = Path(temp_dir) / "mirror.sqlite"
                 bot.MIRROR_DB_PATH = db_path
                 bot.init_mirror_db()
-                thread = self.make_thread("current-thread", str(Path(temp_dir)), "current")
+                thread = self.make_thread(
+                    "current-thread", str(Path(temp_dir)), "current"
+                )
                 with sqlite3.connect(db_path) as conn:
                     conn.execute(
                         "INSERT INTO mirror_projects "
@@ -232,16 +341,28 @@ class MirrorSyncCleanupTests(unittest.IsolatedAsyncioTestCase):
                         ("canonical", "project", 111, 2.0),
                     )
 
-                project_cleanup_rows: list[mirror_sync.discord_mirror_stale.StaleMirrorProjectRow] = []
+                project_cleanup_rows: list[
+                    mirror_sync.discord_mirror_stale.StaleMirrorProjectRow
+                ] = []
+                configured_channel_lock = asyncio.Lock()
+                observed_locks: list[asyncio.Lock] = []
 
                 async def fake_delete_threads(_guild, _stale_rows):
                     return {"deleted": 0, "missing": 0, "failed": 0, "errors": []}
 
                 async def fake_delete_projects(_guild, _category, stale_rows):
                     project_cleanup_rows.extend(stale_rows)
-                    return {"deleted": len(stale_rows), "missing": 0, "skipped": 0, "failed": 0, "errors": []}
+                    return {
+                        "deleted": len(stale_rows),
+                        "missing": 0,
+                        "skipped": 0,
+                        "failed": 0,
+                        "errors": [],
+                    }
 
-                async def fake_resolve_project_channels(_guild, _project_channel_ids, *, fetch_failure_types):
+                async def fake_resolve_project_channels(
+                    _guild, _project_channel_ids, *, fetch_failure_types
+                ):
                     return []
 
                 async def fake_cleanup_orphan_threads(
@@ -249,16 +370,28 @@ class MirrorSyncCleanupTests(unittest.IsolatedAsyncioTestCase):
                     _known_thread_ids,
                     _bot_user_id,
                     *,
+                    db_path,
+                    configured_channel_lock,
                     delivery_exceptions,
                 ):
-                    return {"deleted": 0, "missing": 0, "skipped": 0, "failed": 0, "errors": []}
+                    _ = db_path
+                    observed_locks.append(configured_channel_lock)
+                    return {
+                        "deleted": 0,
+                        "missing": 0,
+                        "skipped": 0,
+                        "failed": 0,
+                        "errors": [],
+                    }
 
-                mirror_sync.discord_mirror_stale.delete_stale_discord_threads = fake_delete_threads
-                mirror_sync.discord_mirror_stale.delete_stale_project_channels = fake_delete_projects
-                mirror_sync.discord_mirror_channels.resolve_orphan_cleanup_project_channels = (
-                    fake_resolve_project_channels
+                mirror_sync.discord_mirror_stale.delete_stale_discord_threads = (
+                    fake_delete_threads
                 )
-                mirror_sync.discord_mirror_orphans.cleanup_orphan_discord_threads = fake_cleanup_orphan_threads
+                mirror_sync.discord_mirror_stale.delete_stale_project_channels = (
+                    fake_delete_projects
+                )
+                mirror_sync.discord_mirror_channels.resolve_orphan_cleanup_project_channels = fake_resolve_project_channels
+                mirror_sync.discord_mirror_orphans.cleanup_configured_channel_orphan_discord_threads = fake_cleanup_orphan_threads
 
                 _ = await mirror_sync.cleanup_full_mirror_sync(
                     SimpleNamespace(),
@@ -267,19 +400,29 @@ class MirrorSyncCleanupTests(unittest.IsolatedAsyncioTestCase):
                     bot_user_id=None,
                     db_path=db_path,
                     get_project_key=lambda _thread: "canonical",
+                    reconciliation=mirror_sync.startup_probe.ReconciliationComplete(
+                        configured_channel_lock
+                    ),
                 )
 
                 with sqlite3.connect(db_path) as conn:
-                    project_rows = conn.execute("SELECT project_key FROM mirror_projects").fetchall()
+                    project_rows = conn.execute(
+                        "SELECT project_key FROM mirror_projects"
+                    ).fetchall()
 
             self.assertEqual(project_cleanup_rows, [])
             self.assertEqual(project_rows, [("canonical",)])
+            self.assertEqual(observed_locks, [configured_channel_lock])
         finally:
             bot.MIRROR_DB_PATH = old_db_path
-            mirror_sync.discord_mirror_stale.delete_stale_discord_threads = old_delete_threads
-            mirror_sync.discord_mirror_stale.delete_stale_project_channels = old_delete_projects
+            mirror_sync.discord_mirror_stale.delete_stale_discord_threads = (
+                old_delete_threads
+            )
+            mirror_sync.discord_mirror_stale.delete_stale_project_channels = (
+                old_delete_projects
+            )
             mirror_sync.discord_mirror_channels.resolve_orphan_cleanup_project_channels = old_resolve_projects
-            mirror_sync.discord_mirror_orphans.cleanup_orphan_discord_threads = old_cleanup_orphans
+            mirror_sync.discord_mirror_orphans.cleanup_configured_channel_orphan_discord_threads = old_cleanup_orphans
 
 
 if __name__ == "__main__":

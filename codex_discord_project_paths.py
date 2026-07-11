@@ -1,13 +1,31 @@
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import TypeVar
+from typing import Final, TypeVar, override
 
 from codex_discord_project_types import BridgeProjectModule, ProjectThread
 
 ThreadT = TypeVar("ThreadT", bound=ProjectThread)
+GPT_CHAT_PROJECT_KEY: Final = "codex:chats"
+
+
+@dataclass(frozen=True, slots=True)
+class GptChatOrdinaryMirrorError(RuntimeError):
+    @override
+    def __str__(self) -> str:
+        return "GPT-managed app chats are excluded from ordinary Discord mirroring."
+
+
+def is_gpt_chat_project_key(project_key: str | None) -> bool:
+    return project_key == GPT_CHAT_PROJECT_KEY
+
+
+def require_ordinary_project_key(project_key: str) -> None:
+    if is_gpt_chat_project_key(project_key):
+        raise GptChatOrdinaryMirrorError()
 
 
 def _thread_cwd(thread: ProjectThread, *, bridge_module: BridgeProjectModule) -> str:
@@ -90,6 +108,8 @@ def is_thread_mirrorable(
         bridge_module=bridge_module,
         projectless_chat_key=projectless_chat_key,
     )
+    if is_gpt_chat_project_key(project_key):
+        return False
     if project_key == projectless_chat_key or project_key.startswith("projectless:"):
         return True
     saved_keys = (

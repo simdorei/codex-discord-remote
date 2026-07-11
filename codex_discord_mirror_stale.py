@@ -9,8 +9,37 @@ import codex_discord_delivery_state as discord_delivery_state
 import codex_discord_mirror_sync_result as mirror_sync_result
 from codex_discord_id_values import coerce_discord_id_value
 
-StaleMirrorThreadRow: TypeAlias = tuple[str, discord_delivery_state.DiscordIdValue, str | None]
-StaleMirrorProjectRow: TypeAlias = tuple[str, str | None, discord_delivery_state.DiscordIdValue]
+StaleMirrorThreadRow: TypeAlias = tuple[
+    str, discord_delivery_state.DiscordIdValue, str | None
+]
+StaleMirrorProjectRow: TypeAlias = tuple[
+    str, str | None, discord_delivery_state.DiscordIdValue
+]
+
+
+def thread_rows_for_discord_delete(
+    stale_rows: Sequence[StaleMirrorThreadRow],
+    retained_thread_ids: set[int],
+) -> list[StaleMirrorThreadRow]:
+    return [
+        row
+        for row in stale_rows
+        if (thread_id := coerce_discord_id_value(row[1])) is None
+        or thread_id not in retained_thread_ids
+    ]
+
+
+def project_rows_for_discord_delete(
+    stale_rows: Sequence[StaleMirrorProjectRow],
+    retained_project_channel_ids: list[int],
+) -> list[StaleMirrorProjectRow]:
+    retained_ids = set(retained_project_channel_ids)
+    return [
+        row
+        for row in stale_rows
+        if (channel_id := coerce_discord_id_value(row[2])) is None
+        or channel_id not in retained_ids
+    ]
 
 
 async def delete_stale_discord_threads(
@@ -68,6 +97,9 @@ async def delete_stale_project_channels(
     errors: list[str] = []
 
     for project_key, project_name, discord_channel_id in stale_rows:
+        if project_key == "codex:chats":
+            skipped += 1
+            continue
         channel_id = coerce_discord_id_value(discord_channel_id)
         if channel_id is None:
             missing += 1

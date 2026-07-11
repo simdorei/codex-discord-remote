@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from typing import Protocol, TypedDict, cast
+from typing import Protocol, TypedDict
 
 LogFunc = Callable[[str], None]
 ExceptionTypes = tuple[type[BaseException], ...]
@@ -12,6 +12,15 @@ class ArchiveMirrorCleanupOwner(Protocol):
     _session_mirror_archive_skip_logged: set[str]
     _session_mirror_seen_agent_messages: dict[str, dict[str, float]]
     _session_mirror_seen_user_messages: dict[str, dict[str, float]]
+
+    def archive_skip_logged(self) -> set[str]:
+        return self._session_mirror_archive_skip_logged
+
+    def seen_agent_messages(self) -> dict[str, dict[str, float]]:
+        return self._session_mirror_seen_agent_messages
+
+    def seen_user_messages(self) -> dict[str, dict[str, float]]:
+        return self._session_mirror_seen_user_messages
 
 
 class SessionMirrorStateLike(Protocol):
@@ -53,10 +62,14 @@ def resolve_session_mirror_archive_policy(
     if archive_recommended and not active_output_target:
         if codex_thread_id not in archive_skip_logged:
             archive_skip_logged.add(codex_thread_id)
-            log(f"session_mirror_archive_tail_only target={codex_thread_id} reason=archive_recommended")
+            log(
+                f"session_mirror_archive_tail_only target={codex_thread_id} reason=archive_recommended"
+            )
         return True
     if active_output_target and codex_thread_id in archive_skip_logged:
-        log(f"session_mirror_archive_skip_overridden target={codex_thread_id} reason=active_ask")
+        log(
+            f"session_mirror_archive_skip_overridden target={codex_thread_id} reason=active_ask"
+        )
     archive_skip_logged.discard(codex_thread_id)
     return False
 
@@ -68,6 +81,16 @@ def cleanup_archived_session_mirror_state(
     deps: ArchiveMirrorCleanupDeps,
 ) -> ArchivedSessionMirrorCleanupCounts:
     counts = deps.delete_archived_mirror_state(codex_thread_id)
+    if int(counts.get("destructive_cleanup_allowed", 1)) != 1:
+        return {
+            "mirror_threads": 0,
+            "session_mirror_offsets": 0,
+            "active_output_targets": 0,
+            "pending_cursor_targets": 0,
+            "archive_skip_logged": 0,
+            "seen_agent_messages": 0,
+            "seen_user_messages": 0,
+        }
     state = deps.get_session_mirror_state()
     key = deps.normalize_runner_key(codex_thread_id)
     active_output_targets = int(key in state.active_output_targets)
@@ -78,25 +101,23 @@ def cleanup_archived_session_mirror_state(
     seen_agent_messages = 0
     seen_user_messages = 0
     if owner is not None:
-        skip_logged = cast(
-            set[str] | None,
-            getattr(owner, "_session_mirror_archive_skip_logged", None),
+        skip_logged = ArchiveMirrorCleanupOwner.archive_skip_logged(owner)
+        archive_skip_logged = int(codex_thread_id in skip_logged)
+        skip_logged.discard(codex_thread_id)
+        seen_agent_messages = int(
+            ArchiveMirrorCleanupOwner.seen_agent_messages(owner).pop(
+                codex_thread_id,
+                None,
+            )
+            is not None
         )
-        if skip_logged is not None:
-            archive_skip_logged = int(codex_thread_id in skip_logged)
-            skip_logged.discard(codex_thread_id)
-        seen_agent = cast(
-            dict[str, dict[str, float]] | None,
-            getattr(owner, "_session_mirror_seen_agent_messages", None),
+        seen_user_messages = int(
+            ArchiveMirrorCleanupOwner.seen_user_messages(owner).pop(
+                codex_thread_id,
+                None,
+            )
+            is not None
         )
-        if seen_agent is not None:
-            seen_agent_messages = int(seen_agent.pop(codex_thread_id, None) is not None)
-        seen_user = cast(
-            dict[str, dict[str, float]] | None,
-            getattr(owner, "_session_mirror_seen_user_messages", None),
-        )
-        if seen_user is not None:
-            seen_user_messages = int(seen_user.pop(codex_thread_id, None) is not None)
 
     return {
         "mirror_threads": int(counts.get("mirror_threads", 0)),
@@ -127,7 +148,9 @@ def cleanup_archive_mirror_after_bridge_command(
         )
         return None
     try:
-        counts = cleanup_archived_session_mirror_state(owner, archived_thread_id, deps=deps)
+        counts = cleanup_archived_session_mirror_state(
+            owner, archived_thread_id, deps=deps
+        )
     except deps.exception_types as exc:
         deps.log(
             f"archive_mirror_cleanup_failed target={archived_thread_id} "
