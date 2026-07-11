@@ -13,6 +13,7 @@ import codex_discord_session_mirror_item_sender as session_mirror_item_sender
 ChannelT = TypeVar("ChannelT")
 ThreadT_co = TypeVar("ThreadT_co", covariant=True)
 EventT = TypeVar("EventT")
+ResultT = TypeVar("ResultT")
 SessionMirrorItem: TypeAlias = session_mirror_item_sender.SessionMirrorItem
 
 
@@ -82,6 +83,38 @@ class SessionMirrorDeliveryFlowDeps(Generic[ChannelT]):
         )
 
 
+def _consume_current_cancellation() -> None:
+    current_task = asyncio.current_task()
+    if current_task is not None:
+        _ = current_task.uncancel()
+
+
+async def _complete_before_cancellation(operation: Awaitable[ResultT]) -> ResultT:
+    worker = asyncio.ensure_future(operation)
+    completion: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+
+    def mark_completed(_worker: asyncio.Future[ResultT]) -> None:
+        if not completion.done():
+            completion.set_result(None)
+
+    worker.add_done_callback(mark_completed)
+    try:
+        return await asyncio.shield(worker)
+    except asyncio.CancelledError as cancellation:
+        _consume_current_cancellation()
+        while not worker.done():
+            try:
+                await asyncio.shield(completion)
+            except asyncio.CancelledError:
+                _consume_current_cancellation()
+                continue
+        error = worker.exception()
+        if error is not None:
+            raise cancellation from error
+        _ = worker.result()
+        raise cancellation
+
+
 async def deliver_and_commit_session_mirror_items(
     codex_thread_id: str,
     rollout_path: str,
@@ -110,6 +143,25 @@ async def deliver_and_commit_session_mirror_items(
             return False
 
         _resolved_thread_id, target_ref = deps.resolve_target_ref(codex_thread_id)
+
+        async def claim_event(digest: str, target_thread_id: str) -> bool:
+            return await _complete_before_cancellation(
+                deps.claim_session_mirror_event(digest, target_thread_id)
+            )
+
+        async def update_cursor(
+            target_thread_id: str,
+            target_rollout_path: str,
+            cursor: int,
+        ) -> None:
+            await _complete_before_cancellation(
+                deps.update_session_mirror_cursor(
+                    target_thread_id,
+                    target_rollout_path,
+                    cursor,
+                )
+            )
+
         send_result = (
             await session_mirror_item_sender.send_unclaimed_session_mirror_items(
                 channel,
@@ -119,7 +171,7 @@ async def deliver_and_commit_session_mirror_items(
                 deps=session_mirror_item_sender.SessionMirrorItemSenderDeps(
                     has_session_mirror_event=deps.has_session_mirror_event,
                     send_session_mirror_item=deps.send_session_mirror_item,
-                    claim_session_mirror_event=deps.claim_session_mirror_event,
+                    claim_session_mirror_event=claim_event,
                 ),
             )
         )
@@ -132,7 +184,7 @@ async def deliver_and_commit_session_mirror_items(
             sent_count=send_result.sent_count,
             terminal_sent=send_result.terminal_sent,
             deps=session_mirror_commit.SessionMirrorCommitDeps(
-                update_session_mirror_cursor=deps.update_session_mirror_cursor,
+                update_session_mirror_cursor=update_cursor,
                 deactivate_session_mirror_output_target=deps.deactivate_session_mirror_output_target,
                 log=deps.log,
             ),
