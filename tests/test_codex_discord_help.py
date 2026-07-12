@@ -49,6 +49,37 @@ def build_help() -> str:
 
 
 class DiscordHelpContractTests(unittest.TestCase):
+    def test_app_native_gpt_help_contract(self) -> None:
+        help_text = build_help()
+        readme = Path("README.md").read_text(encoding="utf-8")
+        operations = Path("docs/operations.md").read_text(encoding="utf-8")
+        requirements = Path("requirements.txt").read_text(encoding="utf-8").splitlines()
+        combined = "\n".join((help_text, readme, operations))
+
+        self.assertIn("anyio>=4,<5", requirements)
+        self.assertIn("!gpt list [limit]", combined)
+        self.assertIn("!gpt sync <csv>", combined)
+        self.assertIn("!gpt synced", combined)
+        self.assertIn("!gpt unsync <csv>", combined)
+        self.assertIn("!gpt sync_clear", combined)
+        self.assertIn("External web ChatGPT conversations remain excluded.", combined)
+        self.assertIn(
+            "App-native Codex chats are opt-in through the five !gpt prefix commands.",
+            combined,
+        )
+        self.assertIn(
+            "No-project Codex app chats restore their existing Discord thread after re-sync.",
+            combined,
+        )
+        self.assertNotIn(
+            "Regular ChatGPT/GPT conversations outside Codex are intentionally excluded.",
+            combined,
+        )
+        self.assertNotIn(
+            "Regular ChatGPT/GPT conversations outside Codex and Codex subagent sessions are out of scope and must not be mirrored.",
+            combined,
+        )
+
     def test_help_readme_and_default_slash_commands_match(self) -> None:
         help_text = build_help()
         help_match = re.search(r"Slash commands: (.+)", help_text)
@@ -69,7 +100,9 @@ class DiscordHelpContractTests(unittest.TestCase):
         help_prefix_commands = set(re.findall(r"^!([a-z_-]+)", help_text, re.MULTILINE))
         readme_prefix_commands = set(re.findall(r"`!([a-z_-]+)", readme))
         self.assertLessEqual(help_prefix_commands, readme_prefix_commands)
-        self.assertIn("Numeric refs follow the same DB-root numbering as `!list`.", readme)
+        self.assertIn(
+            "Numeric refs follow the same DB-root numbering as `!list`.", readme
+        )
         self.assertIn("!mirror check [limit]", help_text)
         self.assertIn("!stop [ref]", help_text)
 
@@ -83,7 +116,9 @@ class DiscordHelpContractTests(unittest.TestCase):
                 "codex_discord_slash_runtime_commands.py",
             ]
         )
-        command_names = set(re.findall(r'@bot\.tree\.command\(\s*name="([^"]+)"', source))
+        command_names = set(
+            re.findall(r'@bot\.tree\.command\(\s*name="([^"]+)"', source)
+        )
         self.assertEqual(command_names, EXPECTED_SLASH_COMMANDS | {"qa_buttons"})
         self.assertIn("slash_new_dispatch", source)
         self.assertIn("slash_new_done", source)

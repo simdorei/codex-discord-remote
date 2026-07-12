@@ -5,11 +5,19 @@ from dataclasses import dataclass
 from types import ModuleType
 from typing import Protocol, cast, TypeAlias
 
+import discord
+
 import codex_discord_bot_skill_slash_runtime as discord_bot_skill_slash_runtime
 import codex_discord_delivery as discord_delivery
+import codex_discord_project_runtime as discord_project_runtime
 import codex_discord_slash_ask_flow as discord_slash_ask_flow
 import codex_discord_slash_prompt_commands as discord_slash_prompt_commands
-from codex_discord_bot_shapes import BusyChoiceAuthor, SkillSlashSourceAuthor, SlashAskSourceMessage
+from codex_discord_bot_shapes import (
+    BusyChoiceAuthor,
+    SkillSlashSourceAuthor,
+    SlashAskSourceMessage,
+)
+
 ModuleValue: TypeAlias = object
 
 
@@ -29,11 +37,17 @@ class BotSkillSlashAdapterRuntime:
         *,
         target_thread_id: str | None,
     ) -> None:
-        handle_plain_ask = cast(Callable[..., Awaitable[None]], getattr(self.module, "handle_plain_ask"))
-        await handle_plain_ask(source_message, prompt, target_thread_id=target_thread_id)
+        handle_plain_ask = cast(
+            Callable[..., Awaitable[None]], getattr(self.module, "handle_plain_ask")
+        )
+        await handle_plain_ask(
+            source_message, prompt, target_thread_id=target_thread_id
+        )
 
     def get_skill_slash_interaction_command_name(self, interaction: ModuleValue) -> str:
-        command = cast(InteractionCommandLike | None, getattr(interaction, "command", None))
+        command = cast(
+            InteractionCommandLike | None, getattr(interaction, "command", None)
+        )
         return "-" if command is None else str(command.name or "-")
 
     def make_skill_slash_source_message(
@@ -46,7 +60,9 @@ class BotSkillSlashAdapterRuntime:
             getattr(self.module, "require_discord_messageable"),
         )
         return SlashAskSourceMessage(
-            channel=require_messageable(channel),
+            channel=cast(
+                discord.abc.Messageable, cast(object, require_messageable(channel))
+            ),
             author=SkillSlashSourceAuthor(user),
         )
 
@@ -61,10 +77,17 @@ class BotSkillSlashAdapterRuntime:
             Callable[[object], discord_slash_prompt_commands.SkillSlashInteraction],
             getattr(self.module, "require_discord_interaction"),
         )
-        send_interaction_chunks = cast(Callable[..., Awaitable[None]], getattr(self.module, "send_interaction_chunks"))
-        await send_interaction_chunks(require_interaction(interaction), text, title=title)
+        send_interaction_chunks = cast(
+            Callable[..., Awaitable[None]],
+            getattr(self.module, "send_interaction_chunks"),
+        )
+        await send_interaction_chunks(
+            require_interaction(interaction), text, title=title
+        )
 
-    def make_skill_slash_runtime(self) -> discord_bot_skill_slash_runtime.BotSkillSlashRuntime[SlashAskSourceMessage]:
+    def make_skill_slash_runtime(
+        self,
+    ) -> discord_bot_skill_slash_runtime.BotSkillSlashRuntime[SlashAskSourceMessage]:
         return discord_bot_skill_slash_runtime.BotSkillSlashRuntime(
             discord_bot_skill_slash_runtime.BotSkillSlashRuntimeDeps(
                 prompt_deps=discord_slash_prompt_commands.SkillSlashPromptDeps(
@@ -88,7 +111,10 @@ class BotSkillSlashAdapterRuntime:
                         getattr(self.module, "format_log_text_len_as_text"),
                     )(text),
                     make_source_message=self.make_skill_slash_source_message,
-                    log_line=lambda message: cast(Callable[[str], None], getattr(self.module, "log_line"))(message),
+                    log_line=lambda message: cast(
+                        Callable[[str], None], getattr(self.module, "log_line")
+                    )(message),
+                    resolve_exact_channel_decision=self.resolve_exact_channel_decision,
                 )
             )
         )
@@ -102,9 +128,16 @@ class BotSkillSlashAdapterRuntime:
             Callable[[object], discord_slash_prompt_commands.PromptChannel],
             getattr(self.module, "require_discord_messageable"),
         )
-        return SlashAskSourceMessage(channel=require_messageable(channel), author=cast(BusyChoiceAuthor, user))
+        return SlashAskSourceMessage(
+            channel=cast(
+                discord.abc.Messageable, cast(object, require_messageable(channel))
+            ),
+            author=cast(BusyChoiceAuthor, user),
+        )
 
-    def is_slash_ask_messageable_channel(self, channel: discord_slash_prompt_commands.PromptChannel) -> bool:
+    def is_slash_ask_messageable_channel(
+        self, channel: discord_slash_prompt_commands.PromptChannel
+    ) -> bool:
         return hasattr(channel, "send")
 
     async def handle_slash_ask(
@@ -157,12 +190,27 @@ class BotSkillSlashAdapterRuntime:
                     ],
                     discord_delivery.get_interaction_command_name,
                 ),
-                format_text_len=cast(Callable[[str], int], getattr(self.module, "format_log_text_len")),
+                format_text_len=cast(
+                    Callable[[str], int], getattr(self.module, "format_log_text_len")
+                ),
                 is_messageable_channel=self.is_slash_ask_messageable_channel,
                 make_source_message=self.make_slash_ask_source_message,
                 log=cast(Callable[[str], None], getattr(self.module, "log_line")),
+                resolve_exact_channel_decision=self.resolve_exact_channel_decision,
             ),
         )
+
+    def resolve_exact_channel_decision(
+        self,
+        channel_id: int | None,
+        channel_name: str | None,
+    ) -> discord_project_runtime.ExactChannelDecision:
+        return cast(
+            Callable[
+                [int | None, str | None], discord_project_runtime.ExactChannelDecision
+            ],
+            getattr(self.module, "resolve_exact_channel_decision"),
+        )(channel_id, channel_name)
 
     async def handle_slash_interview(
         self,

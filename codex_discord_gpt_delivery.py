@@ -2,9 +2,8 @@
 
 from __future__ import annotations
 
-import asyncio  # noqa: ANYIO_OK
 from collections.abc import AsyncGenerator, Awaitable, Callable
-from contextlib import asynccontextmanager
+from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass
 from typing import override
 
@@ -43,6 +42,7 @@ ActiveDeliveryIdentityReader = Callable[
     [str],
     Awaitable[ActiveDeliveryIdentity | None],
 ]
+type ConfiguredChannelLock = AbstractAsyncContextManager[None]
 
 
 @dataclass(frozen=True, slots=True)
@@ -61,14 +61,14 @@ class ActiveDeliveryLeaseConfigurationError(RuntimeError):
 
 @dataclass(frozen=True, slots=True)
 class ActiveDeliveryLeaseDeps:
-    configured_channel_lock: asyncio.Lock
+    configured_channel_lock: ConfiguredChannelLock
     reread_active_delivery_identity: ActiveDeliveryIdentityReader
 
 
 def resolve_active_delivery_lease_configuration(
-    configured_channel_lock: asyncio.Lock | None,
+    configured_channel_lock: ConfiguredChannelLock | None,
     lease_deps: ActiveDeliveryLeaseDeps | None,
-) -> tuple[asyncio.Lock, ActiveDeliveryLeaseDeps] | None:
+) -> tuple[ConfiguredChannelLock, ActiveDeliveryLeaseDeps] | None:
     if configured_channel_lock is None:
         if lease_deps is None:
             return None
@@ -80,7 +80,7 @@ def resolve_active_delivery_lease_configuration(
 
 
 def require_configured_channel_lock(
-    configured_channel_lock: asyncio.Lock,
+    configured_channel_lock: ConfiguredChannelLock,
     lease_deps: ActiveDeliveryLeaseDeps,
 ) -> None:
     if configured_channel_lock is not lease_deps.configured_channel_lock:
@@ -108,7 +108,7 @@ async def reread_active_delivery_identity(
 async def active_delivery_lease(
     expected_identity: ActiveDeliveryIdentity,
     *,
-    configured_channel_lock: asyncio.Lock,
+    configured_channel_lock: ConfiguredChannelLock,
     deps: ActiveDeliveryLeaseDeps,
 ) -> AsyncGenerator[bool]:
     require_configured_channel_lock(configured_channel_lock, deps)

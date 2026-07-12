@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 
-def build_help(*, qa_commands_enabled: bool, host_commands_enabled: bool = False) -> str:
+def build_help(
+    *, qa_commands_enabled: bool, host_commands_enabled: bool = False
+) -> str:
     slash_commands = [
         "/help",
         "/list",
@@ -49,6 +51,11 @@ def build_help(*, qa_commands_enabled: bool, host_commands_enabled: bool = False
         "!mirror sync",
         "!mirror list [limit]",
         "!mirror check [limit]",
+        "!gpt list [limit]",
+        "!gpt sync <csv>",
+        "!gpt synced",
+        "!gpt unsync <csv>",
+        "!gpt sync_clear",
         "!approval",
         "!archive [ref]",
         "!archive-used <threshold>",
@@ -63,7 +70,10 @@ def build_help(*, qa_commands_enabled: bool, host_commands_enabled: bool = False
         lines.insert(lines.index("!chatid"), "!reset_pc confirm")
     if qa_commands_enabled:
         lines.insert(lines.index("!approval"), "!qa buttons")
-        lines.insert(lines.index("!qa buttons") + 1, "!steer <prompt>  (QA-only text path for Steer now)")
+        lines.insert(
+            lines.index("!qa buttons") + 1,
+            "!steer <prompt>  (QA-only text path for Steer now)",
+        )
         slash_commands.insert(slash_commands.index("/new"), "/qa_buttons")
     lines.append(f"Slash commands: {', '.join(slash_commands)}.")
     return "\n".join(lines)

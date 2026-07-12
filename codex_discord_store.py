@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
+from contextlib import closing
 from pathlib import Path
 
 from codex_discord_gpt_ownership import (
@@ -90,6 +91,8 @@ from codex_discord_store_startup_probe import (
     get_startup_probe_targets as get_startup_probe_targets,
 )
 
+
 def init_mirror_db(db_path: Path) -> None:
-    with sqlite3.connect(db_path) as conn:
-        init_store_schema(conn)
+    with closing(sqlite3.connect(db_path)) as conn:
+        with conn:
+            init_store_schema(conn)

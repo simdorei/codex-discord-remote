@@ -9,6 +9,7 @@ import codex_discord_prefix_approval_commands as discord_prefix_approval_command
 import codex_discord_prefix_archive_commands as discord_prefix_archive_commands
 import codex_discord_prefix_dispatch_factory as discord_prefix_dispatch_factory
 import codex_discord_prefix_host_commands as discord_prefix_host_commands
+import codex_discord_prefix_gpt_commands as discord_prefix_gpt_commands
 import codex_discord_prefix_mirror_commands as discord_prefix_mirror_commands
 import codex_discord_prefix_new_command as discord_prefix_new_command
 import codex_discord_prefix_prompt_commands as discord_prefix_prompt_commands
@@ -22,34 +23,28 @@ HELP_COMMANDS: Final[frozenset[str]] = frozenset({"help", "start"})
 
 class PrefixDispatchChannel(Protocol):
     @property
-    def id(self) -> int:
-        ...
+    def id(self) -> int: ...
 
 
 class PrefixDispatchAuthor(Protocol):
     @property
-    def id(self) -> int:
-        ...
+    def id(self) -> int: ...
 
 
 class PrefixDispatchGuild(Protocol):
     @property
-    def id(self) -> int:
-        ...
+    def id(self) -> int: ...
 
 
 class PrefixDispatchMessage(Protocol):
     @property
-    def channel(self) -> PrefixDispatchChannel:
-        ...
+    def channel(self) -> PrefixDispatchChannel: ...
 
     @property
-    def author(self) -> PrefixDispatchAuthor:
-        ...
+    def author(self) -> PrefixDispatchAuthor: ...
 
     @property
-    def guild(self) -> PrefixDispatchGuild | None:
-        ...
+    def guild(self) -> PrefixDispatchGuild | None: ...
 
 
 class SendChunksFunc(Protocol):
@@ -59,8 +54,7 @@ class SendChunksFunc(Protocol):
         text: str,
         *,
         context: str = "send_chunks",
-    ) -> Awaitable[int]:
-        ...
+    ) -> Awaitable[int]: ...
 
 
 class BuildBridgeActionFunc(Protocol):
@@ -69,8 +63,7 @@ class BuildBridgeActionFunc(Protocol):
         command: str,
         arg: str,
         channel_id: int,
-    ) -> discord_commands.PrefixBridgeAction | None:
-        ...
+    ) -> discord_commands.PrefixBridgeAction | None: ...
 
 
 class RunBridgeActionFunc(Protocol):
@@ -79,27 +72,24 @@ class RunBridgeActionFunc(Protocol):
         target: PrefixDispatchChannel,
         argv: list[str],
         title: str,
-    ) -> Awaitable[tuple[int, str]]:
-        ...
+    ) -> Awaitable[tuple[int, str]]: ...
 
 
 class BuildDoctorMessageFunc(Protocol):
-    def __call__(self, message: PrefixDispatchMessage) -> Awaitable[str]:
-        ...
+    def __call__(self, message: PrefixDispatchMessage) -> Awaitable[str]: ...
 
 
 class RunDoctorBridgeFunc(Protocol):
-    def __call__(self, target: PrefixDispatchChannel) -> Awaitable[tuple[int, str]]:
-        ...
+    def __call__(self, target: PrefixDispatchChannel) -> Awaitable[tuple[int, str]]: ...
 
 
 class PrefixHandler(Protocol):
-    def __call__(self, command: str, arg: str, message: PrefixDispatchMessage) -> Awaitable[bool]:
-        ...
+    def __call__(
+        self, command: str, arg: str, message: PrefixDispatchMessage
+    ) -> Awaitable[bool]: ...
 
 
-class PrefixDispatchBot(Protocol):
-    ...
+class PrefixDispatchBot(Protocol): ...
 
 
 BotT = TypeVar("BotT", bound=PrefixDispatchBot)
@@ -127,19 +117,42 @@ class PrefixDispatchFactoryDeps(Generic[BotT]):
     build_doctor_message: BuildDoctorMessageFunc
     run_doctor_bridge: RunDoctorBridgeFunc
     format_command_label: Callable[[str], str]
-    make_prefix_steer_deps: Callable[[], discord_prefix_steer_command.PrefixSteerCommandDeps]
-    make_prefix_status_deps: Callable[[], discord_prefix_status_commands.PrefixStatusCommandDeps]
-    make_prefix_queue_deps: Callable[[], discord_prefix_queue_commands.PrefixQueueCommandDeps]
-    make_prefix_mirror_deps: Callable[[], discord_prefix_mirror_commands.PrefixMirrorCommandDeps]
-    make_prefix_approval_deps: Callable[[], discord_prefix_approval_commands.PrefixApprovalCommandDeps]
-    make_prefix_archive_deps: Callable[[], discord_prefix_archive_commands.PrefixArchiveCommandDeps]
-    make_prefix_qa_deps: Callable[[], discord_prefix_qa_command.PrefixQaCommandDeps[BotT]]
+    make_prefix_steer_deps: Callable[
+        [], discord_prefix_steer_command.PrefixSteerCommandDeps
+    ]
+    make_prefix_status_deps: Callable[
+        [], discord_prefix_status_commands.PrefixStatusCommandDeps
+    ]
+    make_prefix_queue_deps: Callable[
+        [], discord_prefix_queue_commands.PrefixQueueCommandDeps
+    ]
+    make_prefix_mirror_deps: Callable[
+        [], discord_prefix_mirror_commands.PrefixMirrorCommandDeps
+    ]
+    make_prefix_approval_deps: Callable[
+        [], discord_prefix_approval_commands.PrefixApprovalCommandDeps
+    ]
+    make_prefix_archive_deps: Callable[
+        [], discord_prefix_archive_commands.PrefixArchiveCommandDeps
+    ]
+    make_prefix_qa_deps: Callable[
+        [], discord_prefix_qa_command.PrefixQaCommandDeps[BotT]
+    ]
     make_prefix_new_deps: Callable[[], discord_prefix_new_command.PrefixNewCommandDeps]
-    make_prefix_prompt_deps: Callable[[], discord_prefix_prompt_commands.PrefixPromptCommandDeps]
-    make_prefix_host_deps: Callable[[], discord_prefix_host_commands.PrefixHostCommandDeps]
+    make_prefix_prompt_deps: Callable[
+        [], discord_prefix_prompt_commands.PrefixPromptCommandDeps
+    ]
+    make_prefix_host_deps: Callable[
+        [], discord_prefix_host_commands.PrefixHostCommandDeps
+    ]
+    make_prefix_gpt_deps: (
+        Callable[[BotT], discord_prefix_gpt_commands.PrefixGptCommandDeps] | None
+    ) = None
 
 
-def build_prefix_dispatch_deps(factory: PrefixDispatchFactoryDeps[BotT]) -> PrefixDispatchDeps:
+def build_prefix_dispatch_deps(
+    factory: PrefixDispatchFactoryDeps[BotT],
+) -> PrefixDispatchDeps:
     return PrefixDispatchDeps(
         send_chunks=factory.send_chunks,
         build_help=factory.build_help,
@@ -187,7 +200,9 @@ async def handle_prefix_command(
         return
 
     if command == "doctor":
-        _ = await deps.send_chunks(message.channel, await deps.build_doctor_message(message))
+        _ = await deps.send_chunks(
+            message.channel, await deps.build_doctor_message(message)
+        )
         _ = await deps.run_doctor_bridge(message.channel)
         return
 

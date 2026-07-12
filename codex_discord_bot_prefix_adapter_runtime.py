@@ -1,16 +1,18 @@
 from __future__ import annotations
 
-import asyncio  # noqa: ANYIO_OK
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from types import ModuleType
 from typing import cast, TypeAlias
+
+from anyio.to_thread import run_sync
 
 import codex_discord_prefix_approval_commands as discord_prefix_approval_commands
 import codex_discord_prefix_archive_commands as discord_prefix_archive_commands
 import codex_discord_prefix_dispatch as discord_prefix_dispatch
 import codex_discord_prefix_dispatch_runtime as discord_prefix_dispatch_runtime
 import codex_discord_prefix_host_commands as discord_prefix_host_commands
+import codex_discord_prefix_gpt_commands as discord_prefix_gpt_commands
 import codex_discord_prefix_mirror_commands as discord_prefix_mirror_commands
 import codex_discord_prefix_new_command as discord_prefix_new_command
 import codex_discord_prefix_prompt_commands as discord_prefix_prompt_commands
@@ -20,6 +22,7 @@ import codex_discord_prefix_status_commands as discord_prefix_status_commands
 import codex_discord_prefix_steer_command as discord_prefix_steer_command
 import codex_system_resources
 from codex_discord_steering import SteeringPromptResult
+
 ModuleValue: TypeAlias = object
 
 
@@ -42,7 +45,9 @@ class BotPrefixAdapterRuntime:
             Callable[[object], discord_prefix_dispatch.PrefixDispatchChannel],
             getattr(self.module, "require_discord_messageable"),
         )
-        send_chunks = cast(Callable[..., Awaitable[int]], getattr(self.module, "send_chunks"))
+        send_chunks = cast(
+            Callable[..., Awaitable[int]], getattr(self.module, "send_chunks")
+        )
         return await send_chunks(require_messageable(target), text, context=context)
 
     async def handle_prefix_plain_ask(
@@ -52,8 +57,12 @@ class BotPrefixAdapterRuntime:
         *,
         target_thread_id: str | None = None,
     ) -> None:
-        handle_plain_ask = cast(Callable[..., Awaitable[None]], getattr(self.module, "handle_plain_ask"))
-        await handle_plain_ask(cast(object, message), prompt, target_thread_id=target_thread_id)
+        handle_plain_ask = cast(
+            Callable[..., Awaitable[None]], getattr(self.module, "handle_plain_ask")
+        )
+        await handle_plain_ask(
+            cast(object, message), prompt, target_thread_id=target_thread_id
+        )
 
     async def stream_prefix_steering_prompt_result_to_channel(
         self,
@@ -68,7 +77,10 @@ class BotPrefixAdapterRuntime:
             Callable[[object], discord_prefix_dispatch.PrefixDispatchChannel],
             getattr(self.module, "require_discord_messageable"),
         )
-        stream_result = cast(Callable[..., Awaitable[bool]], getattr(self.module, "stream_steering_prompt_result_to_channel"))
+        stream_result = cast(
+            Callable[..., Awaitable[bool]],
+            getattr(self.module, "stream_steering_prompt_result_to_channel"),
+        )
         return await stream_result(
             require_messageable(channel),
             steering_result,
@@ -83,7 +95,10 @@ class BotPrefixAdapterRuntime:
         *,
         limit: int | None = None,
     ) -> str:
-        refresh_session = cast(Callable[..., Awaitable[str]], getattr(self.module, "refresh_discord_bridge_session"))
+        refresh_session = cast(
+            Callable[..., Awaitable[str]],
+            getattr(self.module, "refresh_discord_bridge_session"),
+        )
         return await refresh_session(bot, limit=limit)
 
     async def sync_prefix_mirror_codex(
@@ -92,7 +107,9 @@ class BotPrefixAdapterRuntime:
         *,
         limit: int | None = None,
     ) -> str:
-        sync_mirror = cast(Callable[..., Awaitable[str]], getattr(self.module, "sync_codex_mirror"))
+        sync_mirror = cast(
+            Callable[..., Awaitable[str]], getattr(self.module, "sync_codex_mirror")
+        )
         return await sync_mirror(bot, limit=limit)
 
     async def send_prefix_approval_interactive_prompt(
@@ -105,12 +122,17 @@ class BotPrefixAdapterRuntime:
         choices: list[str],
     ) -> None:
         if target_thread_id is None:
-            raise PrefixApprovalTargetMissingError("prefix approval interactive prompt requires target_thread_id")
+            raise PrefixApprovalTargetMissingError(
+                "prefix approval interactive prompt requires target_thread_id"
+            )
         require_messageable = cast(
             Callable[[object], discord_prefix_dispatch.PrefixDispatchChannel],
             getattr(self.module, "require_discord_messageable"),
         )
-        send_interactive_prompt = cast(Callable[..., Awaitable[None]], getattr(self.module, "send_interactive_prompt"))
+        send_interactive_prompt = cast(
+            Callable[..., Awaitable[None]],
+            getattr(self.module, "send_interactive_prompt"),
+        )
         await send_interactive_prompt(
             require_messageable(channel),
             target_thread_id,
@@ -121,7 +143,7 @@ class BotPrefixAdapterRuntime:
         )
 
     async def build_system_resources_message(self) -> str:
-        return await asyncio.to_thread(codex_system_resources.build_system_resources_message)
+        return await run_sync(codex_system_resources.build_system_resources_message)
 
     def make_prefix_dispatch_deps(
         self,
@@ -168,13 +190,23 @@ class BotPrefixAdapterRuntime:
                     ],
                     getattr(self.module, "require_discord_history_channel"),
                 ),
-                format_command_label=cast(Callable[[str], str], getattr(self.module, "format_discord_command_label")),
+                format_command_label=cast(
+                    Callable[[str], str],
+                    getattr(self.module, "format_discord_command_label"),
+                ),
+                make_prefix_gpt_deps=lambda client: (
+                    discord_prefix_gpt_commands.make_prefix_gpt_deps(
+                        self.module, client
+                    )
+                ),
                 make_prefix_steer_deps=cast(
                     Callable[[], discord_prefix_steer_command.PrefixSteerCommandDeps],
                     getattr(self.module, "_make_prefix_steer_command_deps"),
                 ),
                 make_prefix_status_deps=cast(
-                    Callable[[], discord_prefix_status_commands.PrefixStatusCommandDeps],
+                    Callable[
+                        [], discord_prefix_status_commands.PrefixStatusCommandDeps
+                    ],
                     getattr(self.module, "_make_prefix_status_command_deps"),
                 ),
                 make_prefix_queue_deps=cast(
@@ -182,19 +214,30 @@ class BotPrefixAdapterRuntime:
                     getattr(self.module, "_make_prefix_queue_command_deps"),
                 ),
                 make_prefix_mirror_deps=cast(
-                    Callable[[], discord_prefix_mirror_commands.PrefixMirrorCommandDeps],
+                    Callable[
+                        [], discord_prefix_mirror_commands.PrefixMirrorCommandDeps
+                    ],
                     getattr(self.module, "_make_prefix_mirror_command_deps"),
                 ),
                 make_prefix_approval_deps=cast(
-                    Callable[[], discord_prefix_approval_commands.PrefixApprovalCommandDeps],
+                    Callable[
+                        [], discord_prefix_approval_commands.PrefixApprovalCommandDeps
+                    ],
                     getattr(self.module, "_make_prefix_approval_command_deps"),
                 ),
                 make_prefix_archive_deps=cast(
-                    Callable[[], discord_prefix_archive_commands.PrefixArchiveCommandDeps],
+                    Callable[
+                        [], discord_prefix_archive_commands.PrefixArchiveCommandDeps
+                    ],
                     getattr(self.module, "_make_prefix_archive_command_deps"),
                 ),
                 make_prefix_qa_deps=cast(
-                    Callable[[], discord_prefix_qa_command.PrefixQaCommandDeps[discord_prefix_dispatch.PrefixDispatchBot]],
+                    Callable[
+                        [],
+                        discord_prefix_qa_command.PrefixQaCommandDeps[
+                            discord_prefix_dispatch.PrefixDispatchBot
+                        ],
+                    ],
                     getattr(self.module, "_make_prefix_qa_command_deps"),
                 ),
                 make_prefix_new_deps=cast(
@@ -202,7 +245,9 @@ class BotPrefixAdapterRuntime:
                     getattr(self.module, "_make_prefix_new_command_deps"),
                 ),
                 make_prefix_prompt_deps=cast(
-                    Callable[[], discord_prefix_prompt_commands.PrefixPromptCommandDeps],
+                    Callable[
+                        [], discord_prefix_prompt_commands.PrefixPromptCommandDeps
+                    ],
                     getattr(self.module, "_make_prefix_prompt_command_deps"),
                 ),
                 make_prefix_host_deps=cast(

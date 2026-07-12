@@ -53,6 +53,11 @@ Common `!` commands:
 | `!mirror sync` | Syncs Discord mirror project/thread channels using DB-root user threads. |
 | `!mirror list [limit]` | Lists mirror mappings. Without a limit, it uses DB-root user threads. |
 | `!mirror check [limit]` | Checks mirror mappings and stale rows. Without a limit, it uses DB-root user threads. |
+| `!gpt list [limit]` | Lists app-native Codex chats and refreshes your list snapshot. |
+| `!gpt sync <csv>` | Syncs the selected list indices into Discord. |
+| `!gpt synced` | Lists synced app-native Codex chats and refreshes your synced snapshot. |
+| `!gpt unsync <csv>` | Archives the selected synced chats while retaining their Discord identity and history. |
+| `!gpt sync_clear` | Clears GPT sync state after checked reconciliation. |
 | `!approval` | Re-sends the pending approval controls for the mapped/current Codex thread when one exists. |
 | `!archive [ref]` | Archives the mapped/current Codex thread or a supplied ref. Numeric refs follow the same DB-root numbering as `!list`. |
 | `!archive-used <threshold>` | Runs the packaged `archive-used` skill for high-`used` cleanup using the threshold you provide. |
@@ -88,5 +93,7 @@ Mirror source boundary:
 
 - Mirror discovery is intentionally limited to active local Codex user-root threads (`source=vscode`, `thread_source=user` or the legacy empty value).
 - Projectless Codex threads under `Documents/Codex/<date>/new-chat` remain in scope and are grouped as the Codex chat project.
-- Regular ChatGPT/GPT conversations outside Codex and Codex subagent sessions are out of scope and must not be mirrored.
+- External web ChatGPT conversations remain excluded.
+- App-native Codex chats are opt-in through the five !gpt prefix commands.
+- No-project Codex app chats restore their existing Discord thread after re-sync.
 - Keep this boundary fail-closed. A new source or conversation kind requires an explicit product decision and regression-test update before it can enter mirror sync.

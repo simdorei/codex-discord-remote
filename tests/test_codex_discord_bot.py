@@ -14,6 +14,7 @@ from types import SimpleNamespace
 import codex_discord_bot as bot
 import codex_discord_busy as discord_busy
 import codex_discord_message_gate as message_gate
+import codex_discord_store as discord_store
 import codex_desktop_bridge as bridge
 import codex_desktop_bridge_sidecar_resolver as sidecar_resolver
 import codex_windows_harness as harness
@@ -284,6 +285,17 @@ class DiscordBotHelperTests(unittest.IsolatedAsyncioTestCase):
         bot.ACTIVE_DISCORD_DELIVERIES.clear()
         bot.clear_discord_delivery_stopping()
         self._mirror_db_temp_dir.cleanup()
+
+    def _seed_ordinary_session_target(self) -> None:
+        discord_store.upsert_ordinary_mirror_thread(
+            bot.MIRROR_DB_PATH,
+            "thread-1",
+            "project:1",
+            "Thread 1",
+            222,
+            333,
+            now=1.0,
+        )
 
     def test_bridge_stream_runs_in_subprocess_without_cross_thread_output(self) -> None:
         original_get_bridge_script_path = bot.get_bridge_script_path
@@ -2575,6 +2587,7 @@ class DiscordBotHelperTests(unittest.IsolatedAsyncioTestCase):
             bridge.read_new_session_events = original_read_new_session_events
 
     async def test_mirror_session_target_sends_new_session_items_and_updates_cursor(self) -> None:
+        self._seed_ordinary_session_target()
         original_choose_thread = bridge.choose_thread
         original_read_new_session_events = bridge.read_new_session_events
         original_get_cursor = bot.get_or_init_session_mirror_cursor
@@ -2656,6 +2669,7 @@ class DiscordBotHelperTests(unittest.IsolatedAsyncioTestCase):
             bot.resolve_target_ref = original_resolve_target_ref
 
     async def test_mirror_session_target_tails_archive_recommended_thread(self) -> None:
+        self._seed_ordinary_session_target()
         original_choose_thread = bridge.choose_thread
         original_get_context_usage = bridge.get_thread_context_usage
         original_should_recommend_archive = bridge.should_recommend_archive
@@ -2745,6 +2759,7 @@ class DiscordBotHelperTests(unittest.IsolatedAsyncioTestCase):
             bot.resolve_target_ref = original_resolve_target_ref
 
     async def test_mirror_session_target_allows_archive_recommended_active_output(self) -> None:
+        self._seed_ordinary_session_target()
         original_choose_thread = bridge.choose_thread
         original_get_context_usage = bridge.get_thread_context_usage
         original_should_recommend_archive = bridge.should_recommend_archive
@@ -2830,6 +2845,7 @@ class DiscordBotHelperTests(unittest.IsolatedAsyncioTestCase):
             bot.resolve_target_ref = original_resolve_target_ref
 
     async def test_mirror_session_target_does_not_claim_or_advance_cursor_when_delivery_fails(self) -> None:
+        self._seed_ordinary_session_target()
         original_choose_thread = bridge.choose_thread
         original_get_context_usage = bridge.get_thread_context_usage
         original_should_recommend_archive = bridge.should_recommend_archive
@@ -2914,6 +2930,7 @@ class DiscordBotHelperTests(unittest.IsolatedAsyncioTestCase):
             bot.resolve_target_ref = original_resolve_target_ref
 
     async def test_mirror_session_target_keeps_active_output_when_terminal_already_delivered(self) -> None:
+        self._seed_ordinary_session_target()
         original_choose_thread = bridge.choose_thread
         original_get_context_usage = bridge.get_thread_context_usage
         original_should_recommend_archive = bridge.should_recommend_archive
@@ -3000,6 +3017,7 @@ class DiscordBotHelperTests(unittest.IsolatedAsyncioTestCase):
             bot.resolve_target_ref = original_resolve_target_ref
 
     async def test_mirror_session_target_initializes_pending_active_cursor_from_start(self) -> None:
+        self._seed_ordinary_session_target()
         original_choose_thread = bridge.choose_thread
         original_get_context_usage = bridge.get_thread_context_usage
         original_should_recommend_archive = bridge.should_recommend_archive

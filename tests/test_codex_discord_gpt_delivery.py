@@ -1,12 +1,15 @@
 from __future__ import annotations
 
-import asyncio  # noqa: ANYIO_OK
+# The delivery flow's concrete public contract requires the real standard-library lock.
+from asyncio import Lock as AsyncioLock  # noqa: F401  # noqa: ANYIO_OK
 from contextlib import closing
 from pathlib import Path
 import sqlite3
 import tempfile
-from typing import Final
 import unittest
+
+from anyio import Event, create_task_group
+from anyio.to_thread import run_sync
 
 import codex_discord_gpt_delivery as gpt_delivery
 import codex_discord_session_mirror_delivery_flow as delivery_flow
@@ -14,11 +17,13 @@ import codex_discord_store_session_mirror as session_mirror_store
 from codex_discord_store_schema import init_store_schema
 
 
-_TEMP_PREFIX: Final = "app-gpt-discord-sync-todo-09-"
+_TEMP_PREFIX = "app-gpt-discord-sync-todo-09-"
 
 
-class FakeChannel:
-    pass
+class FakeChannel: ...
+
+
+new_configured_channel_lock = AsyncioLock
 
 
 class GptDeliveryTests(unittest.IsolatedAsyncioTestCase):
@@ -41,16 +46,9 @@ class GptDeliveryTests(unittest.IsolatedAsyncioTestCase):
                 (state,),
             )
 
-    def _set_managed_by(self, db_path: Path, managed_by: str) -> None:
-        with closing(sqlite3.connect(db_path)) as conn, conn:
-            _ = conn.execute(
-                "UPDATE mirror_threads SET managed_by = ? WHERE codex_thread_id = 'gpt-thread'",
-                (managed_by,),
-            )
-
     def _lease_deps(
         self,
-        lock: asyncio.Lock,
+        lock: AsyncioLock,
         db_path: Path,
         order: list[str],
     ) -> tuple[
@@ -68,10 +66,11 @@ class GptDeliveryTests(unittest.IsolatedAsyncioTestCase):
             codex_thread_id: str,
         ) -> gpt_delivery.ActiveDeliveryIdentity | None:
             order.append("reread")
-            return await asyncio.to_thread(
+            return await run_sync(
                 session_mirror_store.get_session_mirror_delivery_identity,
                 db_path,
                 codex_thread_id,
+                abandon_on_cancel=True,
             )
 
         lease_deps = gpt_delivery.ActiveDeliveryLeaseDeps(lock, reread)
@@ -106,15 +105,14 @@ class GptDeliveryTests(unittest.IsolatedAsyncioTestCase):
         self.fail(f"output deactivation ran for {codex_thread_id}")
 
     async def test_delivery_wins_lock_then_deactivation_runs(self) -> None:
-        with tempfile.TemporaryDirectory(
-            prefix=_TEMP_PREFIX,
-            ignore_cleanup_errors=True,
-        ) as temp_dir:
+        await self.assert_delivery_first(new_configured_channel_lock())
+
+    async def assert_delivery_first(self, lock: AsyncioLock) -> None:
+        with tempfile.TemporaryDirectory(prefix=_TEMP_PREFIX) as temp_dir:
             db_path = self._db_path(temp_dir)
-            lock = asyncio.Lock()
             order: list[str] = []
-            send_started = asyncio.Event()
-            release_send = asyncio.Event()
+            send_started = Event()
+            release_send = Event()
             channel = FakeChannel()
             lease_deps, expected_identity = self._lease_deps(lock, db_path, order)
 
@@ -138,7 +136,7 @@ class GptDeliveryTests(unittest.IsolatedAsyncioTestCase):
                 _ = (channel, item, target_thread_id, target_ref)
                 order.append("send:start")
                 send_started.set()
-                _ = await release_send.wait()
+                await release_send.wait()
                 order.append("send:end")
 
             async def claim_event(digest: str, codex_thread_id: str) -> bool:
@@ -168,13 +166,21 @@ class GptDeliveryTests(unittest.IsolatedAsyncioTestCase):
             )
 
             async def deactivate() -> None:
-                _ = await send_started.wait()
+                await send_started.wait()
                 async with lock:
-                    await asyncio.to_thread(self._set_state, db_path, "inactive")
+                    await run_sync(
+                        self._set_state,
+                        db_path,
+                        "inactive",
+                        abandon_on_cancel=True,
+                    )
                     order.append("gpt-deactivate")
 
-            delivery_task = asyncio.create_task(
-                delivery_flow.deliver_and_commit_session_mirror_items(
+            delivered = False
+
+            async def deliver() -> None:
+                nonlocal delivered
+                delivered = await delivery_flow.deliver_and_commit_session_mirror_items(
                     "gpt-thread",
                     "rollout.jsonl",
                     42,
@@ -184,37 +190,41 @@ class GptDeliveryTests(unittest.IsolatedAsyncioTestCase):
                     items=[{"kind": "final", "text": "done", "digest": "digest"}],
                     deps=deps,
                 )
-            )
-            deactivation_task = asyncio.create_task(deactivate())
-            _ = await send_started.wait()
-            release_send.set()
-            delivered, _ = await asyncio.gather(delivery_task, deactivation_task)
+
+            async with create_task_group() as tasks:
+                _ = tasks.start_soon(deliver)
+                _ = tasks.start_soon(deactivate)
+                await send_started.wait()
+                release_send.set()
 
         self.assertTrue(delivered)
-        expected_order = (
-            "reread resolve has send:start send:end claim "
-            + "output-deactivate cursor gpt-deactivate"
+        self.assertEqual(
+            order,
+            "reread resolve has send:start send:end claim output-deactivate cursor gpt-deactivate".split(),
         )
-        self.assertEqual(order, expected_order.split())
 
     async def test_deactivation_wins_lock_and_blocks_send_claim_commit(self) -> None:
-        with tempfile.TemporaryDirectory(
-            prefix=_TEMP_PREFIX,
-            ignore_cleanup_errors=True,
-        ) as temp_dir:
+        await self.assert_deactivation_first(new_configured_channel_lock())
+
+    async def assert_deactivation_first(self, lock: AsyncioLock) -> None:
+        with tempfile.TemporaryDirectory(prefix=_TEMP_PREFIX) as temp_dir:
             db_path = self._db_path(temp_dir)
-            lock = asyncio.Lock()
             order: list[str] = []
-            deactivation_locked = asyncio.Event()
-            release_deactivation = asyncio.Event()
+            deactivation_locked = Event()
+            release_deactivation = Event()
             lease_deps, expected_identity = self._lease_deps(lock, db_path, order)
 
             async def deactivate() -> None:
                 async with lock:
-                    await asyncio.to_thread(self._set_state, db_path, "inactive")
+                    await run_sync(
+                        self._set_state,
+                        db_path,
+                        "inactive",
+                        abandon_on_cancel=True,
+                    )
                     order.append("gpt-deactivate")
                     deactivation_locked.set()
-                    _ = await release_deactivation.wait()
+                    await release_deactivation.wait()
 
             deps = delivery_flow.SessionMirrorDeliveryFlowDeps(
                 configured_channel_lock=lock,
@@ -229,10 +239,11 @@ class GptDeliveryTests(unittest.IsolatedAsyncioTestCase):
                 log=lambda _message: None,
             )
 
-            deactivation_task = asyncio.create_task(deactivate())
-            _ = await deactivation_locked.wait()
-            delivery_task = asyncio.create_task(
-                delivery_flow.deliver_and_commit_session_mirror_items(
+            delivered = True
+
+            async def deliver() -> None:
+                nonlocal delivered
+                delivered = await delivery_flow.deliver_and_commit_session_mirror_items(
                     "gpt-thread",
                     "rollout.jsonl",
                     42,
@@ -242,15 +253,18 @@ class GptDeliveryTests(unittest.IsolatedAsyncioTestCase):
                     items=[{"kind": "final", "text": "done", "digest": "digest"}],
                     deps=deps,
                 )
-            )
-            release_deactivation.set()
-            _, delivered = await asyncio.gather(deactivation_task, delivery_task)
+
+            async with create_task_group() as tasks:
+                _ = tasks.start_soon(deactivate)
+                await deactivation_locked.wait()
+                _ = tasks.start_soon(deliver)
+                release_deactivation.set()
 
         self.assertFalse(delivered)
         self.assertEqual(order, ["gpt-deactivate", "reread"])
 
     def test_second_lock_injection_fails_before_delivery(self) -> None:
-        canonical_lock = asyncio.Lock()
+        canonical_lock = AsyncioLock()
         order: list[str] = []
         with tempfile.TemporaryDirectory(prefix=_TEMP_PREFIX) as temp_dir:
             db_path = self._db_path(temp_dir)
@@ -258,7 +272,7 @@ class GptDeliveryTests(unittest.IsolatedAsyncioTestCase):
 
             with self.assertRaises(gpt_delivery.ConfiguredChannelLockMismatchError):
                 gpt_delivery.require_configured_channel_lock(
-                    asyncio.Lock(),
+                    AsyncioLock(),
                     lease_deps,
                 )
 
@@ -267,17 +281,17 @@ class GptDeliveryTests(unittest.IsolatedAsyncioTestCase):
     async def test_ownership_change_invalidates_prepared_identity(self) -> None:
         with tempfile.TemporaryDirectory(prefix=_TEMP_PREFIX) as temp_dir:
             db_path = self._db_path(temp_dir)
-            lock = asyncio.Lock()
+            lock = AsyncioLock()
             lease_deps, expected = self._lease_deps(lock, db_path, [])
 
-            self._set_managed_by(db_path, "ordinary")
+            with closing(sqlite3.connect(db_path)) as conn, conn:
+                _ = conn.execute(
+                    "UPDATE mirror_threads SET managed_by = 'ordinary' "
+                    + "WHERE codex_thread_id = 'gpt-thread'"
+                )
             async with gpt_delivery.active_delivery_lease(
                 expected_identity=expected,
                 configured_channel_lock=lock,
                 deps=lease_deps,
             ) as active_identity:
                 self.assertFalse(active_identity)
-
-
-if __name__ == "__main__":
-    _ = unittest.main()

@@ -288,6 +288,11 @@ Common prefix commands:
 - `!retract`
 - `!bridge`
 - `!mirror`
+- `!gpt list [limit]`
+- `!gpt sync <csv>`
+- `!gpt synced`
+- `!gpt unsync <csv>`
+- `!gpt sync_clear`
 - `!approval`
 - `!archive`
 - `!archive-used`
@@ -315,7 +320,9 @@ Use `--thread-ref` for a mirrored Codex thread, `--work-thread` for a specific C
 ## Routing And Mirror Rules
 
 - A mapped Discord thread follows its matching Codex app thread.
-- Mirror discovery includes only local Codex user-root threads. Regular ChatGPT/GPT conversations outside Codex are intentionally excluded.
+- Mirror discovery includes only local Codex user-root threads. External web ChatGPT conversations remain excluded.
+- App-native Codex chats are opt-in through the five !gpt prefix commands.
+- No-project Codex app chats restore their existing Discord thread after re-sync.
 - Projectless Codex `new-chat` threads remain included as the Codex chat project.
 - Plain Discord messages inside a mapped thread go to that mapped Codex thread, not the currently selected Codex tab.
 - Codex text output mirrors as Discord text.
