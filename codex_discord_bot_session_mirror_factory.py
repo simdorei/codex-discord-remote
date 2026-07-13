@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import asyncio  # noqa: ANYIO_OK
+import asyncio  # noqa: F401  # noqa: ANYIO_OK
 import os
 import traceback
 from collections.abc import Awaitable, Callable
@@ -80,10 +80,12 @@ def make_session_mirror_runtime(
     async def reread_active_delivery_identity(
         codex_thread_id: str,
     ) -> gpt_delivery.ActiveDeliveryIdentity | None:
-        return await asyncio.to_thread(
-            session_mirror_store.get_session_mirror_delivery_identity,
-            get_db_path(),
-            codex_thread_id,
+        return await discord_session_mirror_delivery_flow.complete_before_cancellation(
+            asyncio.to_thread(
+                session_mirror_store.get_session_mirror_delivery_identity,
+                get_db_path(),
+                codex_thread_id,
+            )
         )
 
     def read_new_session_events(

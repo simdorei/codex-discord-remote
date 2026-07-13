@@ -11,6 +11,7 @@ from typing import Final, Protocol, cast
 import codex_discord_gpt_discord_adapter as discord_adapter
 import codex_discord_gpt_read_service as read_service
 import codex_discord_gpt_runtime as gpt_runtime
+from codex_discord_prefix_gpt_error_messages import format_gpt_command_error
 
 GPT_COMMAND: Final = "gpt"
 GPT_USAGE: Final = "\n".join(
@@ -73,12 +74,16 @@ def make_prefix_gpt_deps(
 
 
 def _parse(arg: str) -> tuple[str, str | None] | None:
-    parts = arg.strip().split()
+    parts = arg.strip().split(maxsplit=1)
     if not parts:
         return None
     action = parts[0]
-    if action == "list" and len(parts) <= 2:
-        return action, None if len(parts) == 1 else parts[1]
+    if action == "list":
+        if len(parts) == 1:
+            return action, None
+        if len(parts[1].split()) == 1:
+            return action, parts[1]
+        return None
     if action in ("sync", "unsync") and len(parts) == 2:
         return action, parts[1]
     if action in ("synced", "sync_clear") and len(parts) == 1:
@@ -155,7 +160,7 @@ async def handle_prefix_gpt_command(
     try:
         output = await _run(*parsed, message, deps)
     except RuntimeError as exc:
-        output = f"GPT command failed: {exc}"
+        output = format_gpt_command_error(exc)
     except sqlite3.Error:
         output = "GPT command failed: local GPT state is unavailable."
     _ = await deps.send_chunks(message.channel, output, context="prefix_gpt")

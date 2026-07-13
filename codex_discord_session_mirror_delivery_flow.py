@@ -1,10 +1,12 @@
 from __future__ import annotations
 
-import asyncio  # noqa: ANYIO_OK
+import asyncio  # noqa: F401  # noqa: ANYIO_OK
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Generic, Protocol, TypeAlias, TypeVar
+
+from anyio import CancelScope
 
 import codex_discord_gpt_delivery as gpt_delivery
 import codex_discord_session_mirror_commit as session_mirror_commit
@@ -83,13 +85,8 @@ class SessionMirrorDeliveryFlowDeps(Generic[ChannelT]):
         )
 
 
-def _consume_current_cancellation() -> None:
-    current_task = asyncio.current_task()
-    if current_task is not None:
-        _ = current_task.uncancel()
-
-
-async def _complete_before_cancellation(operation: Awaitable[ResultT]) -> ResultT:
+async def complete_before_cancellation(operation: Awaitable[ResultT]) -> ResultT:
+    """Drain an already-started operation before propagating task cancellation."""
     worker = asyncio.ensure_future(operation)
     completion: asyncio.Future[None] = asyncio.get_running_loop().create_future()
 
@@ -101,13 +98,14 @@ async def _complete_before_cancellation(operation: Awaitable[ResultT]) -> Result
     try:
         return await asyncio.shield(worker)
     except asyncio.CancelledError as cancellation:
-        _consume_current_cancellation()
-        while not worker.done():
-            try:
-                await asyncio.shield(completion)
-            except asyncio.CancelledError:
-                _consume_current_cancellation()
-                continue
+        with CancelScope(shield=True):
+            while not worker.done():
+                try:
+                    await asyncio.shield(completion)
+                except asyncio.CancelledError:
+                    continue
+        if worker.cancelled():
+            raise cancellation
         error = worker.exception()
         if error is not None:
             raise cancellation from error
@@ -145,7 +143,7 @@ async def deliver_and_commit_session_mirror_items(
         _resolved_thread_id, target_ref = deps.resolve_target_ref(codex_thread_id)
 
         async def claim_event(digest: str, target_thread_id: str) -> bool:
-            return await _complete_before_cancellation(
+            return await complete_before_cancellation(
                 deps.claim_session_mirror_event(digest, target_thread_id)
             )
 
@@ -154,7 +152,7 @@ async def deliver_and_commit_session_mirror_items(
             target_rollout_path: str,
             cursor: int,
         ) -> None:
-            await _complete_before_cancellation(
+            await complete_before_cancellation(
                 deps.update_session_mirror_cursor(
                     target_thread_id,
                     target_rollout_path,

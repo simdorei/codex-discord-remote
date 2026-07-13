@@ -67,9 +67,8 @@ class GptIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 patch.object(discord, "Thread", adapter_fakes.FakeThread),
             ):
                 await runtime.reconcile(_client(guild))
-                for arg in "list 5|sync 1|synced|unsync 1|list|sync 1|sync_clear".split(
-                    "|"
-                ):
+                commands = "list 5|sync 1, 1|synced|unsync 1, 1|list|sync 1|sync_clear"
+                for arg in commands.split("|"):
                     self.assertTrue(
                         await handle("gpt", arg, _message(), deps=command_deps)
                     )
