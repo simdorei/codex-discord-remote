@@ -175,9 +175,9 @@ async def process_inbound_discord_message(
     deps: InboundDiscordMessageProcessDeps,
 ) -> None:
     message_channel = deps.require_messageable_channel(message.channel)
-    intake_deps = message_intake_gate.MessageIntakeGateDeps[
+    intake_deps: message_intake_gate.MessageIntakeGateDeps[
         DispatchChannel, InboundMessage
-    ](
+    ] = message_intake_gate.MessageIntakeGateDeps(
         is_allowed_message_channel=deps.is_allowed_message_channel,
         is_bot_authored_bridge_mention=deps.is_bot_authored_bridge_mention,
         is_allowed_user=deps.is_allowed_user,

@@ -110,7 +110,7 @@ def should_process_gateway_message_author(
     content = str(getattr(message, "content", "") or "")
     if is_bot_bridge_restart_check_handoff_packet(normalize_bot_bridge_packet_content(content)):
         log(
-            f"bot_bridge_unmentioned_restart_check_handoff_accepted "
+            "bot_bridge_unmentioned_restart_check_handoff_accepted "
             + f"chat={channel_id} user={author_id or '-'}"
         )
         return True
@@ -129,7 +129,7 @@ async def process_gateway_message(message: MessageT, *, deps: GatewayMessageDeps
         return
     if not deps.claim_message(message):
         deps.log(
-            f"duplicate_message_skipped source=gateway "
+            "duplicate_message_skipped source=gateway "
             + f"chat={getattr(getattr(message, 'channel', None), 'id', '-')} "
             + f"message={deps.get_message_id(message) or '-'}"
         )
