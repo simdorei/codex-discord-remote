@@ -44,7 +44,9 @@ class MirrorStatusStateRootTests(unittest.TestCase):
 
         try:
             bridge.load_user_root_threads = fake_load_user_root_threads
-            bot.filter_mirrorable_threads = lambda threads: list(threads)
+            bot.filter_mirrorable_threads = lambda _threads: (_ for _ in ()).throw(
+                AssertionError("mirror check must use the list scope without project filtering")
+            )
             bot.filter_app_server_available_threads = lambda threads: list(threads)
             bot.discord_mirror_status.build_mirror_check = fake_build_mirror_check
 
@@ -86,7 +88,7 @@ class MirrorStatusStateRootTests(unittest.TestCase):
             output = bot.build_mirror_check()
 
             self.assertEqual(output, "Mirror check")
-            self.assertEqual(observed_threads, [[available]])
+            self.assertEqual(observed_threads, [[available, ghost]])
             self.assertEqual(observed_unavailable_counts, [1])
         finally:
             bridge.load_user_root_threads = old_load_user_root_threads

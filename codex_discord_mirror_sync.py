@@ -139,11 +139,9 @@ async def sync_codex_mirror(
     deps.log(f"mirror_sync_start limit={scope}")
     guild = await deps.get_mirror_guild(bot)
     category = await deps.get_or_create_mirror_category(guild)
-    threads = await asyncio.to_thread(deps.load_mirror_scope_threads, limit)
-    threads = deps.filter_mirrorable_threads(threads)
-    mirrorable_count = len(threads)
-    threads = await asyncio.to_thread(deps.filter_app_server_available_threads, threads)
-    app_server_unavailable_count = mirrorable_count - len(threads)
+    scope_threads = await asyncio.to_thread(deps.load_mirror_scope_threads, limit)
+    threads = await asyncio.to_thread(deps.filter_app_server_available_threads, scope_threads)
+    app_server_unavailable_count = len(scope_threads) - len(threads)
     if app_server_unavailable_count:
         deps.log(f"mirror_sync_app_server_unavailable count={app_server_unavailable_count}")
 
@@ -166,7 +164,7 @@ async def sync_codex_mirror(
         cleanup_result = await cleanup_full_mirror_sync(
             guild,
             category,
-            threads,
+            scope_threads,
             bot_user_id=deps.get_bot_user_id(bot),
             db_path=deps.db_path,
             get_project_key=deps.get_project_key,

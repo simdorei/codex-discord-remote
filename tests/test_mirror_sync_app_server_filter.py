@@ -111,8 +111,8 @@ class MirrorSyncAppServerFilterTests(unittest.IsolatedAsyncioTestCase):
 
             self.assertIn("threads: 1", output)
             self.assertIn("app_server_unavailable_threads: 1", output)
-            self.assertIn("stale_threads_removed: 1", output)
-            self.assertEqual(rows, [("available-thread",)])
+            self.assertIn("stale_threads_removed: 0", output)
+            self.assertEqual(rows, [("available-thread",), ("ghost-thread",)])
         finally:
             bot.MIRROR_DB_PATH = old_db_path
             bridge.load_user_root_threads = old_load_user_root_threads

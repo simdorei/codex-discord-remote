@@ -163,7 +163,9 @@ class MirrorSyncStateRootScopeTests(unittest.IsolatedAsyncioTestCase):
                 mirrored_ids: list[str] = []
 
                 bridge.load_user_root_threads = lambda limit=0: [ordinary, gpt]
-                bot.filter_mirrorable_threads = lambda threads: list(threads)
+                bot.filter_mirrorable_threads = lambda _threads: (_ for _ in ()).throw(
+                    AssertionError("mirror sync must use the list scope without project filtering")
+                )
                 bot.filter_app_server_available_threads = lambda threads: list(threads)
 
                 async def get_project_channel(guild, category, project_key, project_name):

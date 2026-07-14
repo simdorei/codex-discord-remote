@@ -197,6 +197,7 @@ def build_mirror_check(
     app_server_unavailable_count: int = 0,
     scoped_project_keys: set[str] | None = None,
     access_statuses: MirrorAccessStatusMap | None = None,
+    excluded_db_thread_ids: set[str] | frozenset[str] = frozenset(),
 ) -> str:
     init_mirror_db_func()
     resolved_threads = _resolve_mirror_check_threads(threads, limit, bridge_module)
@@ -215,6 +216,7 @@ def build_mirror_check(
     parsed_rows = [
         _apply_mirror_check_row_status(mirror_check_row_from_db(row), access_statuses)
         for row in rows
+        if str(row["codex_thread_id"] or "") not in excluded_db_thread_ids
     ]
     summary = summarize_mirror_check(expected, parsed_rows)
     return format_mirror_check_summary(
