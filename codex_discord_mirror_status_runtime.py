@@ -27,6 +27,7 @@ class MirrorStatusRuntimeDeps:
     init_mirror_db: Callable[[], None]
     get_mirror_status_bridge_module: Callable[[], MirrorStatusBridge]
     load_mirror_scope_threads: Callable[[int | None], list[ThreadInfo]]
+    load_mirror_check_scope_threads: Callable[[int | None], list[ThreadInfo]]
     filter_threads_for_discord_channel: Callable[[list[ThreadInfo], int | None], list[ThreadInfo]]
     filter_mirrorable_threads: Callable[[list[ThreadInfo]], list[ThreadInfo]]
     filter_app_server_available_threads: Callable[[list[ThreadInfo]], list[ThreadInfo]]
@@ -130,16 +131,14 @@ def build_mirror_check(
     access_statuses: discord_mirror_status.MirrorAccessStatusMap | None = None,
     deps: MirrorStatusRuntimeDeps,
 ) -> str:
-    threads = _ordinary_threads(deps.load_mirror_scope_threads(limit), deps)
-    threads = _ordinary_threads(deps.filter_mirrorable_threads(threads), deps)
+    threads = deps.load_mirror_check_scope_threads(limit)
     threads = deps.filter_threads_for_discord_channel(threads, channel_id)
-    mirrorable_count = len(threads)
-    threads = deps.filter_app_server_available_threads(threads)
-    app_server_unavailable_count = mirrorable_count - len(threads)
+    available_threads = deps.filter_app_server_available_threads(threads)
+    app_server_unavailable_count = len(threads) - len(available_threads)
     bridge_module = deps.get_mirror_status_bridge_module()
     archive_recommended_count = sum(
         1
-        for thread in threads
+        for thread in available_threads
         if bridge_module.should_recommend_archive(
             thread,
             bridge_module.get_thread_context_usage(thread),

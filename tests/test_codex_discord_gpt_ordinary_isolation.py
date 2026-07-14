@@ -180,13 +180,24 @@ class GptOrdinaryIsolationTests(unittest.IsolatedAsyncioTestCase):
             with closing(sqlite3.connect(db_path)) as conn:
                 init_store_schema(conn)
                 conn.row_factory = sqlite3.Row
-                _insert_owner(conn, "gpt-status", 40, "inactive")
+                _insert_owner(conn, "gpt-source", 40, "inactive")
                 _insert_owner(conn, "ordinary", 41, "active", managed_by="ordinary", project_key=ORDINARY_KEY)
-                row_sets = (status_queries.load_mirror_list_rows(conn, 10, None), status_queries.load_mirror_list_rows(conn, 10, ["gpt-status", "ordinary"]), status_queries.load_mirror_check_rows(conn, None), status_queries.load_mirror_check_rows(conn, {GPT_KEY, ORDINARY_KEY}))
+                row_sets = (status_queries.load_mirror_list_rows(conn, 10, None), status_queries.load_mirror_list_rows(conn, 10, ["gpt-source", "ordinary"]), status_queries.load_mirror_check_rows(conn, None), status_queries.load_mirror_check_rows(conn, {GPT_KEY, ORDINARY_KEY}))
                 for rows in row_sets:
                     self.assertEqual([row["codex_thread_id"] for row in rows], ["ordinary"])
 
-                status_deps = status_runtime.MirrorStatusRuntimeDeps(db_path, lambda: None, lambda: FakeMirrorBridge(), lambda _limit: [gpt_thread, ordinary_thread], lambda items, _channel_id: items, lambda items: items, lambda items: items, lambda item: str(item.cwd or ""), lambda item: item.title)
+                status_deps = status_runtime.MirrorStatusRuntimeDeps(
+                    db_path=db_path,
+                    init_mirror_db=lambda: None,
+                    get_mirror_status_bridge_module=lambda: FakeMirrorBridge(),
+                    load_mirror_scope_threads=lambda _limit: [gpt_thread, ordinary_thread],
+                    load_mirror_check_scope_threads=lambda _limit: [ordinary_thread],
+                    filter_threads_for_discord_channel=lambda items, _channel_id: items,
+                    filter_mirrorable_threads=lambda items: items,
+                    filter_app_server_available_threads=lambda items: items,
+                    get_project_key=lambda item: str(item.cwd or ""),
+                    get_project_name=lambda item: item.title,
+                )
                 _, scoped_ids = status_runtime.resolve_mirror_list_scope(None, deps=status_deps)
                 self.assertEqual(scoped_ids, ["ordinary"])
 
@@ -210,7 +221,7 @@ class GptOrdinaryIsolationTests(unittest.IsolatedAsyncioTestCase):
                 finally:
                     FakeMirrorBridge.thread = original_bridge_thread
                 for output in (*list_outputs, *check_outputs):
-                    self.assertNotIn("gpt-status", output)
+                    self.assertNotIn("gpt-source", output)
                 self.assertTrue(all("ordinary" in output for output in list_outputs))
                 self.assertTrue(all("codex_threads: 1" in output and "mirrored_threads: 1" in output for output in check_outputs))
 
@@ -273,6 +284,22 @@ def _unreachable() -> Never:
 
 
 def _runtime(db_path: Path, threads: list[ThreadInfo], events: list[str]) -> mirror_runtime.MirrorRuntime[RuntimeBot, str, str, str, str]:
+    class ScopeBridge:
+        def load_user_root_threads(self) -> list[ThreadInfo]:
+            return list(threads)
+
+        def load_recent_threads(self, limit: int = 20) -> list[ThreadInfo]:
+            return list(threads[:limit])
+
+        def filter_thread_list_for_target(
+            self,
+            items: list[ThreadInfo],
+            target_thread_id: str,
+            cwd: str | None,
+        ) -> list[ThreadInfo]:
+            _ = cwd
+            return [item for item in items if item.id == target_thread_id]
+
     def load(limit: int | None) -> list[ThreadInfo]:
         events.append(f"load:{limit}")
         return threads
@@ -301,7 +328,7 @@ def _runtime(db_path: Path, threads: list[ThreadInfo], events: list[str]) -> mir
         return "unused"
 
     deps = mirror_runtime.MirrorRuntimeDeps[RuntimeBot, str, str, str, str](
-        lambda: db_path, _unreachable, load, lambda items, _channel_id: items, mirrorable, lambda items: items,
+        lambda: db_path, lambda: ScopeBridge(), load, lambda items, _channel_id: items, mirrorable, lambda items: items,
         guild, category, lambda _id, _ref: threads[0], lambda item: str(item.cwd or ""), lambda item: item.title,
         lambda _key, _name, _id: None, project, thread, lambda _id: None, lambda _id: None,
         lambda left, right: left == right, _unreachable, unused_sync, lambda _bot: None, lambda: None,

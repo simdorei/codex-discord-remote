@@ -4,8 +4,6 @@ import sqlite3
 from pathlib import Path
 from typing import TypeAlias
 
-import codex_desktop_bridge_session_files as session_file_threads
-import codex_desktop_bridge_session_index as session_index
 import codex_desktop_bridge_state as bridge_state
 from codex_thread_models import ThreadInfo
 
@@ -93,8 +91,7 @@ def load_recent_threads(limit: int = 20) -> list[ThreadInfo]:
 
 
 def load_user_root_threads(limit: int = 0) -> list[ThreadInfo]:
-    # Keep mirror discovery fail-closed to local Codex user threads. Other app
-    # conversations and subagent sessions require an explicit contract change.
+    # This scope intentionally represents state DB rows, not session-file guesses.
     query = "\n".join(
         (
             "SELECT id, title, cwd, updated_at, rollout_path, model, reasoning_effort, tokens_used",
@@ -110,14 +107,6 @@ def load_user_root_threads(limit: int = 0) -> list[ThreadInfo]:
         rows: list[ActiveThreadRow] = conn.execute(query).fetchall()
 
     threads = [_thread_from_active_row(row) for row in rows]
-    threads.extend(
-        session_file_threads.load_missing_vscode_rollout_threads(
-            bridge_state.CODEX_HOME / "sessions",
-            {thread.id for thread in threads},
-            session_thread_names=session_index.load_session_thread_names(),
-        )
-    )
-    threads.sort(key=lambda thread: thread.updated_at, reverse=True)
     if limit > 0:
         return threads[:limit]
     return threads

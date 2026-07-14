@@ -106,13 +106,20 @@ class MirrorRuntime(Generic[BotT, GuildT, CategoryT, ProjectChannelT, ThreadChan
     def _load_ordinary_scope_threads(self, limit: int | None) -> list[ThreadInfo]:
         return self._ordinary_threads(self.deps.load_mirror_scope_threads(limit))
 
+    def _load_mirror_check_scope_threads(self, limit: int | None) -> list[ThreadInfo]:
+        return discord_mirror_scope.load_mirror_check_scope_threads(
+            self.deps.get_mirror_scope_bridge_module(),
+            self.deps.get_db_path(),
+            limit,
+        )
+
     def filter_threads_for_discord_channel(
         self,
         threads: list[ThreadInfo],
         channel_id: int | None,
     ) -> list[ThreadInfo]:
         return discord_mirror_scope.filter_threads_for_discord_channel(
-            self._ordinary_threads(threads),
+            threads,
             channel_id,
             bridge_module=self.deps.get_mirror_scope_bridge_module(),
             get_mirrored_codex_thread_id=self.deps.get_mirrored_codex_thread_id,
@@ -193,7 +200,8 @@ class MirrorRuntime(Generic[BotT, GuildT, CategoryT, ProjectChannelT, ThreadChan
             init_mirror_db=self.deps.init_mirror_db,
             get_mirror_status_bridge_module=self.deps.get_mirror_status_bridge_module,
             load_mirror_scope_threads=self._load_ordinary_scope_threads,
-            filter_threads_for_discord_channel=self.deps.filter_threads_for_discord_channel,
+            load_mirror_check_scope_threads=self._load_mirror_check_scope_threads,
+            filter_threads_for_discord_channel=self.filter_threads_for_discord_channel,
             filter_mirrorable_threads=self._mirrorable_ordinary_threads,
             filter_app_server_available_threads=self.deps.filter_app_server_available_threads,
             get_project_key=self.deps.get_project_key,

@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from pathlib import Path
 from typing import Protocol
 
+import codex_discord_user_root_scope as discord_user_root_scope
 from codex_thread_models import ThreadInfo
 
 
@@ -30,6 +32,17 @@ def load_mirror_scope_threads(
     if limit is None:
         return bridge_module.load_user_root_threads()
     return bridge_module.load_recent_threads(bounded_mirror_limit(limit))
+
+
+def load_mirror_check_scope_threads(
+    bridge_module: MirrorScopeBridge,
+    db_path: Path,
+    limit: int | None = None,
+) -> list[ThreadInfo]:
+    return discord_user_root_scope.exclude_gpt_registered_threads(
+        load_mirror_scope_threads(bridge_module, limit),
+        db_path=db_path,
+    )
 
 
 def filter_threads_for_discord_channel(

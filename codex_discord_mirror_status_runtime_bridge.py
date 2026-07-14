@@ -26,6 +26,7 @@ class MirrorStatusRuntime:
     init_mirror_db: InitMirrorDbFunc
     get_mirror_status_bridge_module: GetMirrorStatusBridgeFunc
     load_mirror_scope_threads: LoadMirrorScopeThreadsFunc
+    load_mirror_check_scope_threads: LoadMirrorScopeThreadsFunc
     filter_threads_for_discord_channel: FilterThreadsForDiscordChannelFunc
     filter_mirrorable_threads: FilterMirrorableThreadsFunc
     filter_app_server_available_threads: FilterAppServerAvailableThreadsFunc
@@ -38,6 +39,7 @@ class MirrorStatusRuntime:
             init_mirror_db=self.init_mirror_db,
             get_mirror_status_bridge_module=self.get_mirror_status_bridge_module,
             load_mirror_scope_threads=self.load_mirror_scope_threads,
+            load_mirror_check_scope_threads=self.load_mirror_check_scope_threads,
             filter_threads_for_discord_channel=self.filter_threads_for_discord_channel,
             filter_mirrorable_threads=self.filter_mirrorable_threads,
             filter_app_server_available_threads=self.filter_app_server_available_threads,

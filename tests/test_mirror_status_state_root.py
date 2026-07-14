@@ -26,6 +26,7 @@ class MirrorStatusStateRootTests(unittest.TestCase):
 
     def test_build_mirror_check_defaults_to_state_root_threads(self) -> None:
         bridge = bridge_module()
+        old_db_path = bot.MIRROR_DB_PATH
         old_load_user_root_threads = bridge.load_user_root_threads
         old_filter_mirrorable_threads = bot.filter_mirrorable_threads
         old_filter_app_server_available_threads = bot.filter_app_server_available_threads
@@ -42,7 +43,10 @@ class MirrorStatusStateRootTests(unittest.TestCase):
             observed_unavailable_counts.append(kwargs["app_server_unavailable_count"])
             return "Mirror check"
 
+        mirror_temp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
         try:
+            bot.MIRROR_DB_PATH = Path(mirror_temp.name) / "mirror.sqlite"
+            bot.init_mirror_db()
             bridge.load_user_root_threads = fake_load_user_root_threads
             bot.filter_mirrorable_threads = lambda threads: list(threads)
             bot.filter_app_server_available_threads = lambda threads: list(threads)
@@ -54,13 +58,16 @@ class MirrorStatusStateRootTests(unittest.TestCase):
             self.assertEqual(observed_threads, [[root_thread]])
             self.assertEqual(observed_unavailable_counts, [0])
         finally:
+            bot.MIRROR_DB_PATH = old_db_path
             bridge.load_user_root_threads = old_load_user_root_threads
             bot.filter_mirrorable_threads = old_filter_mirrorable_threads
             bot.filter_app_server_available_threads = old_filter_app_server_available_threads
             bot.discord_mirror_status.build_mirror_check = old_status_builder
+            mirror_temp.cleanup()
 
     def test_build_mirror_check_reports_app_server_unavailable_threads(self) -> None:
         bridge = bridge_module()
+        old_db_path = bot.MIRROR_DB_PATH
         old_load_user_root_threads = bridge.load_user_root_threads
         old_filter_mirrorable_threads = bot.filter_mirrorable_threads
         old_filter_app_server_available_threads = bot.filter_app_server_available_threads
@@ -75,7 +82,10 @@ class MirrorStatusStateRootTests(unittest.TestCase):
             observed_unavailable_counts.append(kwargs["app_server_unavailable_count"])
             return "Mirror check"
 
+        mirror_temp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
         try:
+            bot.MIRROR_DB_PATH = Path(mirror_temp.name) / "mirror.sqlite"
+            bot.init_mirror_db()
             bridge.load_user_root_threads = lambda limit=0: [available, ghost]
             bot.filter_mirrorable_threads = lambda threads: list(threads)
             bot.filter_app_server_available_threads = lambda threads: [
@@ -86,11 +96,69 @@ class MirrorStatusStateRootTests(unittest.TestCase):
             output = bot.build_mirror_check()
 
             self.assertEqual(output, "Mirror check")
-            self.assertEqual(observed_threads, [[available]])
+            self.assertEqual(observed_threads, [[available, ghost]])
             self.assertEqual(observed_unavailable_counts, [1])
         finally:
+            bot.MIRROR_DB_PATH = old_db_path
             bridge.load_user_root_threads = old_load_user_root_threads
             bot.filter_mirrorable_threads = old_filter_mirrorable_threads
+            bot.filter_app_server_available_threads = old_filter_app_server_available_threads
+            bot.discord_mirror_status.build_mirror_check = old_status_builder
+            mirror_temp.cleanup()
+
+    def test_build_mirror_check_uses_root_db_minus_gpt_db_ids(self) -> None:
+        bridge = bridge_module()
+        old_db_path = bot.MIRROR_DB_PATH
+        old_load_user_root_threads = bridge.load_user_root_threads
+        old_filter_app_server_available_threads = bot.filter_app_server_available_threads
+        old_status_builder = bot.discord_mirror_status.build_mirror_check
+        unregistered_projectless = self.make_thread(
+            "ordinary-projectless",
+            r"C:\Users\User\Documents\Codex\2026-07-14\new-chat",
+        )
+        registered_gpt = self.make_thread("registered-gpt", str(Path.cwd()))
+        observed_threads: list[list[ThreadInfo]] = []
+
+        def fake_build_mirror_check(**kwargs) -> str:
+            observed_threads.append(kwargs["threads"])
+            return "Mirror check"
+
+        try:
+            with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp_dir:
+                bot.MIRROR_DB_PATH = Path(temp_dir) / "mirror.sqlite"
+                bot.init_mirror_db()
+                with sqlite3.connect(bot.MIRROR_DB_PATH) as conn:
+                    _ = conn.execute(
+                        "INSERT INTO mirror_threads ("
+                        "codex_thread_id, project_key, thread_title, "
+                        "discord_channel_id, discord_thread_id, updated_at, "
+                        "managed_by, lifecycle_state"
+                        ") VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                        (
+                            registered_gpt.id,
+                            "codex:chats",
+                            registered_gpt.title,
+                            111,
+                            222,
+                            1.0,
+                            "gpt_chat",
+                            "inactive",
+                        ),
+                    )
+                bridge.load_user_root_threads = lambda limit=0: [
+                    unregistered_projectless,
+                    registered_gpt,
+                ]
+                bot.filter_app_server_available_threads = lambda threads: list(threads)
+                bot.discord_mirror_status.build_mirror_check = fake_build_mirror_check
+
+                output = bot.build_mirror_check()
+
+            self.assertEqual(output, "Mirror check")
+            self.assertEqual(observed_threads, [[unregistered_projectless]])
+        finally:
+            bot.MIRROR_DB_PATH = old_db_path
+            bridge.load_user_root_threads = old_load_user_root_threads
             bot.filter_app_server_available_threads = old_filter_app_server_available_threads
             bot.discord_mirror_status.build_mirror_check = old_status_builder
 

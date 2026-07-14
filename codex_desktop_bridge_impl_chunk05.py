@@ -5,7 +5,7 @@ from codex_desktop_bridge_impl_common import *
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from codex_desktop_bridge_impl_type_exports import typed_choose_thread_from_args as _choose_thread_from_args, typed_make_new_command_deps as _make_new_command_deps, build_workspace_ref_map, check_codex_app_update, choose_thread, click_window, collapse_list_text, describe_thread_context_usage, discover_codex_desktop_executable, ensure_codex_composer_focus, ensure_codex_desktop_executable_configured, find_codex_window, focus_window, format_thread_model_display, format_timestamp, format_title_preview, format_token_k, get_busy_threads, get_clipboard_text, get_high_context_threads, get_last_user_and_assistant_messages, get_live_pending_approval_display_lines, get_pending_interactive_summary, get_saved_thread_settings, get_selected_thread_id, get_thread_busy_state, get_thread_collaboration_mode, get_thread_context_usage, get_thread_service_tier, get_thread_slot, get_thread_ui_name, get_thread_workspace_name, get_thread_workspace_ref, is_protocol_registered, is_thread_busy, load_archived_threads, load_recent_threads, load_user_root_threads, make_console_safe_text, remember_thread_settings, resolve_thread_ref, send_hotkey, send_key_event, set_clipboard_text, should_recommend_archive, start_codex_desktop_process, stop_codex_desktop_processes, summarize_interactive_lines
+    from codex_desktop_bridge_impl_type_exports import typed_choose_thread_from_args as _choose_thread_from_args, typed_make_new_command_deps as _make_new_command_deps, build_workspace_ref_map, check_codex_app_update, choose_thread, click_window, collapse_list_text, describe_thread_context_usage, discover_codex_desktop_executable, ensure_codex_composer_focus, ensure_codex_desktop_executable_configured, find_codex_window, focus_window, format_thread_model_display, format_timestamp, format_title_preview, format_token_k, get_busy_threads, get_clipboard_text, get_high_context_threads, get_last_user_and_assistant_messages, get_live_pending_approval_display_lines, get_pending_interactive_summary, get_saved_thread_settings, get_selected_thread_id, get_thread_busy_state, get_thread_collaboration_mode, get_thread_context_usage, get_thread_service_tier, get_thread_slot, get_thread_ui_name, get_thread_workspace_name, get_thread_workspace_ref, is_protocol_registered, is_thread_busy, load_archived_threads, load_ordinary_user_root_threads, load_recent_threads, load_user_root_threads, make_console_safe_text, remember_thread_settings, resolve_thread_ref, send_hotkey, send_key_event, set_clipboard_text, should_recommend_archive, start_codex_desktop_process, stop_codex_desktop_processes, summarize_interactive_lines
 
 def _make_prompt_sender_deps() -> prompt_sender.PromptSenderDeps:
     return prompt_sender.PromptSenderDeps(
@@ -65,7 +65,7 @@ def _make_thread_list_deps() -> thread_list.ThreadListDeps:
 def command_list(args: argparse.Namespace) -> int:
     limit = _arg_int(args, "limit", 50)
     if _arg_bool(args, "db_root"):
-        threads = load_user_root_threads(limit=limit)
+        threads = load_ordinary_user_root_threads(limit=limit)
     else:
         threads = load_recent_threads(limit=limit)
     print_thread_list(threads)
