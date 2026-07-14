@@ -6,7 +6,6 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-import codex_desktop_bridge_session_files as session_file_threads
 import codex_desktop_bridge_state as bridge_state
 import codex_desktop_bridge_thread_store as thread_store
 import codex_desktop_bridge_thread_store_db as thread_store_db
@@ -153,14 +152,7 @@ class ThreadStoreDbScopeTests(unittest.TestCase):
                     ],
                 )
 
-            with (
-                patch.object(bridge_state, "STATE_DB_PATH", db_path),
-                patch.object(
-                    session_file_threads,
-                    "load_missing_vscode_rollout_threads",
-                    return_value=[],
-                ),
-            ):
+            with patch.object(bridge_state, "STATE_DB_PATH", db_path):
                 threads = thread_store_db.load_user_root_threads()
 
         self.assertEqual([thread.id for thread in threads], ["codex-project", "codex-projectless"])

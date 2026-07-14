@@ -12,6 +12,7 @@ import codex_discord_mirror_scope as discord_mirror_scope
 import codex_discord_mirror_single_thread as discord_mirror_single_thread
 import codex_discord_mirror_status_runtime_bridge as discord_mirror_status_runtime_bridge
 import codex_discord_mirror_sync as discord_mirror_sync
+import codex_discord_user_root_scope as discord_user_root_scope
 from codex_thread_models import ThreadInfo
 
 
@@ -61,9 +62,15 @@ class MirrorRuntime(Generic[BotT, GuildT, CategoryT, ProjectChannelT, ThreadChan
     deps: MirrorRuntimeDeps[BotT, GuildT, CategoryT, ProjectChannelT, ThreadChannelT]
 
     def load_mirror_scope_threads(self, limit: int | None = None) -> list[ThreadInfo]:
-        return discord_mirror_scope.load_mirror_scope_threads(
+        threads = discord_mirror_scope.load_mirror_scope_threads(
             self.deps.get_mirror_scope_bridge_module(),
             limit,
+        )
+        if limit is not None:
+            return threads
+        return discord_user_root_scope.exclude_gpt_registered_threads(
+            threads,
+            db_path=self.deps.get_db_path(),
         )
 
     def filter_threads_for_discord_channel(
@@ -89,7 +96,7 @@ class MirrorRuntime(Generic[BotT, GuildT, CategoryT, ProjectChannelT, ThreadChan
                 db_path=self.deps.get_db_path(),
                 get_mirror_guild=self.deps.get_mirror_guild,
                 get_or_create_mirror_category=self.deps.get_or_create_mirror_category,
-                load_mirror_scope_threads=self.deps.load_mirror_scope_threads,
+                load_mirror_scope_threads=self.load_mirror_scope_threads,
                 filter_mirrorable_threads=self.deps.filter_mirrorable_threads,
                 filter_app_server_available_threads=self.deps.filter_app_server_available_threads,
                 get_project_key=self.deps.get_project_key,
@@ -157,7 +164,7 @@ class MirrorRuntime(Generic[BotT, GuildT, CategoryT, ProjectChannelT, ThreadChan
             get_db_path=self.deps.get_db_path,
             init_mirror_db=self.deps.init_mirror_db,
             get_mirror_status_bridge_module=self.deps.get_mirror_status_bridge_module,
-            load_mirror_scope_threads=self.deps.load_mirror_scope_threads,
+            load_mirror_scope_threads=self.load_mirror_scope_threads,
             filter_threads_for_discord_channel=self.deps.filter_threads_for_discord_channel,
             filter_mirrorable_threads=self.deps.filter_mirrorable_threads,
             filter_app_server_available_threads=self.deps.filter_app_server_available_threads,

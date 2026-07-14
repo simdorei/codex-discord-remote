@@ -15,6 +15,7 @@ import codex_discord_mirror_scope as discord_mirror_scope
 import codex_discord_mirror_stale as discord_mirror_stale
 import codex_discord_mirror_sync_result as discord_mirror_sync_result
 import codex_discord_store as discord_store
+import codex_discord_user_root_scope as discord_user_root_scope
 from codex_discord_id_values import coerce_discord_id_value
 
 BotT = TypeVar("BotT")
@@ -159,6 +160,9 @@ async def sync_codex_mirror(
     )
 
     if limit is None:
+        protected_thread_ids = discord_user_root_scope.load_gpt_registered_thread_ids(
+            deps.db_path
+        )
         cleanup_result = await cleanup_full_mirror_sync(
             guild,
             category,
@@ -166,6 +170,12 @@ async def sync_codex_mirror(
             bot_user_id=deps.get_bot_user_id(bot),
             db_path=deps.db_path,
             get_project_key=deps.get_project_key,
+            protected_thread_ids=protected_thread_ids,
+            protected_project_keys=(
+                {discord_user_root_scope.GPT_PROJECT_KEY}
+                if protected_thread_ids
+                else set()
+            ),
         )
         stale_threads = cleanup_result.stale_threads
         stale_projects = cleanup_result.stale_projects
@@ -211,9 +221,13 @@ async def cleanup_full_mirror_sync(
     bot_user_id: int | None,
     db_path: Path,
     get_project_key: Callable[[CleanupThreadT], str],
+    protected_thread_ids: set[str] | frozenset[str] = frozenset(),
+    protected_project_keys: set[str] | frozenset[str] = frozenset(),
 ) -> MirrorFullCleanupResult:
-    valid_thread_ids = {thread.id for thread in threads}
-    valid_project_keys = {get_project_key(thread) for thread in threads}
+    valid_thread_ids = {thread.id for thread in threads} | set(protected_thread_ids)
+    valid_project_keys = {get_project_key(thread) for thread in threads} | set(
+        protected_project_keys
+    )
     stale_threads = cast(
         list[discord_mirror_stale.StaleMirrorThreadRow],
         discord_store.get_stale_mirror_thread_rows(db_path, valid_thread_ids),

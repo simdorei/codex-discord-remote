@@ -4,6 +4,8 @@ from codex_desktop_bridge_impl_common import *
 
 from typing import TYPE_CHECKING
 
+import codex_discord_user_root_scope as discord_user_root_scope
+
 if TYPE_CHECKING:
     from codex_desktop_bridge_impl_type_exports import find_codex_window
 
@@ -74,6 +76,14 @@ def load_recent_threads(limit: int = 20) -> list[ThreadInfo]:
 def load_user_root_threads(limit: int = 0) -> list[ThreadInfo]:
     _sync_bridge_path_overrides()
     return thread_store.load_user_root_threads(limit)
+
+
+def load_ordinary_user_root_threads(limit: int = 0) -> list[ThreadInfo]:
+    _sync_bridge_path_overrides()
+    return discord_user_root_scope.load_ordinary_user_root_threads(
+        load_user_root_threads,
+        limit=limit,
+    )
 
 
 def load_archived_threads(limit: int = 20) -> list[ThreadInfo]:
@@ -161,6 +171,7 @@ __all__ = (
     "load_archived_threads",
     "load_bridge_state",
     "load_json",
+    "load_ordinary_user_root_threads",
     "load_recent_threads",
     "load_session_thread_names",
     "load_user_root_threads",

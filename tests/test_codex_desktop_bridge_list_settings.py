@@ -14,7 +14,7 @@ from codex_thread_models import ThreadInfo
 
 
 class DesktopBridgeListSettingsTests(unittest.TestCase):
-    def test_load_user_root_threads_includes_vscode_rollout_missing_from_state_db(self) -> None:
+    def test_load_user_root_threads_ignores_rollout_missing_from_state_db(self) -> None:
         original_codex_home = bridge.CODEX_HOME
         original_state_db_path = bridge.STATE_DB_PATH
         try:
@@ -106,17 +106,13 @@ class DesktopBridgeListSettingsTests(unittest.TestCase):
 
                 threads = bridge.load_user_root_threads()
 
-            self.assertEqual([thread.id for thread in threads], [missing_id, "root-1"])
-            self.assertEqual(threads[0].title, "new local session")
-            self.assertEqual(threads[0].rollout_path, str(missing_session))
-            self.assertEqual(threads[0].model, "gpt-test")
-            self.assertEqual(threads[0].reasoning_effort, "high")
+            self.assertEqual([thread.id for thread in threads], ["root-1"])
         finally:
             bridge.CODEX_HOME = original_codex_home
             bridge.STATE_DB_PATH = original_state_db_path
 
     def test_command_list_keeps_db_root_list_global_when_target_thread_exists(self) -> None:
-        original_load_user_root_threads = bridge.load_user_root_threads
+        original_load_ordinary_user_root_threads = bridge.load_ordinary_user_root_threads
         original_choose_thread = bridge.choose_thread
         original_print_thread_list = bridge.print_thread_list
         try:
@@ -151,7 +147,13 @@ class DesktopBridgeListSettingsTests(unittest.TestCase):
                 tokens_used=0,
             )
             printed: list[list[str]] = []
-            bridge.load_user_root_threads = lambda limit=0: [target_thread, same_project, other_project]
+            observed_limits: list[int] = []
+
+            def load_ordinary_user_root_threads(limit: int = 0) -> list[ThreadInfo]:
+                observed_limits.append(limit)
+                return [target_thread, same_project, other_project]
+
+            bridge.load_ordinary_user_root_threads = load_ordinary_user_root_threads
             bridge.choose_thread = lambda thread_id, cwd: target_thread
             bridge.print_thread_list = lambda threads: printed.append([thread.id for thread in threads])
 
@@ -161,8 +163,9 @@ class DesktopBridgeListSettingsTests(unittest.TestCase):
 
             self.assertEqual(result, 0)
             self.assertEqual(printed, [["target", "same", "other"]])
+            self.assertEqual(observed_limits, [50])
         finally:
-            bridge.load_user_root_threads = original_load_user_root_threads
+            bridge.load_ordinary_user_root_threads = original_load_ordinary_user_root_threads
             bridge.choose_thread = original_choose_thread
             bridge.print_thread_list = original_print_thread_list
 
