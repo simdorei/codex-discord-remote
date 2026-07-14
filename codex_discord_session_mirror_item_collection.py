@@ -50,6 +50,7 @@ def _append_image_item(
     items: list[SessionMirrorItem],
     event: SessionEvent,
     image_url: str,
+    image_index: int,
 ) -> None:
     _append_item(
         ctx,
@@ -61,6 +62,7 @@ def _append_image_item(
         text=CODEX_IMAGE_OUTPUT_TEXT,
     )
     item = items[-1]
+    item["digest"] = ctx.make_text_digest(item["digest"], str(image_index))
     item["attachment_url"] = image_url
     item["attachment_filename"] = CODEX_IMAGE_OUTPUT_FILENAME
 
@@ -114,7 +116,7 @@ def _collect_function_output_attachments(
 ) -> None:
     if not isinstance(output, list):
         return
-    for part in output:
+    for part_index, part in enumerate(output):
         if not isinstance(part, dict):
             continue
         if part.get("type") != "input_image":
@@ -133,7 +135,7 @@ def _collect_function_output_attachments(
             continue
         image_url = part.get("image_url")
         if isinstance(image_url, str) and image_url.startswith("data:image/"):
-            _append_image_item(ctx, items, event, image_url)
+            _append_image_item(ctx, items, event, image_url, part_index)
 
 
 def _collect_function_item(
@@ -148,7 +150,7 @@ def _collect_function_item(
         if notice:
             _append_item(ctx, items, event, kind="interactive", role="assistant", phase="interactive", text=notice)
         return True
-    if payload_type == "function_call_output":
+    if payload_type in {"function_call_output", "custom_tool_call_output"}:
         _collect_function_output_attachments(ctx, items, event, payload.get("output"))
         output_text = str(payload.get("output") or "").strip()
         if output_text and "rejected by user" in output_text.lower():

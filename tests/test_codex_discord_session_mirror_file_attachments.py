@@ -23,6 +23,50 @@ def _collect_items(events: list[JsonEvent]) -> list[dict[str, str]]:
 
 
 class SessionMirrorFileAttachmentTests(unittest.TestCase):
+    def test_collect_session_mirror_items_preserves_multiple_tool_images(self) -> None:
+        events: list[JsonEvent] = [
+            {
+                "timestamp": "1",
+                "type": "response_item",
+                "payload": {
+                    "type": "function_call_output",
+                    "output": [
+                        {"type": "input_image", "image_url": "data:image/png;base64,aGVsbG8="},
+                        {"type": "input_image", "image_url": "data:image/png;base64,d29ybGQ="},
+                    ],
+                },
+            }
+        ]
+
+        items = _collect_items(events)
+
+        self.assertEqual([item["kind"] for item in items], ["image", "image"])
+        self.assertEqual(
+            [item["attachment_url"] for item in items],
+            ["data:image/png;base64,aGVsbG8=", "data:image/png;base64,d29ybGQ="],
+        )
+        self.assertNotEqual(items[0]["digest"], items[1]["digest"])
+
+    def test_collect_session_mirror_items_preserves_custom_tool_images(self) -> None:
+        events: list[JsonEvent] = [
+            {
+                "timestamp": "1",
+                "type": "response_item",
+                "payload": {
+                    "type": "custom_tool_call_output",
+                    "output": [
+                        {"type": "input_image", "image_url": "data:image/png;base64,aGVsbG8="}
+                    ],
+                },
+            }
+        ]
+
+        items = _collect_items(events)
+
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]["kind"], "image")
+        self.assertEqual(items[0]["attachment_url"], "data:image/png;base64,aGVsbG8=")
+
     def test_collect_session_mirror_items_preserves_tool_file_outputs(self) -> None:
         events: list[JsonEvent] = [
             {
