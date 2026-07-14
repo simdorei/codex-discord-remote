@@ -59,8 +59,13 @@ async def _ensure_stored_mirror_thread_channel(
     *,
     deps: MirrorChannelDeps,
 ) -> discord.Thread:
-    _, thread_id = mirror_thread_store.stored_mirror_thread_ids(row, codex_thread, project_channel)
+    thread_id = int(row[1])
     try:
+        _, thread_id = mirror_thread_store.stored_mirror_thread_ids(
+            row,
+            codex_thread,
+            project_channel,
+        )
         discord_thread = await mirror_thread_store.fetch_stored_discord_thread(
             codex_thread,
             project_channel,
@@ -109,6 +114,7 @@ def _is_stale_mirror_thread_error(message: str) -> bool:
         "NotFound",
         "not found",
         "not Thread",
+        "not current project channel",
         "not project channel",
         "404",
         "403",

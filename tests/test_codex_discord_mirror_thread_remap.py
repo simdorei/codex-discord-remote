@@ -178,7 +178,7 @@ class MirrorThreadRemapTests(unittest.IsolatedAsyncioTestCase):
                 codex_thread,
                 "Project",
                 "unused",
-                222,
+                999,
                 333,
                 deps=deps,
             )
@@ -205,7 +205,7 @@ class MirrorThreadRemapTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIs(result, reusable_thread)
         self.assertEqual(row, (444,))
-        self.assertIn("not project channel 222", "\n".join(logs))
+        self.assertIn("not current project channel 222", "\n".join(logs))
 
 
 if __name__ == "__main__":
