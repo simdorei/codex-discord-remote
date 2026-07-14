@@ -59,3 +59,11 @@ def mark_processed_discord_message_id(db_path: Path, message_id: int, now: float
             + "VALUES (?, ?)",
             (int(message_id), current),
         )
+
+
+def release_persistent_discord_message_id(db_path: Path, message_id: int) -> None:
+    with sqlite3.connect(db_path) as conn:
+        _ = conn.execute(
+            "DELETE FROM discord_processed_messages WHERE message_id = ?",
+            (int(message_id),),
+        )

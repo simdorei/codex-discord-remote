@@ -282,9 +282,13 @@ def update_identified(
 def load_journal_rows(db_path: Path) -> list[JournalRow]:
     _init_db(db_path)
     with closing(sqlite3.connect(db_path)) as conn:
-        return conn.execute(
-            "SELECT * FROM gpt_chat_creation_ops ORDER BY codex_thread_id"
-        ).fetchall()
+        return load_journal_rows_from_connection(conn)
+
+
+def load_journal_rows_from_connection(conn: sqlite3.Connection) -> list[JournalRow]:
+    return conn.execute(
+        "SELECT * FROM gpt_chat_creation_ops ORDER BY codex_thread_id"
+    ).fetchall()
 
 
 def delete_operation(conn: sqlite3.Connection, operation: GptCreationOperation) -> int:

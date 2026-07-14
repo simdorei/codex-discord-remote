@@ -76,6 +76,7 @@ from codex_discord_store_processed_messages import (
     cleanup_processed_discord_messages as cleanup_processed_discord_messages,
     is_processed_discord_message_id as is_processed_discord_message_id,
     mark_processed_discord_message_id as mark_processed_discord_message_id,
+    release_persistent_discord_message_id as release_persistent_discord_message_id,
 )
 from codex_discord_store_schema import init_store_schema
 from codex_discord_store_session_mirror import (

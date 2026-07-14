@@ -220,6 +220,21 @@ def handoff_gpt_creation(
 
 def load_gpt_creation_protections(db_path: Path) -> GptCreationProtections:
     unfinished = tuple(_to_operation(row) for row in store.load_journal_rows(db_path))
+    return _build_gpt_creation_protections(unfinished)
+
+
+def load_gpt_creation_protections_from_connection(
+    conn: Connection,
+) -> GptCreationProtections:
+    unfinished = tuple(
+        _to_operation(row) for row in store.load_journal_rows_from_connection(conn)
+    )
+    return _build_gpt_creation_protections(unfinished)
+
+
+def _build_gpt_creation_protections(
+    unfinished: tuple[GptCreationOperation, ...],
+) -> GptCreationProtections:
     return GptCreationProtections(
         unfinished,
         frozenset(operation.marker_token for operation in unfinished),

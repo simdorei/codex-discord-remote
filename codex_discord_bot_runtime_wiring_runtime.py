@@ -46,6 +46,7 @@ class BotRuntimeWiringRuntime:
                 get_targets=self._get_startup_probe_targets,
                 claim_message=self._claim_discord_message,
                 mark_processed=self._mark_discord_message_processed,
+                release_message=self._release_discord_message_claim,
                 process_history_poll_message=self._process_history_poll_message,
                 format_log_text_len=cast(Callable[[str | None], int | str], self._module_func("format_log_text_len")),
                 log=self._log,
@@ -117,6 +118,21 @@ class BotRuntimeWiringRuntime:
         _ = cast(Callable[..., ModuleValue], self._module_func("mark_discord_message_processed"))(
             owner,
             message,
+        )
+
+    def _release_discord_message_claim(
+        self,
+        owner: discord_bot_history_runtime.HistoryPollOwner,
+        message: discord_diagnostics_history.DiscordHistoryMessage,
+    ) -> bool:
+        return bool(
+            cast(
+                Callable[..., ModuleValue],
+                self._module_func("release_discord_message_claim"),
+            )(
+                owner,
+                message,
+            )
         )
 
     async def _process_history_poll_message(

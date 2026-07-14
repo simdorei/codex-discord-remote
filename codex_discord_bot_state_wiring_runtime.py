@@ -139,6 +139,7 @@ class BotStateWiringRuntime:
         self._set("claim_persistent_discord_message_id", runtime.claim_persistent_discord_message_id)
         self._set("claim_discord_message", runtime.claim_discord_message)
         self._set("mark_discord_message_processed", runtime.mark_discord_message_processed)
+        self._set("release_discord_message_claim", runtime.release_discord_message_claim)
 
     def _get_db_path(self) -> Path:
         return cast(Path, getattr(self.module, "MIRROR_DB_PATH"))

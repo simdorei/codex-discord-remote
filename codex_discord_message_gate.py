@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from asyncio import CancelledError  # noqa: ANYIO_OK
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from enum import StrEnum, unique
@@ -49,6 +50,7 @@ class GatewayMessageDeps(Generic[MessageT]):
     get_message_id: Callable[[MessageT], DiscordIdValue]
     process_message: GatewayMessageProcessor[MessageT]
     mark_processed: Callable[[MessageT], None]
+    release_message: Callable[[MessageT], bool]
     log: Callable[[str], None]
 
 
@@ -132,8 +134,30 @@ async def process_gateway_message(message: MessageT, *, deps: GatewayMessageDeps
             + f"message={deps.get_message_id(message) or '-'}"
         )
         return
-    await deps.process_message(message, source="gateway")
+    try:
+        await deps.process_message(message, source="gateway")
+    except CancelledError as exc:
+        _release_failed_gateway_message(message, exc, deps=deps)
+        raise
+    except Exception as exc:
+        _release_failed_gateway_message(message, exc, deps=deps)
+        raise
     deps.mark_processed(message)
+
+
+def _release_failed_gateway_message(
+    message: MessageT,
+    exc: BaseException,
+    *,
+    deps: GatewayMessageDeps[MessageT],
+) -> None:
+    deps.release_message(message)
+    deps.log(
+        "gateway_message_process_failed "
+        + f"chat={getattr(getattr(message, 'channel', None), 'id', '-')} "
+        + f"message={deps.get_message_id(message) or '-'} "
+        + f"error_type={type(exc).__name__}"
+    )
 
 
 def prepare_plain_ask_content(

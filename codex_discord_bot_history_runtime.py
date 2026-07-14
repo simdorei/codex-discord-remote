@@ -43,6 +43,7 @@ class BotHistoryRuntimeDeps:
     get_targets: discord_history_poll.HistoryPollTargetsGetter
     claim_message: Callable[[HistoryPollOwner, discord_diagnostics_history.DiscordHistoryMessage], bool]
     mark_processed: Callable[[HistoryPollOwner, discord_diagnostics_history.DiscordHistoryMessage], None]
+    release_message: Callable[[HistoryPollOwner, discord_diagnostics_history.DiscordHistoryMessage], bool]
     process_history_poll_message: Callable[
         [HistoryPollOwner, discord_diagnostics_history.DiscordHistoryMessage, int],
         Awaitable[None],
@@ -101,6 +102,8 @@ class BotHistoryRuntime:
             is_primed_channel=lambda channel_id: channel_id in _history_poll_primed_channels(owner),
             mark_primed_channel=lambda channel_id: _history_poll_primed_channels(owner).add(channel_id),
             claim_message=lambda message: self.deps.claim_message(owner, message),
+            mark_processed=lambda message: self.deps.mark_processed(owner, message),
+            release_message=lambda message: self.deps.release_message(owner, message),
             is_bootstrap_user_message=lambda message: _is_history_bootstrap_user_message(owner, message),
             process_history_poll_message=lambda message, channel_id: self.deps.process_history_poll_message(
                 owner,
@@ -131,7 +134,6 @@ class BotHistoryRuntime:
             )
         )
         await owner.process_discord_message(message, source="history_poll")
-        self.deps.mark_processed(owner, message)
 
 
 def _history_poll_task(owner: HistoryPollOwner) -> asyncio.Task[ModuleValue] | None:

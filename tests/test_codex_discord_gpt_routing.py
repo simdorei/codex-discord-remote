@@ -12,6 +12,7 @@ from unittest.mock import patch
 
 import codex_discord_gpt_creation_journal as journal
 import codex_discord_gpt_ownership as ownership
+import codex_discord_exact_channel_runtime as exact_runtime
 import codex_discord_message_target as message_target
 import codex_discord_project_runtime as project_runtime
 import send_discord_attachment as attachment_sender
@@ -140,6 +141,108 @@ class GptRoutingTests(unittest.TestCase):
             _ = journal.load_gpt_creation_protections(db_path)
             db_path.unlink()
             Path(temp_dir).rmdir()
+
+    def test_exact_lookup_uses_one_read_only_transaction(self) -> None:
+        with tempfile.TemporaryDirectory(
+            prefix=_TEMP_PREFIX, ignore_cleanup_errors=True
+        ) as temp_dir:
+            db_path = self._db_path(temp_dir)
+            self._insert(db_path, [_mapping("gpt-active", 401)])
+            observations: list[tuple[int, bool]] = []
+            original_loader = journal.load_gpt_creation_protections_from_connection
+
+            def observe_connection(conn: sqlite3.Connection) -> journal.GptCreationProtections:
+                query_only = int(conn.execute("PRAGMA query_only").fetchone()[0])
+                observations.append((query_only, conn.in_transaction))
+                return original_loader(conn)
+
+            connect = sqlite3.connect
+            with (
+                patch.object(exact_runtime.sqlite3, "connect", wraps=connect) as mocked_connect,
+                patch.object(
+                    journal,
+                    "load_gpt_creation_protections_from_connection",
+                    side_effect=observe_connection,
+                ),
+            ):
+                decision = project_runtime.resolve_exact_channel_decision(
+                    db_path, 401, "Active"
+                )
+
+        self.assertIsInstance(decision, project_runtime.ExactChannelActive)
+        self.assertEqual(mocked_connect.call_count, 1)
+        args, kwargs = mocked_connect.call_args
+        self.assertIn("?mode=ro", str(args[0]))
+        self.assertTrue(kwargs["uri"])
+        self.assertEqual(observations, [(1, True)])
+
+    def test_exact_lookup_keeps_one_snapshot_across_owner_and_journal_reads(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory(
+            prefix=_TEMP_PREFIX, ignore_cleanup_errors=True
+        ) as temp_dir:
+            db_path = self._db_path(temp_dir)
+            with closing(sqlite3.connect(db_path)) as conn:
+                _ = conn.execute("PRAGMA journal_mode=WAL").fetchone()
+            self._insert(
+                db_path,
+                [_mapping("gpt-active", 402)],
+                [_journal("gpt-active", "b" * 32, "discord_identified", 402)],
+            )
+            original_loader = journal.load_gpt_creation_protections_from_connection
+
+            def delete_after_owner_read(
+                conn: sqlite3.Connection,
+            ) -> journal.GptCreationProtections:
+                with closing(sqlite3.connect(db_path)) as writer:
+                    _ = writer.execute(
+                        "DELETE FROM gpt_chat_creation_ops WHERE codex_thread_id = ?",
+                        ("gpt-active",),
+                    )
+                    writer.commit()
+                return original_loader(conn)
+
+            with patch.object(
+                journal,
+                "load_gpt_creation_protections_from_connection",
+                side_effect=delete_after_owner_read,
+            ):
+                decision = project_runtime.resolve_exact_channel_decision(
+                    db_path, 402, "Active"
+                )
+
+        self.assertEqual(
+            decision,
+            project_runtime.ExactChannelBlocked(
+                project_runtime.ExactChannelBlockReason.CREATION_JOURNAL_ID.value
+            ),
+        )
+
+    def test_exact_lookup_missing_database_fails_without_creating_it(self) -> None:
+        with tempfile.TemporaryDirectory(
+            prefix=_TEMP_PREFIX, ignore_cleanup_errors=True
+        ) as temp_dir:
+            db_path = Path(temp_dir) / "missing.sqlite"
+            with self.assertRaises(sqlite3.OperationalError):
+                _ = project_runtime.resolve_exact_channel_decision(
+                    db_path, 401, "Missing"
+                )
+            self.assertFalse(db_path.exists())
+
+    def test_exact_lookup_propagates_exclusive_lock(self) -> None:
+        with tempfile.TemporaryDirectory(
+            prefix=_TEMP_PREFIX, ignore_cleanup_errors=True
+        ) as temp_dir:
+            db_path = self._db_path(temp_dir)
+            self._insert(db_path, [_mapping("gpt-active", 403)])
+            with closing(sqlite3.connect(db_path)) as locker:
+                _ = locker.execute("BEGIN EXCLUSIVE")
+                with self.assertRaises(sqlite3.OperationalError):
+                    _ = project_runtime.resolve_exact_channel_decision(
+                        db_path, 403, "Active"
+                    )
+                locker.rollback()
 
     def test_inactive_and_exact_journal_id_or_marker_block_every_fallback_and_attachment_option(
         self,

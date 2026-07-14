@@ -57,6 +57,8 @@ class PollHistoryChannelDeps(Generic[MessageT]):
     is_primed_channel: Callable[[int], bool]
     mark_primed_channel: Callable[[int], None]
     claim_message: ClaimHistoryMessage[MessageT]
+    mark_processed: Callable[[MessageT], None]
+    release_message: Callable[[MessageT], bool]
     is_bootstrap_user_message: HistoryBootstrapPredicate[MessageT]
     process_history_poll_message: ProcessHistoryPollMessage[MessageT]
     log: LogFunc
@@ -112,12 +114,23 @@ async def poll_history_channel(
         async for message in history_channel.history(limit=deps.history_limit):
             if deps.claim_message(message):
                 claimed_messages.append(message)
+    except CancelledError:
+        _release_claimed_messages(claimed_messages, deps=deps)
+        raise
     except deps.delivery_exceptions as exc:
+        _release_claimed_messages(claimed_messages, deps=deps)
         deps.log(
             f"history_poll_channel_failed label={label} channel={channel_id} "
             + f"source={source} error_type={type(exc).__name__}"
         )
         return
+    except Exception as exc:
+        _release_claimed_messages(claimed_messages, deps=deps)
+        deps.log(
+            f"history_poll_channel_failed label={label} channel={channel_id} "
+            + f"source={source} error_type={type(exc).__name__}"
+        )
+        raise
     if not is_primed:
         deps.mark_primed_channel(int(channel_id))
         bootstrap_messages = [
@@ -130,11 +143,69 @@ async def poll_history_channel(
             + f"source={source} messages={len(claimed_messages)} "
             + f"bootstrap_user_messages={len(bootstrap_messages)}"
         )
-        for message in bootstrap_messages:
-            await deps.process_history_poll_message(message, channel_id)
+        await _process_claimed_messages(bootstrap_messages, channel_id, deps=deps)
         return
-    for message in reversed(claimed_messages):
-        await deps.process_history_poll_message(message, channel_id)
+    await _process_claimed_messages(
+        list(reversed(claimed_messages)),
+        channel_id,
+        deps=deps,
+    )
+
+
+async def _process_claimed_messages(
+    messages: list[MessageT],
+    channel_id: int,
+    *,
+    deps: PollHistoryChannelDeps[MessageT],
+) -> None:
+    for index, message in enumerate(messages):
+        try:
+            await deps.process_history_poll_message(message, channel_id)
+        except CancelledError as exc:
+            _release_failed_history_messages(
+                messages[index:], channel_id, exc, phase="process", deps=deps
+            )
+            raise
+        except Exception as exc:
+            _release_failed_history_messages(
+                messages[index:], channel_id, exc, phase="process", deps=deps
+            )
+            raise
+        try:
+            deps.mark_processed(message)
+        except Exception as exc:
+            _release_failed_history_messages(
+                messages[index + 1 :],
+                channel_id,
+                exc,
+                phase="mark",
+                deps=deps,
+            )
+            raise
+
+
+def _release_failed_history_messages(
+    messages: list[MessageT],
+    channel_id: int,
+    exc: BaseException,
+    *,
+    phase: str,
+    deps: PollHistoryChannelDeps[MessageT],
+) -> None:
+    _release_claimed_messages(messages, deps=deps)
+    deps.log(
+        f"history_message_{phase}_failed channel={channel_id} "
+        + f"error_type={type(exc).__name__} released={len(messages)}"
+    )
+
+
+def _release_claimed_messages(
+    messages: list[MessageT],
+    *,
+    deps: PollHistoryChannelDeps[MessageT],
+) -> None:
+    for message in messages:
+        _ = deps.release_message(message)
 
 
 async def history_poll_loop(deps: HistoryPollLoopDeps) -> None:

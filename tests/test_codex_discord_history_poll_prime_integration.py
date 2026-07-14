@@ -106,6 +106,24 @@ class FakePollClient:
         await PROCESS_DISCORD_MESSAGE(cast(bot.CodexDiscordBot, self), message, source=source)
 
 
+class FailingPollClient(FakePollClient):
+    def __init__(self, channel: FakeHistoryChannel, *, fail_message_id: int) -> None:
+        super().__init__(channel)
+        self.fail_message_id = fail_message_id
+        self.processed_attempts: list[int | None] = []
+
+    async def process_discord_message(self, message: FakeMessage, *, source: str) -> None:
+        self.assert_history_source(source)
+        self.processed_attempts.append(message.id)
+        if message.id == self.fail_message_id:
+            raise TypeError("injected history processing failure")
+
+    @staticmethod
+    def assert_history_source(source: str) -> None:
+        if source != "history_poll":
+            raise AssertionError(f"unexpected source: {source}")
+
+
 LogAction = Callable[[Path], Awaitable[None]]
 
 
@@ -231,6 +249,43 @@ class DiscordHistoryPollPrimeIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("history_poll_message channel=333", log_text)
         self.assertIn("source=history_poll", log_text)
         self.assertNotIn("old", log_text)
+
+    async def test_history_processing_failure_releases_current_and_later_claims(
+        self,
+    ) -> None:
+        channel = FakeHistoryChannel()
+        first = FakeMessage("first", message_id=101)
+        failing = FakeMessage("failing", message_id=102)
+        later = FakeMessage("later", message_id=103)
+        for message in (first, failing, later):
+            message.channel = channel
+        client = FailingPollClient(channel, fail_message_id=102)
+
+        async def run_poll(log_path: Path) -> None:
+            _ = log_path
+            await POLL_HISTORY_CHANNEL(cast(bot.CodexDiscordBot, client), "allowed", 333)
+            channel.history_messages = [later, failing, first]
+            with self.assertRaisesRegex(
+                TypeError, "injected history processing failure"
+            ):
+                await POLL_HISTORY_CHANNEL(
+                    cast(bot.CodexDiscordBot, client), "allowed", 333
+                )
+
+        log_text = await self._run_with_log(run_poll)
+        restarted_owner = cast(
+            bot.SeenCacheOwner,
+            cast(object, type("RestartedOwner", (), {"_processed_message_ids": {}})()),
+        )
+
+        self.assertEqual(client.processed_attempts, [101, 102])
+        self.assertFalse(bot.claim_discord_message(restarted_owner, first))
+        self.assertTrue(bot.claim_discord_message(restarted_owner, failing))
+        self.assertTrue(bot.claim_discord_message(restarted_owner, later))
+        self.assertIn(
+            "history_message_process_failed channel=333 error_type=TypeError released=2",
+            log_text,
+        )
 
 
 if __name__ == "__main__":

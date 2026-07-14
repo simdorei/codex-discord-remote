@@ -58,7 +58,8 @@ class ProcessedMessageRuntime:
         if message_id is None:
             return True
         processed = discord_seen_cache.get_or_create_seen_map(owner, "_processed_message_ids")
-        if processed is None:
+        inflight = discord_seen_cache.get_or_create_seen_map(owner, "_inflight_message_ids")
+        if processed is None or inflight is None:
             return True
         if message_id in processed:
             return False
@@ -66,6 +67,11 @@ class ProcessedMessageRuntime:
             return False
         discord_seen_cache.remember_limited_seen_key(
             processed,
+            message_id,
+            limit=self.processed_message_id_limit,
+        )
+        discord_seen_cache.remember_limited_seen_key(
+            inflight,
             message_id,
             limit=self.processed_message_id_limit,
         )
@@ -82,7 +88,37 @@ class ProcessedMessageRuntime:
                 message_id,
                 limit=self.processed_message_id_limit,
             )
+        inflight = getattr(owner, "_inflight_message_ids", None)
+        if isinstance(inflight, dict):
+            _ = cast(discord_seen_cache.SeenCacheMap, inflight).pop(message_id, None)
         try:
             discord_store.mark_processed_discord_message_id(self.get_db_path(), message_id)
         except (OSError, sqlite3.Error) as exc:
             self.log(f"processed_message_mark_failed message={message_id} error_type={type(exc).__name__}")
+
+    def release_discord_message_claim(
+        self,
+        owner: SeenCacheOwner,
+        message: DiscordMessageIdInput,
+    ) -> bool:
+        message_id = self.get_message_id_func(message)
+        if message_id is None:
+            return False
+        inflight = getattr(owner, "_inflight_message_ids", None)
+        if not isinstance(inflight, dict) or message_id not in inflight:
+            return False
+        processed = getattr(owner, "_processed_message_ids", None)
+        try:
+            discord_store.release_persistent_discord_message_id(
+                self.get_db_path(), message_id
+            )
+        except (OSError, sqlite3.Error) as exc:
+            self.log(
+                f"processed_message_release_failed message={message_id} "
+                + f"error_type={type(exc).__name__}"
+            )
+            return False
+        _ = cast(discord_seen_cache.SeenCacheMap, inflight).pop(message_id, None)
+        if isinstance(processed, dict):
+            _ = cast(discord_seen_cache.SeenCacheMap, processed).pop(message_id, None)
+        return True

@@ -142,7 +142,12 @@ SESSION_MIRROR_STATE = discord_session_mirror.SessionMirrorState()
 UI_FALLBACK_LOCK = threading.Lock()
 STREAM_REDIRECT_LOCK = threading.RLock()
 INTERACTIVE_INPUT_TAG = "[choice_required]"
-DISCORD_DELIVERY_EXCEPTIONS: Final[tuple[type[BaseException], ...]] = (discord.DiscordException, OSError, RuntimeError)
+DISCORD_DELIVERY_EXCEPTIONS: Final[tuple[type[BaseException], ...]] = (
+    discord.DiscordException,
+    OSError,
+    RuntimeError,
+    sqlite3.Error,
+)
 INTERACTIVE_APPROVAL_TAG = "[approval_required]"
 INTERACTIVE_STATE_NONE = ""
 INTERACTIVE_STATE_INPUT = "waiting-input"

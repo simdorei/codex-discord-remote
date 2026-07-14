@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio  # noqa: ANYIO_OK
 import importlib
+import sys
 from collections.abc import Callable, Coroutine, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -81,6 +82,7 @@ class BotClientAdapterRuntime(BotClientAdapterBase):
                     seconds=self.history_poll_bootstrap_lookback_seconds
                 )
                 self._processed_message_ids: dict[str, float] = {}
+                self._inflight_message_ids: dict[str, float] = {}
                 self._logged_socket_event_ids: dict[str, float] = {}
                 self._slash_sync_last_at = "-"
                 self._slash_sync_status = "-"
@@ -194,6 +196,11 @@ class BotClientAdapterRuntime(BotClientAdapterBase):
                 if getattr(interaction, "type", None) == getattr(interaction_type_enum, "component", None):
                     _ = asyncio.create_task(cast(Coroutine[object, object, object], runtime._module_func("report_unhandled_component_interaction")(interaction)))
 
+            async def on_error(self, event_method: str, /, *_args: ModuleValue, **_kwargs: ModuleValue) -> None:
+                error = sys.exception()
+                event_name = event_method.replace("\r", " ").replace("\n", " ").strip()[:80] or "-"
+                runtime._log(f"discord_event_error event={event_name} error_type={type(error).__name__ if error else '-'}")
+
             async def on_socket_raw_receive(self, message: str | bytes) -> None:
                 await runtime._await_runtime("SOCKET_RUNTIME", "on_socket_raw_receive", self, message)
 
@@ -225,6 +232,13 @@ class BotClientAdapterRuntime(BotClientAdapterBase):
                 def mark_processed(message: ModuleValue) -> None:
                     _ = runtime._module_func("mark_discord_message_processed")(self, message)
 
+                def release_message(message: ModuleValue) -> bool:
+                    return bool(
+                        runtime._module_func("release_discord_message_claim")(
+                            self, message
+                        )
+                    )
+
                 await discord_message_gate.process_gateway_message(
                     message,
                     deps=discord_message_gate.GatewayMessageDeps(
@@ -233,6 +247,7 @@ class BotClientAdapterRuntime(BotClientAdapterBase):
                         get_message_id=get_message_id,
                         process_message=process_message,
                         mark_processed=mark_processed,
+                        release_message=release_message,
                         log=runtime._log,
                     ),
                 )
