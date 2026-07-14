@@ -15,10 +15,12 @@ from codex_discord_delivery_state import (
     DiscordIdValue,
     LogFunc,
     Messageable,
+    begin_cross_path_delivery,
     begin_discord_delivery,
     build_delivery_id,
     clear_discord_delivery_stopping,
     end_discord_delivery,
+    finish_cross_path_delivery,
     get_interaction_command_name,
     get_messageable_id,
     is_discord_delivery_stopping,
@@ -66,10 +68,12 @@ __all__ = [
     "DiscordDeliveryRejected",
     "DiscordDeliveryState",
     "adapt_discord_interaction",
+    "begin_cross_path_delivery",
     "begin_discord_delivery",
     "build_delivery_id",
     "clear_discord_delivery_stopping",
     "end_discord_delivery",
+    "finish_cross_path_delivery",
     "get_interaction_command_name",
     "get_messageable_id",
     "is_discord_delivery_stopping",
@@ -106,7 +110,23 @@ async def send_chunks(
         log_func=log_func,
         allow_during_stop=allow_during_stop,
     )
+    cross_path_claim = None
+    delivery_succeeded = False
     try:
+        cross_path_start = await begin_cross_path_delivery(
+            state,
+            target_id=target_id,
+            text=text,
+            context=context,
+        )
+        cross_path_claim = cross_path_start.claim
+        if cross_path_start.duplicate_source is not None:
+            log_func(
+                f"discord_delivery_duplicate_suppressed id={delivery_id} "
+                + f"context={safe_context} target={target_id} "
+                + f"previous={cross_path_start.duplicate_source}"
+            )
+            return 0
         log_func(
             f"discord_delivery_start id={delivery_id} context={safe_context} "
             + f"target={target_id} chunks={len(chunks)} text_len={format_log_text_len(text)}"
@@ -142,8 +162,14 @@ async def send_chunks(
             f"discord_delivery_sent id={delivery_id} context={safe_context} "
             + f"target={target_id} chunks={len(chunks)}"
         )
+        delivery_succeeded = True
         return len(chunks)
     finally:
+        finish_cross_path_delivery(
+            state,
+            claim=cross_path_claim,
+            succeeded=delivery_succeeded,
+        )
         end_discord_delivery(state, delivery_token)
 
 
