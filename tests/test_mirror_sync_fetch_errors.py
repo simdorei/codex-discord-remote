@@ -8,7 +8,11 @@ from types import SimpleNamespace
 
 import codex_discord_bot as bot
 from codex_thread_models import ThreadInfo
-from tests.mirror_sync_bridge_types import bridge_module, codex_discord_bot
+from tests.mirror_sync_bridge_types import (
+    bridge_module,
+    codex_discord_bot,
+    isolated_mirror_store,
+)
 
 
 class ProjectChannelFetchBug(TypeError):
@@ -57,8 +61,11 @@ class MirrorSyncFetchErrorTests(unittest.IsolatedAsyncioTestCase):
                 raise ProjectChannelFetchBug("project channel fetch bug")
 
         try:
-            with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp_dir:
-                bot.MIRROR_DB_PATH = Path(temp_dir) / "mirror.sqlite"
+            with (
+                tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp_dir,
+                isolated_mirror_store(Path(temp_dir) / "mirror.sqlite"),
+            ):
+                bot.init_mirror_db()
                 os.environ["CODEX_DISCORD_LOG_PATH"] = str(Path(temp_dir) / "discord.log")
                 root_thread = self.make_thread("root-thread", str(Path(temp_dir)), "root")
 
@@ -122,8 +129,11 @@ class MirrorSyncFetchErrorTests(unittest.IsolatedAsyncioTestCase):
                 raise ProjectChannelUnavailable("project channel unavailable")
 
         try:
-            with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp_dir:
-                bot.MIRROR_DB_PATH = Path(temp_dir) / "mirror.sqlite"
+            with (
+                tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp_dir,
+                isolated_mirror_store(Path(temp_dir) / "mirror.sqlite"),
+            ):
+                bot.init_mirror_db()
                 os.environ["CODEX_DISCORD_LOG_PATH"] = str(Path(temp_dir) / "discord.log")
                 root_thread = self.make_thread("root-thread", str(Path(temp_dir)), "root")
 

@@ -192,7 +192,7 @@ class GptMigrationTests(unittest.TestCase):
         # Then: the schema is stable and fresh compatibility defaults are exact.
         self.assertEqual(schema_after, schema_before)
         self.assertEqual(defaults, ("ordinary", "active"))
-        self.assertEqual(version, 1)
+        self.assertEqual(version, 2)
 
     def test_exact_journal_and_lifecycle_constraints(self) -> None:
         # Given: a freshly initialized schema and one valid nullable-ID operation.
