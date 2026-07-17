@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable
 from pathlib import Path
 from typing import Final, TypeAlias
 
@@ -25,16 +25,6 @@ def load_gpt_registered_thread_ids(
     return load_ids(db_path)
 
 
-def exclude_gpt_registered_threads(
-    threads: Sequence[ThreadInfo],
-    *,
-    db_path: Path,
-    load_ids: LoadGptThreadIds = gpt_registration_store.load_gpt_registered_thread_ids_read_only,
-) -> list[ThreadInfo]:
-    gpt_thread_ids = load_gpt_registered_thread_ids(db_path, load_ids=load_ids)
-    return [thread for thread in threads if thread.id not in gpt_thread_ids]
-
-
 def load_ordinary_user_root_threads(
     load_user_root_threads: LoadUserRootThreads,
     *,
@@ -42,11 +32,8 @@ def load_ordinary_user_root_threads(
     limit: int = 0,
     load_ids: LoadGptThreadIds = gpt_registration_store.load_gpt_registered_thread_ids_read_only,
 ) -> list[ThreadInfo]:
-    threads = exclude_gpt_registered_threads(
-        load_user_root_threads(0),
-        db_path=db_path,
-        load_ids=load_ids,
-    )
+    _ = (db_path, load_ids)
+    threads = load_user_root_threads(0)
     if limit > 0:
         return threads[:limit]
     return threads

@@ -103,7 +103,7 @@ class MirrorSyncStateRootScopeTests(unittest.IsolatedAsyncioTestCase):
             else:
                 os.environ["CODEX_DISCORD_LOG_PATH"] = old_log_path
 
-    async def test_sync_codex_mirror_excludes_registered_gpt_root(self) -> None:
+    async def test_sync_codex_mirror_includes_gpt_chat_created_root_and_preserves_provenance(self) -> None:
         old_db_path = bot.MIRROR_DB_PATH
         bridge = bridge_module()
         old_load_user_root_threads = bridge.load_user_root_threads
@@ -173,8 +173,14 @@ class MirrorSyncStateRootScopeTests(unittest.IsolatedAsyncioTestCase):
                     return SimpleNamespace(id=111, key=project_key)
 
                 async def get_thread_channel(codex_thread, project_key, project_channel):
-                    _ = (project_key, project_channel)
                     mirrored_ids.append(codex_thread.id)
+                    bot.upsert_mirror_thread(
+                        codex_thread,
+                        project_key,
+                        codex_thread.title,
+                        project_channel.id,
+                        901 if codex_thread.id == "gpt-root" else 333,
+                    )
                     return SimpleNamespace(id=333)
 
                 bot.get_or_create_project_channel = get_project_channel
@@ -194,9 +200,9 @@ class MirrorSyncStateRootScopeTests(unittest.IsolatedAsyncioTestCase):
                         "SELECT managed_by FROM mirror_threads WHERE codex_thread_id = 'gpt-root'"
                     ).fetchone()
 
-            self.assertEqual(mirrored_ids, ["ordinary-root"])
+            self.assertCountEqual(mirrored_ids, ["ordinary-root", "gpt-root"])
             self.assertEqual(gpt_row, ("gpt_chat",))
-            self.assertIn("threads: 1", output)
+            self.assertIn("threads: 2", output)
         finally:
             bot.MIRROR_DB_PATH = old_db_path
             bridge.load_user_root_threads = old_load_user_root_threads

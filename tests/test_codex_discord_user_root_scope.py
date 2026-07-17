@@ -11,7 +11,7 @@ from codex_thread_models import ThreadInfo
 
 
 class UserRootScopeTests(unittest.TestCase):
-    def test_scope_is_state_roots_minus_all_registered_gpt_ids(self) -> None:
+    def test_scope_keeps_gpt_chat_created_state_roots(self) -> None:
         roots = [
             *[_thread(f"ordinary-{index}") for index in range(21)],
             _thread("gpt-active"),
@@ -28,10 +28,10 @@ class UserRootScopeTests(unittest.TestCase):
         )
 
         self.assertEqual(len(roots), 24)
-        self.assertEqual(len(scoped), 21)
-        self.assertTrue(all(thread.id.startswith("ordinary-") for thread in scoped))
+        self.assertEqual(len(scoped), 24)
+        self.assertEqual(scoped, roots)
 
-    def test_limit_is_applied_after_gpt_ids_are_removed(self) -> None:
+    def test_limit_is_applied_without_excluding_gpt_chat_created_roots(self) -> None:
         observed_limits: list[int] = []
 
         def load_roots(limit: int) -> list[ThreadInfo]:
@@ -46,7 +46,7 @@ class UserRootScopeTests(unittest.TestCase):
         )
 
         self.assertEqual(observed_limits, [0])
-        self.assertEqual([thread.id for thread in scoped], ["ordinary-1"])
+        self.assertEqual([thread.id for thread in scoped], ["gpt"])
 
     def test_registration_store_reads_managed_gpt_rows_in_every_state(self) -> None:
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp_dir:

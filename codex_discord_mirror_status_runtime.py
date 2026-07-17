@@ -9,7 +9,6 @@ from typing import Protocol, cast
 import codex_discord_mirror_access as discord_mirror_access
 import codex_discord_mirror_scope as discord_mirror_scope
 import codex_discord_mirror_status as discord_mirror_status
-import codex_discord_user_root_scope as discord_user_root_scope
 from codex_thread_models import ThreadInfo
 
 
@@ -142,9 +141,6 @@ def build_mirror_check(
         get_project_name_func=deps.get_project_name,
         archive_recommended_count=archive_recommended_count,
         app_server_unavailable_count=app_server_unavailable_count,
-        excluded_db_thread_ids=discord_user_root_scope.load_gpt_registered_thread_ids(
-            deps.db_path
-        ),
         scoped_project_keys=(
             {deps.get_project_key(thread) for thread in threads}
             if channel_id is not None
@@ -162,20 +158,12 @@ async def build_mirror_check_for_prefix(
     deps: MirrorStatusRuntimeDeps,
 ) -> str:
     _ = channel_id
-    excluded_db_thread_ids = discord_user_root_scope.load_gpt_registered_thread_ids(
-        deps.db_path
-    )
     targets = await asyncio.to_thread(
         discord_mirror_status.load_mirror_check_access_targets,
         db_path=deps.db_path,
         init_mirror_db_func=deps.init_mirror_db,
         scoped_project_keys=None,
     )
-    targets = [
-        target
-        for target in targets
-        if target.codex_thread_id not in excluded_db_thread_ids
-    ]
     access_statuses = await inspect_mirror_access_statuses(
         bot,
         cast(Sequence[discord_mirror_access.ThreadAccessTarget], targets),

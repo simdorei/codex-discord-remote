@@ -57,10 +57,16 @@ def upsert_mirror_thread(
     _init_mirror_db(db_path)
     with sqlite3.connect(db_path) as conn:
         _ = conn.execute(
-            "INSERT OR REPLACE INTO mirror_threads "
+            "INSERT INTO mirror_threads "
             + "(codex_thread_id, project_key, thread_title, discord_channel_id, "
             + "discord_thread_id, updated_at) "
-            + "VALUES (?, ?, ?, ?, ?, ?)",
+            + "VALUES (?, ?, ?, ?, ?, ?) "
+            + "ON CONFLICT(codex_thread_id) DO UPDATE SET "
+            + "project_key = excluded.project_key, "
+            + "thread_title = excluded.thread_title, "
+            + "discord_channel_id = excluded.discord_channel_id, "
+            + "discord_thread_id = excluded.discord_thread_id, "
+            + "updated_at = excluded.updated_at",
             (
                 str(codex_thread_id),
                 canonical_project_key,

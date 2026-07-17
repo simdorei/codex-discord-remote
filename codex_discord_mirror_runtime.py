@@ -12,7 +12,6 @@ import codex_discord_mirror_scope as discord_mirror_scope
 import codex_discord_mirror_single_thread as discord_mirror_single_thread
 import codex_discord_mirror_status_runtime_bridge as discord_mirror_status_runtime_bridge
 import codex_discord_mirror_sync as discord_mirror_sync
-import codex_discord_user_root_scope as discord_user_root_scope
 from codex_thread_models import ThreadInfo
 
 
@@ -62,15 +61,9 @@ class MirrorRuntime(Generic[BotT, GuildT, CategoryT, ProjectChannelT, ThreadChan
     deps: MirrorRuntimeDeps[BotT, GuildT, CategoryT, ProjectChannelT, ThreadChannelT]
 
     def load_mirror_scope_threads(self, limit: int | None = None) -> list[ThreadInfo]:
-        threads = discord_mirror_scope.load_mirror_scope_threads(
+        return discord_mirror_scope.load_mirror_scope_threads(
             self.deps.get_mirror_scope_bridge_module(),
             limit,
-        )
-        if limit is not None:
-            return threads
-        return discord_user_root_scope.exclude_gpt_registered_threads(
-            threads,
-            db_path=self.deps.get_db_path(),
         )
 
     def filter_threads_for_discord_channel(
