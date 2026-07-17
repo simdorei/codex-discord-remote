@@ -85,13 +85,15 @@ async def _fetch_stored_project_channel(
     project_key: str,
     *,
     deps: MirrorChannelDeps,
-) -> discord.TextChannel:
+) -> discord.TextChannel | None:
     channel = guild.get_channel(stored_channel_id)
     if isinstance(channel, discord.TextChannel):
         return channel
     try:
         fetched = await guild.fetch_channel(stored_channel_id)
     except deps.fetch_failure_types as exc:
+        if isinstance(exc, discord.NotFound):
+            return None
         raise RuntimeError(
             f"Stored mirror project channel {stored_channel_id} for {project_key} "
             + f"is unavailable: {type(exc).__name__}: {exc}"
@@ -111,7 +113,7 @@ async def _ensure_stored_project_channel(
     row: tuple[int, str],
     *,
     deps: MirrorChannelDeps,
-) -> discord.TextChannel:
+) -> discord.TextChannel | None:
     stored_channel_id = int(row[0])
     channel = await _fetch_stored_project_channel(
         guild,
@@ -119,6 +121,8 @@ async def _ensure_stored_project_channel(
         project_key,
         deps=deps,
     )
+    if channel is None:
+        return None
     return await ensure_mirror_project_channel(
         guild,
         channel,
@@ -188,12 +192,18 @@ async def get_or_create_project_channel(
     row = find_mirror_project_row_by_key(project_key, deps=deps)
 
     if row:
-        return await _ensure_stored_project_channel(
+        stored_channel = await _ensure_stored_project_channel(
             guild,
             project_key,
             project_name,
             row,
             deps=deps,
+        )
+        if stored_channel is not None:
+            return stored_channel
+        deps.log(
+            f"mirror_project_stored_channel_missing project={project_key[:80]} "
+            + f"channel={int(row[0])} action=replace"
         )
 
     existing_channel = await _reuse_existing_project_channel(
