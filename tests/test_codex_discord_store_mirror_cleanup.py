@@ -21,12 +21,14 @@ class StoreMirrorCleanupTests(unittest.TestCase):
         project_key: str,
         project_name: str,
         channel_id: int,
+        *,
+        updated_at: float = 10.0,
     ) -> None:
         _ = conn.execute(
             "INSERT INTO mirror_projects ("
             + "project_key, project_name, discord_channel_id, updated_at"
             + ") VALUES (?, ?, ?, ?)",
-            (project_key, project_name, channel_id, 10.0),
+            (project_key, project_name, channel_id, updated_at),
         )
 
     def _insert_thread(
@@ -37,13 +39,15 @@ class StoreMirrorCleanupTests(unittest.TestCase):
         thread_title: str,
         channel_id: int,
         thread_id: int,
+        *,
+        updated_at: float = 20.0,
     ) -> None:
         _ = conn.execute(
             "INSERT INTO mirror_threads ("
             + "codex_thread_id, project_key, thread_title, "
             + "discord_channel_id, discord_thread_id, updated_at"
             + ") VALUES (?, ?, ?, ?, ?, ?)",
-            (codex_thread_id, project_key, thread_title, channel_id, thread_id, 20.0),
+            (codex_thread_id, project_key, thread_title, channel_id, thread_id, updated_at),
         )
 
     def test_stale_mirror_lookups_and_delete_keep_active_rows(self) -> None:
@@ -56,15 +60,28 @@ class StoreMirrorCleanupTests(unittest.TestCase):
                 self._insert_thread(conn, "thread-stale", "stale-project", "Stale Thread", 222, 1002)
 
             self.assertEqual(
-                store.get_stale_mirror_thread_rows(db_path, {"thread-keep"}),
+                store.get_stale_mirror_thread_rows(
+                    db_path,
+                    {"thread-keep"},
+                    updated_before=1000.0,
+                ),
                 [("thread-stale", 1002, "Stale Thread")],
             )
             self.assertEqual(
-                store.get_stale_mirror_project_rows(db_path, {"keep-project"}),
+                store.get_stale_mirror_project_rows(
+                    db_path,
+                    {"keep-project"},
+                    updated_before=1000.0,
+                ),
                 [("stale-project", "Stale", 222)],
             )
 
-            store.delete_stale_mirror_rows(db_path, {"thread-keep"}, {"keep-project"})
+            store.delete_stale_mirror_rows(
+                db_path,
+                {"thread-keep"},
+                {"keep-project"},
+                updated_before=1000.0,
+            )
             with sqlite3.connect(db_path) as conn:
                 thread_rows = cast(
                     list[tuple[str]],
@@ -92,15 +109,28 @@ class StoreMirrorCleanupTests(unittest.TestCase):
                 self._insert_thread(conn, "thread-stale", "stale-project", "old", 333, 444)
 
             self.assertEqual(
-                store.get_stale_mirror_thread_rows(db_path, {"thread-1"}),
+                store.get_stale_mirror_thread_rows(
+                    db_path,
+                    {"thread-1"},
+                    updated_before=1000.0,
+                ),
                 [("thread-stale", 444, "old")],
             )
             self.assertEqual(
-                store.get_stale_mirror_project_rows(db_path, {"canonical"}),
+                store.get_stale_mirror_project_rows(
+                    db_path,
+                    {"canonical"},
+                    updated_before=1000.0,
+                ),
                 [("stale-project", "old", 333)],
             )
 
-            store.delete_stale_mirror_rows(db_path, {"thread-1"}, {"canonical"})
+            store.delete_stale_mirror_rows(
+                db_path,
+                {"thread-1"},
+                {"canonical"},
+                updated_before=1000.0,
+            )
 
             with sqlite3.connect(db_path) as conn:
                 project_rows = cast(
@@ -123,16 +153,48 @@ class StoreMirrorCleanupTests(unittest.TestCase):
                 ({222}, [111]),
             )
 
-    def test_stale_mirror_delete_with_empty_sets_removes_all_rows(self) -> None:
+    def test_stale_mirror_delete_with_empty_sets_honors_cutoff(self) -> None:
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp_dir:
             db_path = self._db_path(temp_dir)
             with sqlite3.connect(db_path) as conn:
-                self._insert_project(conn, "project", "Project", 111)
-                self._insert_thread(conn, "thread", "project", "Thread", 111, 1001)
+                self._insert_project(conn, "old-project", "Old", 111, updated_at=99.0)
+                self._insert_project(conn, "equal-project", "Equal", 112, updated_at=100.0)
+                self._insert_project(conn, "new-project", "New", 113, updated_at=101.0)
+                self._insert_thread(
+                    conn, "old-thread", "old-project", "Old", 111, 1001, updated_at=99.0
+                )
+                self._insert_thread(
+                    conn, "equal-thread", "equal-project", "Equal", 112, 1002, updated_at=100.0
+                )
+                self._insert_thread(
+                    conn, "new-thread", "new-project", "New", 113, 1003, updated_at=101.0
+                )
 
-            store.delete_stale_mirror_rows(db_path, set(), set())
-            self.assertEqual(store.get_stale_mirror_thread_rows(db_path, set()), [])
-            self.assertEqual(store.get_stale_mirror_project_rows(db_path, set()), [])
+            self.assertEqual(
+                store.get_stale_mirror_thread_rows(db_path, set(), updated_before=100.0),
+                [("old-thread", 1001, "Old")],
+            )
+            self.assertEqual(
+                store.get_stale_mirror_project_rows(db_path, set(), updated_before=100.0),
+                [("old-project", "Old", 111)],
+            )
+
+            store.delete_stale_mirror_rows(
+                db_path,
+                set(),
+                set(),
+                updated_before=100.0,
+            )
+            with sqlite3.connect(db_path) as conn:
+                thread_rows = conn.execute(
+                    "SELECT codex_thread_id FROM mirror_threads ORDER BY codex_thread_id"
+                ).fetchall()
+                project_rows = conn.execute(
+                    "SELECT project_key FROM mirror_projects ORDER BY project_key"
+                ).fetchall()
+
+            self.assertEqual(thread_rows, [("equal-thread",), ("new-thread",)])
+            self.assertEqual(project_rows, [("equal-project",), ("new-project",)])
 
     def test_archive_cleanup_remaining_ids_and_membership(self) -> None:
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp_dir:

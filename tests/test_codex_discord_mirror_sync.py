@@ -100,8 +100,15 @@ class MirrorSyncTests(unittest.IsolatedAsyncioTestCase):
             events.append(("resolve_project_channels", f"{guild}:{list(project_channel_ids)}"))
             return ["project-channel"]
 
-        async def cleanup_orphans(project_channels, known_thread_ids, bot_user_id, *, delivery_exceptions):
-            _ = delivery_exceptions
+        async def cleanup_orphans(
+            project_channels,
+            known_thread_ids,
+            bot_user_id,
+            *,
+            is_known_thread_id,
+            delivery_exceptions,
+        ):
+            _ = (is_known_thread_id, delivery_exceptions)
             events.append(("cleanup_orphans", f"{list(project_channels)}:{sorted(known_thread_ids)}:{bot_user_id}"))
             return {"deleted": 2, "skipped": 3, "failed": 0, "errors": []}
 
@@ -138,6 +145,7 @@ class MirrorSyncTests(unittest.IsolatedAsyncioTestCase):
                 bot_user_id=999,
                 db_path=db_path,
                 get_project_key=lambda thread: thread.project_key,
+                updated_before=30.0,
                 protected_thread_ids={"gpt-thread"},
                 protected_project_keys={"codex:chats"},
             )
@@ -145,15 +153,18 @@ class MirrorSyncTests(unittest.IsolatedAsyncioTestCase):
         get_stale_threads.assert_called_once_with(
             db_path,
             {"thread-1", "thread-2", "gpt-thread"},
+            updated_before=30.0,
         )
         get_stale_projects.assert_called_once_with(
             db_path,
             {"project-a", "project-b", "codex:chats"},
+            updated_before=30.0,
         )
         delete_rows.assert_called_once_with(
             db_path,
             {"thread-1", "thread-2", "gpt-thread"},
             {"project-a", "project-b", "codex:chats"},
+            updated_before=30.0,
         )
         get_remaining.assert_called_once_with(db_path)
         self.assertEqual(len(result.stale_threads), 1)

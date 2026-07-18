@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio  # noqa: ANYIO_OK
-from collections.abc import AsyncIterator, Awaitable, Iterable
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterable
 from typing import Protocol
 
 import codex_discord_mirror_sync_result as mirror_sync_result
@@ -35,6 +35,7 @@ async def cleanup_orphan_discord_threads(
     known_thread_ids: set[int],
     bot_user_id: int | None,
     *,
+    is_known_thread_id: Callable[[int], bool],
     delivery_exceptions: tuple[type[BaseException], ...],
     archived_limit: int = 50,
     archived_timeout_seconds: float = 5.0,
@@ -55,6 +56,9 @@ async def cleanup_orphan_discord_threads(
             skipped += 1
             return
         if bot_user_id is not None and thread.owner_id not in {None, bot_user_id}:
+            skipped += 1
+            return
+        if is_known_thread_id(thread_id):
             skipped += 1
             return
         try:

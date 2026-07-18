@@ -22,6 +22,8 @@ def _placeholders(count: int) -> str:
 def get_stale_mirror_thread_rows(
     db_path: Path,
     valid_thread_ids: set[str],
+    *,
+    updated_before: float,
 ) -> list[_StaleMirrorThreadRow]:
     _init_mirror_db(db_path)
     with sqlite3.connect(db_path) as conn:
@@ -33,8 +35,8 @@ def get_stale_mirror_thread_rows(
                     "SELECT codex_thread_id, discord_thread_id, thread_title "
                     + "FROM mirror_threads WHERE codex_thread_id NOT IN ("
                     + _placeholders(len(ordered_ids))
-                    + ")",
-                    ordered_ids,
+                    + ") AND updated_at < ?",
+                    (*ordered_ids, float(updated_before)),
                 ).fetchall(),
             )
         else:
@@ -42,7 +44,8 @@ def get_stale_mirror_thread_rows(
                 list[_StaleMirrorThreadRow],
                 conn.execute(
                     "SELECT codex_thread_id, discord_thread_id, thread_title "
-                    + "FROM mirror_threads"
+                    + "FROM mirror_threads WHERE updated_at < ?",
+                    (float(updated_before),),
                 ).fetchall(),
             )
     return list(rows)
@@ -51,6 +54,8 @@ def get_stale_mirror_thread_rows(
 def get_stale_mirror_project_rows(
     db_path: Path,
     valid_project_keys: set[str],
+    *,
+    updated_before: float,
 ) -> list[_StaleMirrorProjectRow]:
     _init_mirror_db(db_path)
     with sqlite3.connect(db_path) as conn:
@@ -62,15 +67,17 @@ def get_stale_mirror_project_rows(
                     "SELECT project_key, project_name, discord_channel_id "
                     + "FROM mirror_projects WHERE project_key NOT IN ("
                     + _placeholders(len(ordered_keys))
-                    + ")",
-                    ordered_keys,
+                    + ") AND updated_at < ?",
+                    (*ordered_keys, float(updated_before)),
                 ).fetchall(),
             )
         else:
             rows = cast(
                 list[_StaleMirrorProjectRow],
                 conn.execute(
-                    "SELECT project_key, project_name, discord_channel_id FROM mirror_projects"
+                    "SELECT project_key, project_name, discord_channel_id "
+                    + "FROM mirror_projects WHERE updated_at < ?",
+                    (float(updated_before),),
                 ).fetchall(),
             )
     return list(rows)
@@ -80,6 +87,8 @@ def delete_stale_mirror_rows(
     db_path: Path,
     valid_thread_ids: set[str],
     valid_project_keys: set[str],
+    *,
+    updated_before: float,
 ) -> None:
     _init_mirror_db(db_path)
     with sqlite3.connect(db_path) as conn:
@@ -88,21 +97,27 @@ def delete_stale_mirror_rows(
             _ = conn.execute(
                 "DELETE FROM mirror_threads WHERE codex_thread_id NOT IN ("
                 + _placeholders(len(ordered_ids))
-                + ")",
-                ordered_ids,
+                + ") AND updated_at < ?",
+                (*ordered_ids, float(updated_before)),
             )
         else:
-            _ = conn.execute("DELETE FROM mirror_threads")
+            _ = conn.execute(
+                "DELETE FROM mirror_threads WHERE updated_at < ?",
+                (float(updated_before),),
+            )
         if valid_project_keys:
             ordered_keys = tuple(sorted(str(project_key) for project_key in valid_project_keys))
             _ = conn.execute(
                 "DELETE FROM mirror_projects WHERE project_key NOT IN ("
                 + _placeholders(len(ordered_keys))
-                + ")",
-                ordered_keys,
+                + ") AND updated_at < ?",
+                (*ordered_keys, float(updated_before)),
             )
         else:
-            _ = conn.execute("DELETE FROM mirror_projects")
+            _ = conn.execute(
+                "DELETE FROM mirror_projects WHERE updated_at < ?",
+                (float(updated_before),),
+            )
 
 
 def delete_archived_mirror_state(db_path: Path, codex_thread_id: str) -> dict[str, int]:

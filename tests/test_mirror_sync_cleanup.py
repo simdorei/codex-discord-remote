@@ -249,8 +249,10 @@ class MirrorSyncCleanupTests(unittest.IsolatedAsyncioTestCase):
                     _known_thread_ids,
                     _bot_user_id,
                     *,
+                    is_known_thread_id,
                     delivery_exceptions,
                 ):
+                    _ = (is_known_thread_id, delivery_exceptions)
                     return {"deleted": 0, "missing": 0, "skipped": 0, "failed": 0, "errors": []}
 
                 mirror_sync.discord_mirror_stale.delete_stale_discord_threads = fake_delete_threads
@@ -267,6 +269,7 @@ class MirrorSyncCleanupTests(unittest.IsolatedAsyncioTestCase):
                     bot_user_id=None,
                     db_path=db_path,
                     get_project_key=lambda _thread: "canonical",
+                    updated_before=1000.0,
                 )
 
                 with sqlite3.connect(db_path) as conn:

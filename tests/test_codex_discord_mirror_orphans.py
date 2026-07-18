@@ -83,6 +83,7 @@ class MirrorOrphanCleanupTests(unittest.IsolatedAsyncioTestCase):
             [channel],
             {12},
             123,
+            is_known_thread_id=lambda thread_id: thread_id == 12,
             delivery_exceptions=(_DeleteFailure,),
         )
 
@@ -102,6 +103,7 @@ class MirrorOrphanCleanupTests(unittest.IsolatedAsyncioTestCase):
             [channel],
             set(),
             123,
+            is_known_thread_id=lambda thread_id: False,
             delivery_exceptions=(_DeleteFailure,),
         )
 
@@ -119,6 +121,7 @@ class MirrorOrphanCleanupTests(unittest.IsolatedAsyncioTestCase):
             [channel],
             set(),
             123,
+            is_known_thread_id=lambda thread_id: False,
             delivery_exceptions=(_DeleteFailure,),
         )
 

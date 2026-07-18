@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio  # noqa: ANYIO_OK
+import time
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -10,6 +11,7 @@ from typing import Protocol, cast
 import discord
 
 import codex_discord_mirror_channels as discord_mirror_channels
+import codex_discord_mirror_coordination as discord_mirror_coordination
 import codex_discord_mirror_orphans as discord_mirror_orphans
 import codex_discord_mirror_scope as discord_mirror_scope
 import codex_discord_mirror_stale as discord_mirror_stale
@@ -128,12 +130,14 @@ async def ensure_mirror_threads(
     return MirrorThreadEnsureResult(projects=projects, mirrored=mirrored)
 
 
+@discord_mirror_coordination.serialize_mirror_mutation
 async def sync_codex_mirror(
     bot: BotT,
     *,
     limit: int | None = None,
     deps: CodexMirrorSyncDeps[BotT, ThreadT, GuildT, CategoryT, ProjectChannelT, ThreadChannelT],
 ) -> str:
+    cleanup_updated_before = time.time()
     scope = "db-root" if limit is None else str(discord_mirror_scope.bounded_mirror_limit(limit))
     cleanup_scope = "full_db_root" if limit is None else "limited_sync_no_prune"
     deps.log(f"mirror_sync_start limit={scope}")
@@ -158,9 +162,11 @@ async def sync_codex_mirror(
     )
 
     if limit is None:
-        protected_thread_ids = discord_user_root_scope.load_gpt_registered_thread_ids(
+        gpt_registered_thread_ids = discord_user_root_scope.load_gpt_registered_thread_ids(
             deps.db_path
         )
+        active_thread_ids = {thread.id for thread in scope_threads}
+        protected_thread_ids = gpt_registered_thread_ids & active_thread_ids
         cleanup_result = await cleanup_full_mirror_sync(
             guild,
             category,
@@ -174,6 +180,7 @@ async def sync_codex_mirror(
                 if protected_thread_ids
                 else set()
             ),
+            updated_before=cleanup_updated_before,
         )
         stale_threads = cleanup_result.stale_threads
         stale_projects = cleanup_result.stale_projects
@@ -219,6 +226,7 @@ async def cleanup_full_mirror_sync(
     bot_user_id: int | None,
     db_path: Path,
     get_project_key: Callable[[CleanupThreadT], str],
+    updated_before: float,
     protected_thread_ids: set[str] | frozenset[str] = frozenset(),
     protected_project_keys: set[str] | frozenset[str] = frozenset(),
 ) -> MirrorFullCleanupResult:
@@ -228,16 +236,18 @@ async def cleanup_full_mirror_sync(
     )
     stale_threads = cast(
         list[discord_mirror_stale.StaleMirrorThreadRow],
-        discord_store.get_stale_mirror_thread_rows(db_path, valid_thread_ids),
+        discord_store.get_stale_mirror_thread_rows(db_path, valid_thread_ids, updated_before=updated_before),
     )
     stale_projects = cast(
         list[discord_mirror_stale.StaleMirrorProjectRow],
-        discord_store.get_stale_mirror_project_rows(db_path, valid_project_keys),
+        discord_store.get_stale_mirror_project_rows(db_path, valid_project_keys, updated_before=updated_before),
     )
 
     discord_guild = cast(discord.Guild, guild)
     discord_category = cast(discord.CategoryChannel, category)
-    discord_store.delete_stale_mirror_rows(db_path, valid_thread_ids, valid_project_keys)
+    discord_store.delete_stale_mirror_rows(
+        db_path, valid_thread_ids, valid_project_keys, updated_before=updated_before
+    )
     known_thread_ids, project_channel_ids = discord_store.get_remaining_mirror_discord_ids(db_path)
     stale_cleanup = await discord_mirror_stale.delete_stale_discord_threads(
         discord_guild,
@@ -258,6 +268,9 @@ async def cleanup_full_mirror_sync(
         project_channels,
         known_thread_ids,
         bot_user_id,
+        is_known_thread_id=lambda thread_id: discord_store.is_mirrored_channel_id(
+            db_path, thread_id
+        ),
         delivery_exceptions=(discord.Forbidden, discord.HTTPException),
     )
     return MirrorFullCleanupResult(

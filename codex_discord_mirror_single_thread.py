@@ -8,6 +8,7 @@ from typing import Generic, TypeVar, override
 
 import discord
 
+import codex_discord_mirror_coordination as discord_mirror_coordination
 from codex_thread_models import ThreadInfo
 
 BotT = TypeVar("BotT")
@@ -55,6 +56,7 @@ class MirrorSingleThreadDeps(Generic[BotT]):
     log: Callable[[str], None]
 
 
+@discord_mirror_coordination.serialize_mirror_mutation
 async def mirror_single_codex_thread(
     bot: BotT,
     thread_id: str,

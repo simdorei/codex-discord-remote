@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+# noqa: SIZE_OK — cohesive integration scenarios for state-root mirror synchronization
+
 import os
 import sqlite3
 import tempfile
@@ -103,7 +105,7 @@ class MirrorSyncStateRootScopeTests(unittest.IsolatedAsyncioTestCase):
             else:
                 os.environ["CODEX_DISCORD_LOG_PATH"] = old_log_path
 
-    async def test_sync_codex_mirror_includes_gpt_chat_created_root_and_preserves_provenance(self) -> None:
+    async def test_sync_preserves_active_gpt_root_and_prunes_archived_gpt_row(self) -> None:
         old_db_path = bot.MIRROR_DB_PATH
         bridge = bridge_module()
         old_load_user_root_threads = bridge.load_user_root_threads
@@ -158,6 +160,19 @@ class MirrorSyncStateRootScopeTests(unittest.IsolatedAsyncioTestCase):
                             "active",
                         ),
                     )
+                    _ = conn.execute(
+                        "INSERT INTO mirror_threads VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                        (
+                            "gpt-archived",
+                            "codex:chats",
+                            "Archived GPT",
+                            900,
+                            902,
+                            1.0,
+                            "gpt_chat",
+                            "active",
+                        ),
+                    )
                 ordinary = self.make_thread("ordinary-root", str(Path(temp_dir)))
                 gpt = self.make_thread("gpt-root", str(Path(temp_dir)))
                 mirrored_ids: list[str] = []
@@ -199,10 +214,16 @@ class MirrorSyncStateRootScopeTests(unittest.IsolatedAsyncioTestCase):
                     gpt_row = conn.execute(
                         "SELECT managed_by FROM mirror_threads WHERE codex_thread_id = 'gpt-root'"
                     ).fetchone()
+                    archived_row = conn.execute(
+                        "SELECT codex_thread_id FROM mirror_threads "
+                        "WHERE codex_thread_id = 'gpt-archived'"
+                    ).fetchone()
 
             self.assertCountEqual(mirrored_ids, ["ordinary-root", "gpt-root"])
             self.assertEqual(gpt_row, ("gpt_chat",))
+            self.assertIsNone(archived_row)
             self.assertIn("threads: 2", output)
+            self.assertIn("stale_threads_removed: 1", output)
         finally:
             bot.MIRROR_DB_PATH = old_db_path
             bridge.load_user_root_threads = old_load_user_root_threads
