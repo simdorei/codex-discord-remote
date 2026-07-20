@@ -73,8 +73,6 @@ class BotClientAdapterRuntime(BotClientAdapterBase):
                 self._history_poll_primed_channels: set[int] = set()
                 self._history_poll_last_at = "-"
                 self._session_mirror_task: ModuleValue | None = None
-                self.chatgpt_app_mirror_task: ModuleValue | None = None
-                self.chatgpt_app_mirror_last_failure: str | None = None
                 self._session_mirror_last_at = "-"
                 self._session_mirror_seen_agent_messages: dict[str, dict[str, float]] = {}
                 self._session_mirror_seen_user_messages: dict[str, dict[str, float]] = {}
@@ -144,20 +142,6 @@ class BotClientAdapterRuntime(BotClientAdapterBase):
 
             async def session_mirror_loop(self) -> None:
                 await runtime._await_runtime("SESSION_MIRROR_RUNTIME", "session_mirror_loop", self)
-
-            async def start_chatgpt_app_mirroring(self) -> None:
-                await runtime._await_runtime("CHATGPT_APP_MIRROR_RUNTIME", "start", self)
-
-            async def chatgpt_app_mirror_loop(self) -> None:
-                await runtime._await_runtime("CHATGPT_APP_MIRROR_RUNTIME", "loop", self)
-
-            async def send_chatgpt_mirror_delivery(self, delivery: ModuleValue) -> None:
-                await runtime._await_runtime(
-                    "CHATGPT_APP_MIRROR_ADAPTER_RUNTIME",
-                    "send_delivery",
-                    self,
-                    delivery,
-                )
 
             async def resolve_session_mirror_channel(self, discord_thread_id: int) -> ModuleValue | None:
                 return await runtime._await_runtime_value("SESSION_MIRROR_RUNTIME", "resolve_session_mirror_channel", self, discord_thread_id)

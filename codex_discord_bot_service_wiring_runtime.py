@@ -12,7 +12,6 @@ from typing import TypeAlias, cast
 import codex_discord_attachments as discord_attachments
 import codex_discord_bot_archive_mirror_cleanup_runtime as discord_bot_archive_mirror_cleanup_runtime
 import codex_discord_bot_channel_typing_runtime as discord_bot_channel_typing_runtime
-import codex_discord_bot_chatgpt_mirror_adapter_runtime as discord_bot_chatgpt_mirror_adapter_runtime
 import codex_discord_bot_client_adapter_runtime as discord_bot_client_adapter_runtime
 import codex_discord_bot_component_wiring_runtime as discord_bot_component_wiring_runtime
 import codex_discord_bot_delivery_adapter_runtime as discord_bot_delivery_adapter_runtime
@@ -41,7 +40,6 @@ class BotServiceWiringRuntime:
         self._install_ready_runtime()
         self._install_socket_runtime()
         self._install_stop_runtime()
-        self._install_chatgpt_app_mirror_runtime()
         self._install_client_runtime()
         self._install_delivery_runtime()
         self._set("build_startup_notice", build_startup_notice_text)
@@ -111,13 +109,6 @@ class BotServiceWiringRuntime:
         logging_command_tree = cast(type[ModuleValue], getattr(self.module, "LoggingCommandTree"))
         self._set("CLIENT_ADAPTER_RUNTIME", adapter_runtime)
         self._set("CodexDiscordBot", adapter_runtime.make_codex_discord_bot_class(logging_command_tree))
-
-    def _install_chatgpt_app_mirror_runtime(self) -> None:
-        adapter_runtime = discord_bot_chatgpt_mirror_adapter_runtime.BotChatGptMirrorAdapterRuntime(
-            module=self.module
-        )
-        self._set("CHATGPT_APP_MIRROR_ADAPTER_RUNTIME", adapter_runtime)
-        self._set("CHATGPT_APP_MIRROR_RUNTIME", adapter_runtime.make_runtime())
 
     def _install_delivery_runtime(self) -> None:
         adapter_runtime = discord_bot_delivery_adapter_runtime.BotDeliveryAdapterRuntime(module=self.module)

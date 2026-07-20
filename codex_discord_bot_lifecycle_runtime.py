@@ -102,7 +102,6 @@ class BotLifecycleRuntime(Generic[GuildObjectT]):
         await self._call_optional_ready_hook(bot, "start_history_polling")
         await self.deps.send_startup_notice(bot)
         await self._call_optional_ready_hook(bot, "start_session_mirroring")
-        await self._call_optional_ready_hook(bot, "start_chatgpt_app_mirroring")
         await bot.log_startup_diagnostics()
 
     async def _call_optional_ready_hook(self, bot: ReadyBot, name: str) -> None:

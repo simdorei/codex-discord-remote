@@ -10,9 +10,6 @@ STORE_SCHEMA_TABLES: tuple[str, ...] = (
     "discord_processed_messages",
     "codex_session_mirror_offsets",
     "codex_session_mirror_events",
-    "chatgpt_app_mirror_slots",
-    "chatgpt_app_mirror_conversations",
-    "chatgpt_app_mirror_events",
 )
 
 STORE_SCHEMA_STATEMENTS: tuple[str, ...] = (
@@ -67,26 +64,6 @@ STORE_SCHEMA_STATEMENTS: tuple[str, ...] = (
         "event_digest TEXT PRIMARY KEY, "
         "codex_thread_id TEXT NOT NULL, "
         "created_at REAL NOT NULL)"
-    ),
-    (
-        "CREATE TABLE IF NOT EXISTS chatgpt_app_mirror_slots ("
-        "slot_index INTEGER PRIMARY KEY CHECK(slot_index BETWEEN 1 AND 5), "
-        "conversation_id TEXT UNIQUE NOT NULL, "
-        "discord_thread_id INTEGER UNIQUE NOT NULL, "
-        "created_at REAL NOT NULL)"
-    ),
-    (
-        "CREATE TABLE IF NOT EXISTS chatgpt_app_mirror_conversations ("
-        "conversation_id TEXT PRIMARY KEY, "
-        "primed_at REAL NOT NULL)"
-    ),
-    (
-        "CREATE TABLE IF NOT EXISTS chatgpt_app_mirror_events ("
-        "conversation_id TEXT NOT NULL, "
-        "message_id TEXT NOT NULL, "
-        "role TEXT NOT NULL CHECK(role IN ('user', 'assistant')), "
-        "seen_at REAL NOT NULL, "
-        "PRIMARY KEY(conversation_id, message_id))"
     ),
 )
 
