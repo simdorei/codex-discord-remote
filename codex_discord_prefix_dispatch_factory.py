@@ -11,6 +11,7 @@ import codex_discord_prefix_new_command as discord_prefix_new_command
 import codex_discord_prefix_prompt_commands as discord_prefix_prompt_commands
 import codex_discord_prefix_qa_command as discord_prefix_qa_command
 import codex_discord_prefix_queue_commands as discord_prefix_queue_commands
+import codex_discord_prefix_resume_command as discord_prefix_resume_command
 import codex_discord_prefix_status_commands as discord_prefix_status_commands
 import codex_discord_prefix_steer_command as discord_prefix_steer_command
 
@@ -73,6 +74,9 @@ class PrefixDispatchFactoryDeps(Protocol[BotT]):
     def make_prefix_queue_deps(self) -> discord_prefix_queue_commands.PrefixQueueCommandDeps:
         ...
 
+    def make_prefix_resume_deps(self) -> discord_prefix_resume_command.PrefixResumeCommandDeps:
+        ...
+
     def make_prefix_mirror_deps(self) -> discord_prefix_mirror_commands.PrefixMirrorCommandDeps:
         ...
 
@@ -96,6 +100,14 @@ class PrefixDispatchFactoryDeps(Protocol[BotT]):
 
 
 def build_prefix_handlers(factory: PrefixDispatchFactoryDeps[BotT]) -> tuple[PrefixHandler, ...]:
+    async def handle_resume(command: str, arg: str, message: PrefixDispatchMessage) -> bool:
+        return await discord_prefix_resume_command.handle_prefix_resume_command(
+            command,
+            arg,
+            message,
+            deps=factory.make_prefix_resume_deps(),
+        )
+
     async def handle_steer(command: str, arg: str, message: PrefixDispatchMessage) -> bool:
         return await discord_prefix_steer_command.handle_prefix_steer_command(
             command,
@@ -181,6 +193,7 @@ def build_prefix_handlers(factory: PrefixDispatchFactoryDeps[BotT]) -> tuple[Pre
 
     return (
         handle_host,
+        handle_resume,
         handle_steer,
         handle_status,
         handle_queue,

@@ -203,7 +203,7 @@ class DiscordSteeringWatchIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 "thread-1",
             )
 
-            self.assertEqual(target.messages, [("steered final", None)])
+            self.assertEqual(target.messages, [("Final\n\nsteered final", None)])
         finally:
             bot.run_steering_watch_stream = original_run_watch
 

@@ -4,7 +4,8 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-from codex_desktop_bridge_command_ask_types import CommandAskDeps, WatchResult
+from codex_desktop_bridge_command_ask_types import CommandAskDeps
+from codex_desktop_bridge_final_answer_types import WatchForFinalAnswerResult as WatchResult
 from codex_thread_models import ThreadInfo
 
 
@@ -53,7 +54,7 @@ def wait_for_final_answer(
 
     commentary = result.get("commentary") or []
     _print_wait_commentary(
-        include_commentary=args.include_commentary,
+        include_commentary=args.include_commentary or result.get("status") == "progress",
         commentary=commentary,
         streamed_live=result.get("streamed_live") is True,
     )
@@ -89,6 +90,16 @@ def _print_wait_result(result: WatchResult, commentary: list[str]) -> int:
     if result.get("status") == "aborted":
         print("[aborted]")
         return 0
+
+    if result.get("status") == "progress":
+        print("[ready]")
+        return 0
+
+    if result.get("status") in {"failed", "transport_error"}:
+        marker = "[failed]" if result.get("status") == "failed" else "[transport_error]"
+        print(marker)
+        print(result.get("error_message") or "Codex terminal state could not be verified.")
+        return 1
 
     print("[timeout]")
     if commentary:

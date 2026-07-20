@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import final
+from typing import Final, final
 
 from codex_app_server_transport_delivery import (
     AppServerDeliveryResult as AppServerDeliveryResult,
@@ -20,8 +20,27 @@ from codex_app_server_transport_replies import (
     split_input_values as split_input_values,
 )
 from codex_app_server_transport_resident import ResidentCodexAppServerTransport
+from codex_app_server_transport_goal import (
+    GoalAbsent as GoalAbsent,
+    GoalPresent as GoalPresent,
+    GoalTransportError as GoalTransportError,
+    ThreadGoalStatus as ThreadGoalStatus,
+    ThreadGoalUpdate as ThreadGoalUpdate,
+    ThreadGoalLookup as ThreadGoalLookup,
+    parse_thread_goal_status,
+)
 from codex_app_server_transport_threads import (
     get_in_progress_turn_id as get_in_progress_turn_id,
+)
+from codex_app_server_transport_turn_outcomes import (
+    InterruptOrigin as InterruptOrigin,
+    TurnCompletion as TurnCompletion,
+    TurnCompletionFound as TurnCompletionFound,
+    TurnCompletionObservation as TurnCompletionObservation,
+    TurnCompletionPending as TurnCompletionPending,
+    TurnCompletionTransportError as TurnCompletionTransportError,
+    TurnStatus as TurnStatus,
+    parse_thread_turn_completions,
 )
 
 
@@ -29,12 +48,19 @@ __all__ = [
     "AppServerDeliveryResult",
     "CodexAppServerTransportError",
     "PersistentCodexAppServer",
+    "ThreadGoalStatus",
+    "ThreadGoalLookup",
+    "TurnCompletion",
+    "TurnCompletionObservation",
+    "TurnStatus",
     "build_approval_response",
     "build_input_response",
     "parse_approval_answer",
     "resolve_input_answers",
     "split_input_values",
 ]
+
+INITIAL_RESUME_TIMEOUT_SEC: Final = 10.0
 
 
 @final
@@ -82,15 +108,72 @@ class PersistentCodexAppServer(ResidentCodexAppServerTransport):
             "verification_busy_state": "submitted",
         }
 
-    def read_thread(self, thread_id: str, *, include_turns: bool = False) -> JsonObject:
+    def read_thread(
+        self,
+        thread_id: str,
+        *,
+        include_turns: bool = False,
+        timeout_sec: float = 8.0,
+    ) -> JsonObject:
         return self.request(
             "thread/read",
             {"threadId": thread_id, "includeTurns": include_turns},
-            timeout_sec=8.0,
+            timeout_sec=timeout_sec,
         )
 
-    def resume_thread(self, thread_id: str) -> JsonObject:
-        return self.request("thread/resume", {"threadId": thread_id}, timeout_sec=10.0)
+    def get_thread_goal_status(
+        self,
+        thread_id: str,
+        *,
+        timeout_sec: float = 8.0,
+    ) -> ThreadGoalStatus | None:
+        result = self.request(
+            "thread/goal/get",
+            {"threadId": thread_id},
+            timeout_sec=timeout_sec,
+        )
+        return parse_thread_goal_status(result, expected_thread_id=thread_id)
+
+    def get_thread_goal_lookup(
+        self,
+        thread_id: str,
+        *,
+        timeout_sec: float = 3.0,
+    ) -> ThreadGoalLookup:
+        try:
+            status = self.get_thread_goal_status(thread_id, timeout_sec=timeout_sec)
+        except (CodexAppServerTransportError, OSError, TimeoutError) as exc:
+            return GoalTransportError(f"{type(exc).__name__}: {str(exc)[:300]}")
+        return GoalAbsent() if status is None else GoalPresent(status)
+
+    def get_thread_turn_completions(
+        self,
+        thread_id: str,
+        *,
+        timeout_sec: float = 3.0,
+    ) -> dict[str, TurnCompletion]:
+        result = self.read_thread(thread_id, include_turns=True, timeout_sec=timeout_sec)
+        completions = parse_thread_turn_completions(result, expected_thread_id=thread_id)
+        for turn_id in list(completions):
+            cached = self.get_cached_turn_completion(thread_id, turn_id)
+            if cached is not None:
+                completions[turn_id] = cached
+        return completions
+
+    def resume_thread(self, thread_id: str, *, timeout_sec: float = INITIAL_RESUME_TIMEOUT_SEC) -> JsonObject:
+        deadline = self.monotonic_func() + max(timeout_sec, 0.0)
+        first_timeout = min(INITIAL_RESUME_TIMEOUT_SEC, max(timeout_sec, 0.0))
+        try:
+            return self.request("thread/resume", {"threadId": thread_id}, timeout_sec=first_timeout)
+        except TimeoutError:
+            remaining = max(0.0, deadline - self.monotonic_func())
+            if remaining <= 0:
+                raise
+            self._log(
+                f"app_server_thread_resume_retry thread={thread_id} "
+                + f"first_timeout_sec={first_timeout:.1f} remaining_sec={remaining:.1f}"
+            )
+            return self.request("thread/resume", {"threadId": thread_id}, timeout_sec=remaining)
 
     def start_turn(self, thread_id: str, prompt: str) -> JsonObject:
         return self.request(
@@ -120,22 +203,24 @@ class PersistentCodexAppServer(ResidentCodexAppServerTransport):
             timeout_sec=10.0,
         )
 
-    def get_active_turn_id(self, thread_id: str) -> str | None:
-        with self._lock:
-            turn_id = self._pending.active_turn_id(thread_id)
-            if turn_id:
-                return turn_id
+    def interrupt_turn_from_remote_user(self, thread_id: str, turn_id: str) -> JsonObject:
+        registered = self.register_remote_interrupt_intent(thread_id, turn_id)
         try:
-            payload = self.read_thread(thread_id, include_turns=True).get("thread")
+            return self.interrupt_turn(thread_id, turn_id)
+        except Exception:
+            if registered:
+                self.cancel_remote_interrupt_intent(thread_id, turn_id)
+            raise
+
+    def get_active_turn_id(self, thread_id: str) -> str | None:
+        try:
+            return self.get_active_turn_id_or_raise(thread_id)
         except (CodexAppServerTransportError, OSError, TimeoutError) as exc:
             self._log(
                 f"app_server_active_turn_read_failed thread={thread_id} "
                 + f"error_type={type(exc).__name__} error={str(exc)[:300]}"
             )
             return None
-        if not isinstance(payload, dict):
-            return None
-        return get_in_progress_turn_id(payload)
 
     def get_active_turn_id_or_raise(self, thread_id: str) -> str | None:
         with self._lock:
@@ -146,6 +231,5 @@ class PersistentCodexAppServer(ResidentCodexAppServerTransport):
         if not isinstance(payload, dict):
             return None
         return get_in_progress_turn_id(payload)
-
 
 DEFAULT_CLIENT = PersistentCodexAppServer()

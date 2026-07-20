@@ -113,6 +113,22 @@ class CommandAskEdgeTests(unittest.TestCase):
             self.assertEqual(aborted_exit, 0)
             self.assertIn("[aborted]", aborted_output)
 
+            progress_result: WatchForFinalAnswerResult = {
+                "status": "progress",
+                "commentary": ["more work remains"],
+                "final_answer": "",
+                "streamed_live": False,
+                "final_streamed_live": False,
+            }
+            progress_output, progress_exit = fakes.run_with_output(
+                fakes.args(ipc=True, include_commentary=False),
+                fakes.FakeDeps(thread=thread, watch_result=progress_result),
+            )
+            self.assertEqual(progress_exit, 0)
+            self.assertIn("[commentary]\nmore work remains", progress_output)
+            self.assertIn("[ready]", progress_output)
+            self.assertNotIn("[timeout]", progress_output)
+
             streamed_result = fakes.final_result("done")
             streamed_result["final_streamed_live"] = True
             streamed_output, streamed_exit = fakes.run_with_output(

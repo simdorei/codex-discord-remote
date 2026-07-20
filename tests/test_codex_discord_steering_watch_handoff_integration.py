@@ -67,7 +67,7 @@ class DiscordSteeringWatchHandoffIntegrationTests(unittest.IsolatedAsyncioTestCa
                 log_text = log_path.read_text(encoding="utf-8")
 
             self.assertTrue(streamed)
-            self.assertEqual(target.messages, [("approved follow-up", None)])
+            self.assertEqual(target.messages, [("Final\n\napproved follow-up", None)])
             self.assertIn("approval_followup_watch_done exit=0 target=thread-1", log_text)
             self.assertNotIn("discord_relay_suppressed_after_steering", log_text)
         finally:
@@ -116,7 +116,7 @@ class DiscordSteeringWatchHandoffIntegrationTests(unittest.IsolatedAsyncioTestCa
                     )
                 log_text = log_path.read_text(encoding="utf-8")
 
-            self.assertEqual(target.messages, [("current steered final", None)])
+            self.assertEqual(target.messages, [("Final\n\ncurrent steered final", None)])
             self.assertNotIn("steer_watch_suppressed_after_newer_handoff", log_text)
         finally:
             bot.get_runtime_state().steering_handoffs.clear()

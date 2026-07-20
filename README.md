@@ -161,6 +161,9 @@ DISCORD_STARTUP_CHANNEL_ID=channel_id_for_startup_notice
 DISCORD_ENABLE_MESSAGE_CONTENT=1
 DISCORD_PLAIN_ASK_MENTION_USER_IDS=your_bridge_bot_user_id
 DISCORD_SESSION_MIRROR=1
+CHATGPT_APP_MIRROR_ENABLED=0
+CHATGPT_APP_CDP_URL=http://127.0.0.1:9222
+CHATGPT_APP_MIRROR_DISCORD_THREAD_IDS=
 DISCORD_ENABLE_ATTACHMENTS=1
 CODEX_DESKTOP_EXE=
 CODEX_EXE=
@@ -179,6 +182,10 @@ Important fields:
 | `DISCORD_ENABLE_HOST_COMMANDS` | Default `0`. Keep disabled unless trusted users are allowlisted. |
 | `DISCORD_PLAIN_ASK_MENTION_USER_IDS` | Bot user IDs that must be mentioned for plain ask routing outside mapped threads. |
 | `DISCORD_SESSION_MIRROR` | Mirrors mapped Codex session output back into Discord. |
+| `CHATGPT_APP_MIRROR_ENABLED` | Default `0`. Set to `1` to mirror the selected ChatGPT app conversation into Discord without sending anything back to ChatGPT. |
+| `CHATGPT_APP_CDP_URL` | Local-only ChatGPT app inspection address. Only loopback hosts such as `127.0.0.1` are accepted. |
+| `CHATGPT_APP_MIRROR_DISCORD_THREAD_IDS` | Exactly five Discord thread IDs. Their order is frozen to the app's first through fifth recent conversations on the first successful connection. |
+| `CHATGPT_APP_MIRROR_POLL_SECONDS` | App inspection interval. Default `2`; allowed range `0.5` to `60`. |
 | `DISCORD_ENABLE_ATTACHMENTS` | Saves Discord attachments and includes local paths in Codex prompts. |
 | `CODEX_EXE` | Optional path to Codex CLI/app-server executable. |
 | `CODEX_DESKTOP_EXE` | Optional path to Codex Desktop executable. Installer tries to fill it. |
@@ -187,6 +194,25 @@ Important fields:
 Do not commit `.env`.
 
 The launchers read `PYTHON_EXE`, `CODEX_HOME`, `CODEX_EXE`, and `CODEX_DESKTOP_EXE` from `.env` before Python starts, so paths with spaces are passed to the bot as normal environment variables.
+
+### Mirror the selected ChatGPT app conversation
+
+This optional feature only reads the ChatGPT app screen. It does not click, type, submit a prompt, or automatically relay GPT messages into a Codex task. Existing Discord Remote input and Codex response mirroring continue independently.
+
+1. In Discord Developer Mode, copy the IDs of the five existing threads that should receive GPT conversations.
+2. Put those IDs into `CHATGPT_APP_MIRROR_DISCORD_THREAD_IDS` in first-to-fifth order and set `CHATGPT_APP_MIRROR_ENABLED=1`.
+3. Fully close the ChatGPT/Codex desktop app.
+4. Start it with the local inspection port:
+
+```powershell
+.\start-chatgpt-app-cdp.ps1
+```
+
+5. Start or restart the Discord bot.
+
+The launcher refuses to run while the desktop app is already open, and the inspection port is bound to `127.0.0.1` only. The first time one of the five conversations is selected, its existing messages are recorded as the starting point without being posted. After that, new completed `User` and `ChatGPT` messages appear in the corresponding Discord thread. A conversation remains assigned to its original thread even if the recent-conversation order later changes.
+
+The app screen exposes conversation titles but not its private conversation IDs. Keep the five recent titles unique. If the selected title is duplicated, the mirror logs an explicit ambiguity error and sends nothing, preventing a message from going to the wrong Discord thread.
 
 ## Run
 
@@ -274,6 +300,7 @@ Common prefix commands:
 - `!open`
 - `!open_abort`
 - `!stop`
+- `!resume [ref]`
 - `!status`
 - `!settings`
 - `!doctor`

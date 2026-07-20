@@ -87,6 +87,7 @@ def make_post_approval_watch_result(
     target_thread_id: str,
     *,
     bridge: ApprovalWatchBridge,
+    get_active_turn_id: Callable[[str], str | None],
     log_line: Callable[[str], None],
     expected_exceptions: ExceptionTypes,
 ) -> discord_steering.SteeringPromptResult | None:
@@ -99,6 +100,13 @@ def make_post_approval_watch_result(
                 + f"reason=session_missing path={session_path}"
             )
             return None
+        turn_id = get_active_turn_id(thread.id)
+        if not turn_id:
+            log_line(
+                f"approval_followup_watch_unavailable target={target_thread_id} "
+                + "reason=exact_active_turn_unavailable"
+            )
+            return None
         return discord_steering.SteeringPromptResult(
             0,
             "[approval_submitted]",
@@ -106,6 +114,7 @@ def make_post_approval_watch_result(
             target_ref=bridge.get_thread_workspace_ref(thread),
             session_path=str(session_path),
             start_offset=session_path.stat().st_size,
+            watch_target=discord_steering.NativeExactWatchTarget(turn_id),
         )
     except expected_exceptions as exc:
         log_line(

@@ -16,7 +16,8 @@ class FailingAppServerClient:
         _ = include_turns
         return {"thread": {"id": thread_id}}
 
-    def resume_thread(self, thread_id: str) -> JsonObject:
+    def resume_thread(self, thread_id: str, *, timeout_sec: float = 10.0) -> JsonObject:
+        _ = timeout_sec
         return {"thread": {"id": thread_id}}
 
     def start_turn(self, thread_id: str, prompt: str) -> JsonObject:

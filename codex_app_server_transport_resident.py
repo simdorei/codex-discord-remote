@@ -13,8 +13,9 @@ from codex_app_server_transport_process import (
     has_resident_app_server_stdio,
     start_resident_app_server_process,
 )
-import codex_desktop_bridge as bridge
+import codex_desktop_bridge_sidecar_resolver as bridge_resolver
 from codex_app_server_transport_pending import PendingRequestState
+from codex_app_server_transport_goal import ThreadGoalUpdate
 from codex_app_server_transport_replies import (
     CodexAppServerTransportError,
     JsonMapping,
@@ -22,9 +23,17 @@ from codex_app_server_transport_replies import (
     JsonValue,
     extract_response_result,
 )
+from codex_app_server_transport_turn_outcomes import (
+    TurnCompletion,
+    TurnCompletionFound,
+    TurnCompletionObservation,
+    TurnCompletionPending,
+    TurnCompletionTransportError,
+)
 
 
 LogFunc = Callable[[str], None]
+MonotonicFunc = Callable[[], float]
 _decode_json_value: Callable[[str], JsonValue] = json.loads
 
 
@@ -32,11 +41,13 @@ class ResidentCodexAppServerTransport:
     def __init__(
         self,
         *,
-        executable_resolver: Callable[[], str] = bridge.resolve_codex_app_server_executable,
+        executable_resolver: Callable[[], str] = bridge_resolver.resolve_codex_app_server_executable,
         log_func: LogFunc | None = None,
+        monotonic_func: MonotonicFunc = time.monotonic,
     ) -> None:
         self.executable_resolver: Callable[[], str] = executable_resolver
         self.log_func: LogFunc | None = log_func
+        self.monotonic_func: MonotonicFunc = monotonic_func
         self.process: subprocess.Popen[str] | None = None
         self._stdout_thread: threading.Thread | None = None
         self._lock: threading.RLock = threading.RLock()
@@ -44,6 +55,7 @@ class ResidentCodexAppServerTransport:
         self._request_lock: threading.Lock = threading.Lock()
         self._condition: threading.Condition = threading.Condition(self._lock)
         self._responses: dict[str, JsonObject] = {}
+        self._active_request_id: str | None = None
         self._pending: PendingRequestState = PendingRequestState()
         self._closed_error: str | None = None
         self._initialized: bool = False
@@ -65,6 +77,7 @@ class ResidentCodexAppServerTransport:
                 raise CodexAppServerTransportError("Resident Codex app-server stdio is unavailable.")
 
             self._responses.clear()
+            self._active_request_id = None
             self._pending.clear()
             self._closed_error = None
             self._initialized = False
@@ -91,6 +104,10 @@ class ResidentCodexAppServerTransport:
 
     def _is_running(self) -> bool:
         return self.process is not None and self.process.poll() is None
+
+    def is_running(self) -> bool:
+        with self._lock:
+            return self._is_running()
 
     def _drain_stdout(self) -> None:
         try:
@@ -129,10 +146,14 @@ class ResidentCodexAppServerTransport:
                 self._pending.record_server_request(message_id, message, self._log)
                 self._condition.notify_all()
             elif classified.kind == "response" and message_id is not None:
-                self._responses[message_id] = message
+                if message_id != self._active_request_id:
+                    self._log(f"app_server_transport_late_response_discarded id={message_id}")
+                else:
+                    self._responses[message_id] = message
                 self._condition.notify_all()
             else:
-                self._pending.record_notification(message, self._log)
+                self._pending.record_notification(message, self._log, now=self.monotonic_func())
+                self._condition.notify_all()
 
     def close_locked(self) -> None:
         process = self.process
@@ -160,17 +181,25 @@ class ResidentCodexAppServerTransport:
         return self._request_started(method, params or {}, timeout_sec=timeout_sec)
 
     def _request_started(self, method: str, params: JsonMapping, *, timeout_sec: float) -> JsonObject:
-        with self._request_lock:
+        deadline = self.monotonic_func() + max(timeout_sec, 0.0)
+        lock_timeout = max(0.0, deadline - self.monotonic_func())
+        if not self._request_lock.acquire(timeout=lock_timeout):
+            raise TimeoutError(f"Timed out waiting for resident app-server request slot for {method}.")
+        request_id: str | None = None
+        try:
             if not self._is_running():
                 raise CodexAppServerTransportError("Resident Codex app-server is not running.")
+            if self.monotonic_func() >= deadline:
+                raise TimeoutError(f"Timed out waiting for resident app-server request slot for {method}.")
             request_id = str(uuid.uuid4())
             payload: JsonObject = {
                 "id": request_id,
                 "method": method,
                 "params": dict(params),
             }
+            with self._condition:
+                self._active_request_id = request_id
             self._write_message(payload)
-            deadline = time.time() + max(timeout_sec, 0.0)
             with self._condition:
                 while True:
                     response = self._responses.pop(request_id, None)
@@ -180,10 +209,17 @@ class ResidentCodexAppServerTransport:
                         raise CodexAppServerTransportError(
                             f"Codex app-server exited while waiting for {method}: {self._closed_error}"
                         )
-                    remaining = deadline - time.time()
+                    remaining = deadline - self.monotonic_func()
                     if remaining <= 0:
                         raise TimeoutError(f"Timed out waiting for app-server response to {method}.")
                     _ = self._condition.wait(timeout=min(remaining, 0.5))
+        finally:
+            if request_id is not None:
+                with self._condition:
+                    if self._active_request_id == request_id:
+                        self._active_request_id = None
+                    _ = self._responses.pop(request_id, None)
+            self._request_lock.release()
 
     def notify(self, method: str, params: JsonMapping | None = None) -> None:
         self._write_message({"method": method, "params": dict(params or {})})
@@ -216,3 +252,53 @@ class ResidentCodexAppServerTransport:
     def get_latest_pending_input_request(self, thread_id: str) -> JsonObject | None:
         with self._lock:
             return self._pending.latest_input_request(thread_id)
+
+    def observe_turn_completion(self, thread_id: str, turn_id: str) -> TurnCompletionObservation:
+        with self._lock:
+            completion = self._pending.turn_completion(thread_id, turn_id)
+            if completion is not None:
+                return TurnCompletionFound(completion)
+            if self._closed_error is not None and not self._is_running():
+                return TurnCompletionTransportError(self._closed_error)
+            return TurnCompletionPending()
+
+    def wait_for_turn_completion(
+        self,
+        thread_id: str,
+        turn_id: str,
+        *,
+        timeout_sec: float,
+    ) -> TurnCompletionObservation:
+        deadline = self.monotonic_func() + max(0.0, timeout_sec)
+        with self._condition:
+            while True:
+                observation = self.observe_turn_completion(thread_id, turn_id)
+                if not isinstance(observation, TurnCompletionPending):
+                    return observation
+                remaining = deadline - self.monotonic_func()
+                if remaining <= 0:
+                    return observation
+                _ = self._condition.wait(timeout=min(remaining, 0.5))
+
+    def register_remote_interrupt_intent(self, thread_id: str, turn_id: str) -> bool:
+        with self._condition:
+            registered = self._pending.register_remote_interrupt_intent(
+                thread_id,
+                turn_id,
+                registered_at=self.monotonic_func(),
+            )
+            self._condition.notify_all()
+            return registered
+
+    def cancel_remote_interrupt_intent(self, thread_id: str, turn_id: str) -> None:
+        with self._condition:
+            self._pending.cancel_remote_interrupt_intent(thread_id, turn_id)
+            self._condition.notify_all()
+
+    def get_cached_goal_update(self, thread_id: str, turn_id: str) -> ThreadGoalUpdate | None:
+        with self._lock:
+            return self._pending.goal_update(thread_id, turn_id)
+
+    def get_cached_turn_completion(self, thread_id: str, turn_id: str) -> TurnCompletion | None:
+        with self._lock:
+            return self._pending.turn_completion(thread_id, turn_id)

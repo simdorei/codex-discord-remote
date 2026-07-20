@@ -16,6 +16,7 @@ import codex_discord_prefix_new_command as discord_prefix_new_command
 import codex_discord_prefix_prompt_commands as discord_prefix_prompt_commands
 import codex_discord_prefix_qa_command as discord_prefix_qa_command
 import codex_discord_prefix_queue_commands as discord_prefix_queue_commands
+import codex_discord_prefix_resume_command as discord_prefix_resume_command
 import codex_discord_prefix_status_commands as discord_prefix_status_commands
 import codex_discord_prefix_steer_command as discord_prefix_steer_command
 import codex_system_resources
@@ -180,6 +181,10 @@ class BotPrefixAdapterRuntime:
                 make_prefix_queue_deps=cast(
                     Callable[[], discord_prefix_queue_commands.PrefixQueueCommandDeps],
                     getattr(self.module, "_make_prefix_queue_command_deps"),
+                ),
+                make_prefix_resume_deps=cast(
+                    Callable[[], discord_prefix_resume_command.PrefixResumeCommandDeps],
+                    getattr(self.module, "_make_prefix_resume_command_deps"),
                 ),
                 make_prefix_mirror_deps=cast(
                     Callable[[], discord_prefix_mirror_commands.PrefixMirrorCommandDeps],

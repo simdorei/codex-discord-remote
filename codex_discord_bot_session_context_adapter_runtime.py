@@ -7,6 +7,7 @@ from types import ModuleType
 from typing import cast, TypeAlias
 
 import codex_discord_bridge_protocols as discord_bridge_protocols
+import codex_app_server_transport as app_server_transport
 import codex_discord_runtime as discord_runtime
 import codex_discord_session_context_runtime as discord_session_context_runtime
 from codex_session_events import JsonEvent, JsonValue
@@ -41,7 +42,37 @@ class BotSessionContextAdapterRuntime:
             recent_prompt_expected_exceptions=self.recent_prompt_expected_exceptions(),
             format_exception=self.format_exception,
             log=self.log_line,
+            get_thread_goal_lookup_func=self.get_thread_goal_lookup,
+            get_thread_goal_update_func=self.get_thread_goal_update,
+            get_thread_turn_completions_func=self.get_thread_turn_completions,
         )
+
+    def get_thread_goal_lookup(self, thread_id: str) -> app_server_transport.ThreadGoalLookup:
+        if not cast(Callable[[], bool], self._module_func("app_server_transport_enabled"))():
+            return app_server_transport.GoalAbsent()
+        return app_server_transport.DEFAULT_CLIENT.get_thread_goal_lookup(thread_id)
+
+    def get_thread_goal_update(
+        self,
+        thread_id: str,
+        turn_id: str,
+    ) -> app_server_transport.ThreadGoalUpdate | None:
+        return app_server_transport.DEFAULT_CLIENT.get_cached_goal_update(thread_id, turn_id)
+
+    def get_thread_turn_completions(
+        self,
+        thread_id: str,
+        turn_ids: list[str],
+    ) -> dict[str, app_server_transport.TurnCompletion]:
+        client = app_server_transport.DEFAULT_CLIENT
+        cached = {
+            turn_id: completion
+            for turn_id in turn_ids
+            if (completion := client.get_cached_turn_completion(thread_id, turn_id)) is not None
+        }
+        if not client.is_running():
+            return cached
+        return client.get_thread_turn_completions(thread_id, timeout_sec=3.0)
 
     def get_runtime_state(self) -> discord_runtime.DiscordRuntimeState:
         return cast(Callable[[], discord_runtime.DiscordRuntimeState], self._module_func("get_runtime_state"))()

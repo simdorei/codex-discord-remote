@@ -3,13 +3,31 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Literal, Protocol, TypeAlias, TypedDict
+from typing import Literal, NotRequired, Protocol, TypeAlias, TypedDict
 
 from codex_session_events import JsonEvent, JsonValue
+from codex_app_server_transport_goal import (
+    GoalAbsent,
+    ThreadGoalLookup,
+    ThreadGoalStatus,
+    ThreadGoalUpdate,
+)
+from codex_app_server_transport_turn_outcomes import (
+    TurnCompletion,
+    TurnCompletionObservation,
+    TurnCompletionPending,
+)
 
 JsonObject: TypeAlias = dict[str, JsonValue]
 StreamCallback: TypeAlias = Callable[[str], None]
-WatchStatus: TypeAlias = Literal["aborted", "final", "timeout"]
+WatchStatus: TypeAlias = Literal[
+    "aborted",
+    "failed",
+    "final",
+    "progress",
+    "timeout",
+    "transport_error",
+]
 
 
 class EmitWatchStreamBlock(Protocol):
@@ -29,6 +47,8 @@ class WatchForFinalAnswerResult(TypedDict):
     final_answer: str
     streamed_live: bool
     final_streamed_live: bool
+    error_message: NotRequired[str]
+    interrupt_origin: NotRequired[str]
 
 
 @dataclass(frozen=True, slots=True)
@@ -39,6 +59,14 @@ class FinalAnswerWatchDeps:
     build_interactive_notice_from_function_call: Callable[[JsonObject], str]
     extract_message_text: Callable[[JsonObject], str]
     emit_watch_stream_block: EmitWatchStreamBlock
+    get_thread_goal_status: Callable[[Path], ThreadGoalStatus | None]
+    observe_turn_completion: Callable[[Path, str], TurnCompletionObservation] = (
+        lambda session_path, turn_id: TurnCompletionPending()
+    )
+    get_thread_goal_lookup: Callable[[Path], ThreadGoalLookup] = lambda session_path: GoalAbsent()
+    get_thread_goal_update: Callable[[Path, str], ThreadGoalUpdate | None] = (
+        lambda session_path, turn_id: None
+    )
 
 
 @dataclass(slots=True)  # noqa: MUTABLE_OK
@@ -51,6 +79,11 @@ class WatchState:
     seen_interactive_notices: set[str] = field(default_factory=set)
     did_stream_live: bool = False
     did_stream_final_live: bool = False
+    native_completion: TurnCompletion | None = None
+    native_observed_at: float | None = None
+    rollout_terminal_payload: JsonObject | None = None
+    rollout_terminal_type: str = ""
+    rollout_observed_at: float | None = None
 
 
 def append_commentary(
@@ -93,19 +126,30 @@ def result(
     final_answer: str,
     streamed_live: bool,
     final_streamed_live: bool,
+    *,
+    error_message: str = "",
+    interrupt_origin: str = "",
 ) -> WatchForFinalAnswerResult:
-    return WatchForFinalAnswerResult(
+    watch_result = WatchForFinalAnswerResult(
         status=status,
         commentary=commentary,
         final_answer=final_answer,
         streamed_live=streamed_live,
         final_streamed_live=final_streamed_live,
     )
+    if error_message:
+        watch_result["error_message"] = error_message
+    if interrupt_origin:
+        watch_result["interrupt_origin"] = interrupt_origin
+    return watch_result
 
 
 def result_from_state(
     status: WatchStatus,
     state: WatchState,
+    *,
+    error_message: str = "",
+    interrupt_origin: str = "",
 ) -> WatchForFinalAnswerResult:
     return result(
         status,
@@ -113,4 +157,6 @@ def result_from_state(
         state.final_answer,
         state.did_stream_live,
         state.did_stream_final_live,
+        error_message=error_message,
+        interrupt_origin=interrupt_origin,
     )

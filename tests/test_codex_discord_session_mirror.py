@@ -11,6 +11,14 @@ import codex_discord_session_mirror_item_builders as item_builders
 import codex_discord_session_mirror_item_collection as item_collection
 
 
+class SessionMirrorTextFormattingTests(unittest.TestCase):
+    def test_final_answer_has_an_explicit_final_label(self) -> None:
+        self.assertEqual(
+            session_mirror.format_session_mirror_text({"kind": "final", "text": "done"}),
+            "Final\n\ndone",
+        )
+
+
 def _extract_message_text(payload: Mapping[str, JsonValue]) -> str:
     content = payload.get("content")
     if not isinstance(content, list):
@@ -103,6 +111,15 @@ class SessionMirrorItemCollectionTests(unittest.TestCase):
                     "role": "assistant",
                     "phase": "final_answer",
                     "content": [{"type": "output_text", "text": "done"}],
+                },
+            },
+            {
+                "timestamp": "4",
+                "type": "event_msg",
+                "payload": {
+                    "type": "task_complete",
+                    "turn_id": "turn-1",
+                    "last_agent_message": "done",
                 },
             },
         ]
@@ -279,6 +296,7 @@ def _append_context(skip_texts: set[str] | None = None) -> item_append.Collectio
         extract_message_text=_extract_message_text,
         recent_text_ttl_seconds=600.0,
         make_text_digest=item_builders.make_text_digest,
+        goal_status=None,
     )
 
 

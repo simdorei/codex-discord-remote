@@ -22,6 +22,7 @@ class AppServerSteeringResult(Protocol):
     session_path: str | None
     start_offset: int | None
     delivery_pending: bool
+    turn_id: str | None
 
 
 class RunSteeringNoWaitFunc(Protocol):
@@ -94,6 +95,11 @@ def run_resident_app_server_steering_prompt(
             target_thread_id=resolved_thread_id,
             target_ref=target_ref or "-",
         )
+    watch_target: discord_steering.WatchTarget = (
+        discord_steering.NativeExactWatchTarget(result.turn_id)
+        if result.turn_id
+        else discord_steering.RolloutOnlyWatchTarget()
+    )
     return discord_steering.SteeringPromptResult(
         result.exit_code,
         result.output,
@@ -102,6 +108,7 @@ def run_resident_app_server_steering_prompt(
         session_path=result.session_path,
         start_offset=result.start_offset,
         delivery_pending=result.delivery_pending,
+        watch_target=watch_target,
     )
 
 

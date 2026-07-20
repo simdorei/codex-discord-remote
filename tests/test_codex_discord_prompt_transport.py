@@ -207,6 +207,19 @@ class PromptTransportTests(unittest.TestCase):
         self.assertIn("resident app-server cannot open it", output)
         self.assertIn("Run `!mirror sync`", output)
 
+    def test_thread_resume_timeout_suggests_manual_resume_without_replaying_prompt(self) -> None:
+        def resident(_prompt: str, _target_thread_id: str | None) -> tuple[int, str]:
+            raise TimeoutError("Timed out waiting for app-server response to thread/resume.")
+
+        exit_code, output = prompt_transport.run_transport_prompt_no_wait(
+            "please run",
+            "thread-1",
+            build_deps(run_resident_prompt_no_wait=resident),
+        )
+
+        self.assertEqual(exit_code, 1)
+        self.assertIn("`!resume`", output)
+
     def test_run_ask_stream_watches_app_server_session_when_waiting(self) -> None:
         relay = FakeRelay()
         watched: list[FakeSteeringResult] = []

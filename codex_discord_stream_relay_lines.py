@@ -5,6 +5,8 @@ from typing import Literal, TypeAlias
 StreamRelayLineKind: TypeAlias = Literal[
     "commentary",
     "final",
+    "failed",
+    "transport_error",
     "timeout",
     "aborted",
     "ready",
@@ -19,6 +21,10 @@ def classify_stream_relay_line(line: str) -> StreamRelayLineKind:
         return "commentary"
     if line.startswith("[final_answer]"):
         return "final"
+    if line.startswith("[failed]"):
+        return "failed"
+    if line.startswith("[transport_error]"):
+        return "transport_error"
     if line.startswith("[timeout]"):
         return "timeout"
     if line.startswith("[aborted]"):

@@ -14,6 +14,7 @@ import codex_discord_prefix_new_command as prefix_new_command
 import codex_discord_prefix_prompt_commands as prefix_prompt_commands
 import codex_discord_prefix_qa_command as prefix_qa_command
 import codex_discord_prefix_queue_commands as prefix_queue_commands
+import codex_discord_prefix_resume_command as prefix_resume_command
 import codex_discord_prefix_status_commands as prefix_status_commands
 import codex_discord_prefix_steer_command as prefix_steer_command
 
@@ -51,6 +52,7 @@ class PrefixDispatchFactoryTests(unittest.IsolatedAsyncioTestCase):
         bot = FakeBot()
         markers = {
             "host": object(),
+            "resume": object(),
             "steer": object(),
             "status": object(),
             "queue": object(),
@@ -98,6 +100,7 @@ class PrefixDispatchFactoryTests(unittest.IsolatedAsyncioTestCase):
         original_steer = prefix_steer_command.handle_prefix_steer_command
         original_status = prefix_status_commands.handle_prefix_status_command
         original_queue = prefix_queue_commands.handle_prefix_queue_command
+        original_resume = prefix_resume_command.handle_prefix_resume_command
         original_mirror = prefix_mirror_commands.handle_prefix_mirror_command
         original_approval = prefix_approval_commands.handle_prefix_approval_command
         original_archive = prefix_archive_commands.handle_prefix_archive_command
@@ -110,6 +113,7 @@ class PrefixDispatchFactoryTests(unittest.IsolatedAsyncioTestCase):
             prefix_steer_command.handle_prefix_steer_command = make_fake("steer")
             prefix_status_commands.handle_prefix_status_command = make_fake("status")
             prefix_queue_commands.handle_prefix_queue_command = make_fake("queue")
+            prefix_resume_command.handle_prefix_resume_command = make_fake("resume")
             prefix_mirror_commands.handle_prefix_mirror_command = make_fake("mirror")
             prefix_approval_commands.handle_prefix_approval_command = make_fake("approval")
             prefix_archive_commands.handle_prefix_archive_command = make_fake("archive")
@@ -129,6 +133,10 @@ class PrefixDispatchFactoryTests(unittest.IsolatedAsyncioTestCase):
                 make_prefix_steer_deps=lambda: cast(prefix_steer_command.PrefixSteerCommandDeps, markers["steer"]),
                 make_prefix_status_deps=lambda: cast(prefix_status_commands.PrefixStatusCommandDeps, markers["status"]),
                 make_prefix_queue_deps=lambda: cast(prefix_queue_commands.PrefixQueueCommandDeps, markers["queue"]),
+                make_prefix_resume_deps=lambda: cast(
+                    prefix_resume_command.PrefixResumeCommandDeps,
+                    markers["resume"],
+                ),
                 make_prefix_mirror_deps=lambda: cast(prefix_mirror_commands.PrefixMirrorCommandDeps, markers["mirror"]),
                 make_prefix_approval_deps=lambda: cast(
                     prefix_approval_commands.PrefixApprovalCommandDeps,
@@ -138,7 +146,7 @@ class PrefixDispatchFactoryTests(unittest.IsolatedAsyncioTestCase):
                     prefix_archive_commands.PrefixArchiveCommandDeps,
                     markers["archive"],
                 ),
-                make_prefix_qa_deps=lambda: cast(prefix_qa_command.PrefixQaCommandDeps, markers["qa"]),
+                make_prefix_qa_deps=lambda: cast(prefix_qa_command.PrefixQaCommandDeps[FakeBot], markers["qa"]),
                 make_prefix_new_deps=lambda: cast(prefix_new_command.PrefixNewCommandDeps, markers["new"]),
                 make_prefix_prompt_deps=lambda: cast(
                     prefix_prompt_commands.PrefixPromptCommandDeps,
@@ -154,6 +162,7 @@ class PrefixDispatchFactoryTests(unittest.IsolatedAsyncioTestCase):
             prefix_steer_command.handle_prefix_steer_command = original_steer
             prefix_status_commands.handle_prefix_status_command = original_status
             prefix_queue_commands.handle_prefix_queue_command = original_queue
+            prefix_resume_command.handle_prefix_resume_command = original_resume
             prefix_mirror_commands.handle_prefix_mirror_command = original_mirror
             prefix_approval_commands.handle_prefix_approval_command = original_approval
             prefix_archive_commands.handle_prefix_archive_command = original_archive
@@ -164,12 +173,12 @@ class PrefixDispatchFactoryTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(
             [name for name, _deps, _bot in calls],
-            ["host", "steer", "status", "queue", "mirror", "approval", "archive", "qa", "new", "prompt"],
+            ["host", "resume", "steer", "status", "queue", "mirror", "approval", "archive", "qa", "new", "prompt"],
         )
         self.assertEqual([deps for _name, deps, _bot in calls], list(markers.values()))
         self.assertEqual(
             [bot_arg for _name, _deps, bot_arg in calls],
-            [None, None, None, None, bot, None, None, bot, bot, None],
+            [None, None, None, None, None, bot, None, None, bot, bot, None],
         )
 
 

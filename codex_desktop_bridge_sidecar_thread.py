@@ -97,7 +97,10 @@ def get_active_turn_id_via_app_server_or_raise(thread_id: str) -> str | None:
 
 def interrupt_turn_via_app_server(thread_id: str, turn_id: str) -> object:
     import codex_app_server_transport as app_server_transport
+    import codex_discord_interrupt_context as discord_interrupt_context
 
+    if discord_interrupt_context.is_discord_remote_stop():
+        return app_server_transport.DEFAULT_CLIENT.interrupt_turn_from_remote_user(thread_id, turn_id)
     return app_server_transport.DEFAULT_CLIENT.interrupt_turn(thread_id, turn_id)
 
 

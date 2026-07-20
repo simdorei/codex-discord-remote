@@ -128,6 +128,43 @@ class SessionMirrorItemSenderTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(sends, [(channel, {"kind": "delta", "text": "body"}, "thread-1", "project:1")])
         self.assertEqual(claims, [])
 
+    async def test_aborted_and_failed_items_do_not_deactivate_the_session_target(self) -> None:
+        channel = FakeChannel(channel_id=123)
+
+        async def has_event(digest: str, codex_thread_id: str) -> bool:
+            _ = (digest, codex_thread_id)
+            return False
+
+        async def send_item(
+            channel: FakeChannel,
+            item: item_sender.SessionMirrorItem,
+            *,
+            target_thread_id: str,
+            target_ref: str,
+        ) -> None:
+            _ = (channel, item, target_thread_id, target_ref)
+
+        async def claim_event(digest: str, codex_thread_id: str) -> bool:
+            _ = (digest, codex_thread_id)
+            return True
+
+        result = await item_sender.send_unclaimed_session_mirror_items(
+            channel,
+            [
+                {"kind": "aborted", "text": "stopped", "digest": "abort-1"},
+                {"kind": "failed", "text": "failed", "digest": "failed-1"},
+            ],
+            codex_thread_id="thread-1",
+            target_ref="project:1",
+            deps=item_sender.SessionMirrorItemSenderDeps(
+                has_session_mirror_event=has_event,
+                send_session_mirror_item=send_item,
+                claim_session_mirror_event=claim_event,
+            ),
+        )
+
+        self.assertEqual(result, item_sender.SessionMirrorItemSendResult(sent_count=2, terminal_sent=False))
+
     async def test_send_failure_propagates_before_claiming(self) -> None:
         channel = FakeChannel(channel_id=123)
         claims: list[tuple[str, str]] = []

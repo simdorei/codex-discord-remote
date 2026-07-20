@@ -8,6 +8,7 @@ import tempfile
 import unittest
 
 import codex_discord_bot as bot
+import codex_discord_interrupt_context as interrupt_context
 
 
 class FollowupUnavailableError(RuntimeError):
@@ -78,6 +79,15 @@ class AlwaysFailingTarget:
         raise SendUnavailableError("send unavailable")
 
 
+class RecordingTarget:
+    def __init__(self) -> None:
+        self.messages: list[str] = []
+
+    async def send(self, content: str, view=None) -> None:
+        _ = view
+        self.messages.append(content)
+
+
 def _interaction(value: FakeInteraction) -> bot.discord.Interaction:
     return cast(bot.discord.Interaction, cast(object, value))
 
@@ -130,6 +140,34 @@ class DiscordInteractionDeliveryIntegrationTests(unittest.IsolatedAsyncioTestCas
             "channel=222 ephemeral=True text_len=5",
             self._log_text(),
         )
+
+    async def test_prefix_stop_bridge_marks_only_the_worker_call_as_remote_user_intent(self) -> None:
+        seen_context: list[bool] = []
+        original = bot.run_bridge_command
+        try:
+            bot.run_bridge_command = lambda argv: (seen_context.append(interrupt_context.is_discord_remote_stop()) or 0, "stopped")
+            target = RecordingTarget()
+            await bot.run_bridge_and_send(cast(bot.discord.abc.Messageable, cast(object, target)), ["stop"], "Stop")
+        finally:
+            bot.run_bridge_command = original
+
+        self.assertEqual(seen_context, [True])
+        self.assertFalse(interrupt_context.is_discord_remote_stop())
+        self.assertEqual(target.messages, ["Stop\n\nstopped"])
+
+    async def test_slash_stop_bridge_marks_only_the_worker_call_as_remote_user_intent(self) -> None:
+        seen_context: list[bool] = []
+        original = bot.run_bridge_command
+        try:
+            bot.run_bridge_command = lambda argv: (seen_context.append(interrupt_context.is_discord_remote_stop()) or 0, "stopped")
+            interaction = FakeInteraction(command_name="stop", channel_id=222)
+            await bot.run_interaction_bridge_and_send(_interaction(interaction), ["stop"], "Stop")
+        finally:
+            bot.run_bridge_command = original
+
+        self.assertEqual(seen_context, [True])
+        self.assertFalse(interrupt_context.is_discord_remote_stop())
+        self.assertEqual(interaction.followup.messages, ["Stop\n\nstopped"])
 
     async def test_send_interaction_not_allowed_preserves_denial_response(self) -> None:
         interaction = FakeInteraction(command_name="ask", channel_id=333)

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from typing import Protocol
+import time
+from collections.abc import Callable
+from typing import Final, Protocol
 
 from codex_app_server_transport_replies import (
     CodexAppServerTransportError,
@@ -11,7 +13,10 @@ from codex_app_server_transport_replies import (
 
 class ThreadLoaderClient(Protocol):
     def read_thread(self, thread_id: str, *, include_turns: bool = False) -> JsonObject: ...
-    def resume_thread(self, thread_id: str) -> JsonObject: ...
+    def resume_thread(self, thread_id: str, *, timeout_sec: float = 10.0) -> JsonObject: ...
+
+
+THREAD_LOAD_TIMEOUT_SEC: Final = 40.0
 
 
 def get_in_progress_turn_id(thread_payload: JsonMapping) -> str | None:
@@ -60,13 +65,23 @@ def get_thread_status_type(thread_payload: JsonMapping) -> str:
     return ""
 
 
-def ensure_thread_loaded(client: ThreadLoaderClient, thread_id: str) -> JsonObject:
+def ensure_thread_loaded(
+    client: ThreadLoaderClient,
+    thread_id: str,
+    *,
+    timeout_sec: float = THREAD_LOAD_TIMEOUT_SEC,
+    monotonic_func: Callable[[], float] = time.monotonic,
+) -> JsonObject:
+    deadline = monotonic_func() + max(timeout_sec, 0.0)
     thread_payload = client.read_thread(thread_id, include_turns=False).get("thread")
     if not isinstance(thread_payload, dict):
         return {}
     if get_thread_status_type(thread_payload) != "notLoaded":
         return thread_payload
-    resumed = client.resume_thread(thread_id)
+    remaining = max(0.0, deadline - monotonic_func())
+    if remaining <= 0:
+        raise TimeoutError("Timed out waiting for app-server response to thread/resume.")
+    resumed = client.resume_thread(thread_id, timeout_sec=remaining)
     resumed_thread = resumed.get("thread") or {}
     if not isinstance(resumed_thread, dict):
         raise CodexAppServerTransportError("thread/resume did not return a thread payload.")

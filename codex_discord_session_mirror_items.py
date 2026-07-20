@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio  # noqa: ANYIO_OK
+
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Generic, Protocol, TypeVar
@@ -43,7 +45,8 @@ async def collect_session_mirror_delivery_items(
     seen_user_messages: SeenMessages,
     deps: SessionMirrorItemsDeps[EventT, ItemT],
 ) -> SessionMirrorItemsResult[ItemT]:
-    items = deps.collect_session_mirror_items(
+    items = await asyncio.to_thread(
+        deps.collect_session_mirror_items,
         codex_thread_id,
         events,
         seen_agent_messages=seen_agent_messages,

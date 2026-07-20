@@ -14,6 +14,7 @@ import codex_discord_prefix_new_command as discord_prefix_new_command
 import codex_discord_prefix_prompt_commands as discord_prefix_prompt_commands
 import codex_discord_prefix_qa_command as discord_prefix_qa_command
 import codex_discord_prefix_queue_commands as discord_prefix_queue_commands
+import codex_discord_prefix_resume_command as discord_prefix_resume_command
 import codex_discord_prefix_status_commands as discord_prefix_status_commands
 import codex_discord_prefix_steer_command as discord_prefix_steer_command
 
@@ -59,6 +60,7 @@ class PrefixDispatchRuntimeDeps(Generic[BotT, MessageableT, HistoryChannelT]):
     make_prefix_steer_deps: Callable[[], discord_prefix_steer_command.PrefixSteerCommandDeps]
     make_prefix_status_deps: Callable[[], discord_prefix_status_commands.PrefixStatusCommandDeps]
     make_prefix_queue_deps: Callable[[], discord_prefix_queue_commands.PrefixQueueCommandDeps]
+    make_prefix_resume_deps: Callable[[], discord_prefix_resume_command.PrefixResumeCommandDeps]
     make_prefix_mirror_deps: Callable[[], discord_prefix_mirror_commands.PrefixMirrorCommandDeps]
     make_prefix_approval_deps: Callable[[], discord_prefix_approval_commands.PrefixApprovalCommandDeps]
     make_prefix_archive_deps: Callable[[], discord_prefix_archive_commands.PrefixArchiveCommandDeps]
@@ -123,6 +125,7 @@ def make_prefix_dispatch_deps(
             make_prefix_steer_deps=deps.make_prefix_steer_deps,
             make_prefix_status_deps=deps.make_prefix_status_deps,
             make_prefix_queue_deps=deps.make_prefix_queue_deps,
+            make_prefix_resume_deps=deps.make_prefix_resume_deps,
             make_prefix_mirror_deps=deps.make_prefix_mirror_deps,
             make_prefix_approval_deps=deps.make_prefix_approval_deps,
             make_prefix_archive_deps=deps.make_prefix_archive_deps,

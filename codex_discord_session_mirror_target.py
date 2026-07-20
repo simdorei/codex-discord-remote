@@ -11,6 +11,7 @@ import codex_discord_session_mirror_delivery_flow as delivery_flow
 import codex_discord_session_mirror_event_flow as event_flow
 import codex_discord_session_mirror_item_sender as item_sender
 import codex_discord_session_mirror_cursor as session_mirror_cursor
+from codex_app_server_transport_goal import GoalAbsent, GoalPresent, GoalTransportError, ThreadGoalLookup, ThreadGoalStatus
 
 ThreadT = TypeVar("ThreadT")
 ThreadT_co = TypeVar("ThreadT_co", covariant=True)
@@ -89,6 +90,8 @@ class SessionMirrorTargetDeps(Generic[ThreadT, ContextUsageT, EventT, ChannelT])
     log: Callable[[str], None]
     send_typing_pulse: Callable[[ChannelT, str, str], Awaitable[None]] = noop_send_typing_pulse
     is_thread_busy: Callable[[Path], bool] = default_thread_busy
+    get_active_turn_id: Callable[[str], str | None] = lambda thread_id: None
+    get_thread_goal_lookup: Callable[[str], ThreadGoalLookup] = lambda thread_id: GoalAbsent()
 
 
 async def _update_cursor(
@@ -158,6 +161,22 @@ async def _deactivate_output_target_if_idle(
     if not session_path.exists():
         return False
     if await asyncio.to_thread(deps.is_thread_busy, session_path):
+        return False
+    try:
+        active_turn_id = await asyncio.to_thread(deps.get_active_turn_id, codex_thread_id)
+    except Exception as exc:  # noqa: BROAD_EXCEPT_OK - transport failures keep the watcher alive.
+        deps.log(
+            f"session_mirror_active_turn_lookup_failed target={codex_thread_id} "
+            + f"error_type={type(exc).__name__}"
+        )
+        return False
+    if active_turn_id:
+        return False
+    goal_lookup = await asyncio.to_thread(deps.get_thread_goal_lookup, codex_thread_id)
+    if isinstance(goal_lookup, GoalTransportError):
+        deps.log(f"session_mirror_goal_lookup_failed target={codex_thread_id}")
+        return False
+    if isinstance(goal_lookup, GoalPresent) and goal_lookup.status is not ThreadGoalStatus.COMPLETE:
         return False
     await asyncio.to_thread(deps.deactivate_session_mirror_output_target, codex_thread_id)
     deps.log(f"session_mirror_output_deactivated_idle target={codex_thread_id}")

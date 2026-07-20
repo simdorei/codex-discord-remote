@@ -35,6 +35,7 @@ class FactoryFixture:
     transport_calls: list[tuple[str, str | None]] = field(default_factory=list)
     chunk_calls: list[tuple[FakeChannel, str, str | None]] = field(default_factory=list)
     app_menu_calls: list[tuple[FakeChannel, str | None, str, str]] = field(default_factory=list)
+    resume_failure_calls: list[tuple[FakeChannel, str, str]] = field(default_factory=list)
     marked_discord_origin_prompts: list[tuple[str | None, str]] = field(default_factory=list)
     deactivated: list[str | None] = field(default_factory=list)
     logs: list[str] = field(default_factory=list)
@@ -86,6 +87,14 @@ class FactoryFixture:
         self.app_menu_calls.append((channel, target_thread_id, output, reason))
         return True
 
+    async def send_resume_failure(
+        self,
+        channel: FakeChannel,
+        content: str,
+        target_thread_id: str,
+    ) -> None:
+        self.resume_failure_calls.append((channel, content, target_thread_id))
+
     def format_log_text_len(self, text: str | None) -> int:
         return len(text or "")
 
@@ -104,6 +113,7 @@ class MappedPromptDeliveryFactoryTests(unittest.IsolatedAsyncioTestCase):
         deactivate_session_mirror_output_target = fixture.deactivated.append
         is_selected_thread_busy_error = fixture.is_selected_thread_busy_error
         send_codex_app_menu_if_available = fixture.send_codex_app_menu_if_available
+        send_resume_failure = fixture.send_resume_failure
         format_log_text_len = fixture.format_log_text_len
         mark_recent_discord_origin_prompt = fixture.mark_recent_discord_origin_prompt
         log = fixture.logs.append
@@ -119,6 +129,7 @@ class MappedPromptDeliveryFactoryTests(unittest.IsolatedAsyncioTestCase):
             deactivate_session_mirror_output_target=deactivate_session_mirror_output_target,
             is_selected_thread_busy_error=is_selected_thread_busy_error,
             send_codex_app_menu_if_available=send_codex_app_menu_if_available,
+            send_resume_failure=send_resume_failure,
             format_log_text_len=format_log_text_len,
             mark_recent_discord_origin_prompt=mark_recent_discord_origin_prompt,
             log=log,
@@ -135,6 +146,7 @@ class MappedPromptDeliveryFactoryTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs(deps.deactivate_session_mirror_output_target, deactivate_session_mirror_output_target)
         self.assertIs(deps.is_selected_thread_busy_error, is_selected_thread_busy_error)
         self.assertIs(deps.send_codex_app_menu_if_available, send_codex_app_menu_if_available)
+        self.assertIs(deps.send_resume_failure, send_resume_failure)
         self.assertIs(deps.format_log_text_len, format_log_text_len)
         self.assertIs(deps.log, log)
 
@@ -155,6 +167,7 @@ class MappedPromptDeliveryFactoryTests(unittest.IsolatedAsyncioTestCase):
                 reason="busy-reason",
             )
         )
+        await deps.send_resume_failure(channel, "resume failed", "thread-1")
         self.assertEqual(deps.format_log_text_len("abc"), 3)
         deps.log("logged")
 
@@ -167,4 +180,5 @@ class MappedPromptDeliveryFactoryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(fixture.chunk_calls, [(channel, "chunk-body", "chunk-context")])
         self.assertEqual(fixture.deactivated, ["thread-1"])
         self.assertEqual(fixture.app_menu_calls, [(channel, "thread-1", "busy-output", "busy-reason")])
+        self.assertEqual(fixture.resume_failure_calls, [(channel, "resume failed", "thread-1")])
         self.assertEqual(fixture.logs, ["logged"])

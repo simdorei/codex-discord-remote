@@ -23,6 +23,7 @@ def make_mapped_prompt_delivery_deps(
     deactivate_session_mirror_output_target: discord_prompt_mapped_delivery.OutputTargetDeactivator,
     is_selected_thread_busy_error: discord_prompt_mapped_delivery.BusyPredicate,
     send_codex_app_menu_if_available: discord_prompt_mapped_delivery.AppMenuSender[ChannelT],
+    send_resume_failure: discord_prompt_mapped_delivery.ResumeFailureSender[ChannelT],
     format_log_text_len: discord_prompt_mapped_delivery.TextLenFunc,
     log: discord_prompt_mapped_delivery.LogFunc,
     preprocess_prompt: discord_prompt_mapped_delivery.PromptPreprocessor = discord_prompt_mapped_delivery.keep_prompt,
@@ -50,6 +51,7 @@ def make_mapped_prompt_delivery_deps(
         deactivate_session_mirror_output_target=deactivate_session_mirror_output_target,
         is_selected_thread_busy_error=is_selected_thread_busy_error,
         send_codex_app_menu_if_available=send_codex_app_menu_if_available,
+        send_resume_failure=send_resume_failure,
         format_log_text_len=format_log_text_len,
         log=log,
     )

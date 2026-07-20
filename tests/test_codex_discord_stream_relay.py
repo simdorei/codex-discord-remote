@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Protocol, cast
 import unittest
 
-from codex_discord_steering import SteeringPromptResult
+from codex_discord_steering import NativeExactWatchTarget, SteeringPromptResult
 import codex_discord_stream as stream
 
 
@@ -120,7 +120,7 @@ class DiscordAskRelayTests(unittest.IsolatedAsyncioTestCase):
         relay.feed_line("done")
         await asyncio.to_thread(relay.finish)
 
-        self.assertEqual(deps.sent, ["In progress\n\nchecking", "done"])
+        self.assertEqual(deps.sent, ["In progress\n\nchecking", "Final\n\ndone"])
         self.assertTrue(relay.sent_live)
         self.assertTrue(relay.saw_final)
 
@@ -147,7 +147,7 @@ class DiscordAskRelayTests(unittest.IsolatedAsyncioTestCase):
         await asyncio.to_thread(relay.finish)
         await asyncio.sleep(0.08)
 
-        self.assertEqual(deps.sent, ["done"])
+        self.assertEqual(deps.sent, ["Final\n\ndone"])
         self.assertFalse(relay.quiet_notice_sent)
 
     async def test_stale_final_is_suppressed_and_logged(self) -> None:
@@ -232,6 +232,62 @@ class DiscordAskRelayTests(unittest.IsolatedAsyncioTestCase):
                 "Use Ctrl+C to stop waiting after the prompt is sent.",
             ],
         )
+
+    def test_native_watch_target_passes_exact_turn_id(self) -> None:
+        relay = _RelayProbe()
+        captured_turn_ids: list[str | None] = []
+        steering_result = SteeringPromptResult(
+            0,
+            "",
+            session_path="session.jsonl",
+            start_offset=7,
+            watch_target=NativeExactWatchTarget("turn-42"),
+        )
+
+        def watch(**kwargs: object) -> stream.WatchForFinalAnswerResult:
+            captured_turn_ids.append(cast(str | None, kwargs.get("expected_turn_id")))
+            return {
+                "status": "aborted",
+                "commentary": [],
+                "final_answer": "",
+                "streamed_live": False,
+                "final_streamed_live": False,
+            }
+
+        exit_code, _output = stream.run_steering_watch_stream(
+            steering_result,
+            cast(stream.DiscordAskRelay, cast(object, relay)),
+            watch_for_final_answer_func=watch,
+        )
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(captured_turn_ids, ["turn-42"])
+        self.assertIn("[aborted]", relay.lines)
+
+    def test_failed_native_watch_uses_failure_marker_and_nonzero_exit(self) -> None:
+        relay = _RelayProbe()
+        steering_result = SteeringPromptResult(0, "", session_path="session.jsonl", start_offset=7)
+
+        def watch(**kwargs: object) -> stream.WatchForFinalAnswerResult:
+            _ = kwargs
+            return {
+                "status": "failed",
+                "commentary": [],
+                "final_answer": "",
+                "streamed_live": False,
+                "final_streamed_live": False,
+                "error_message": "worker crashed",
+            }
+
+        exit_code, output = stream.run_steering_watch_stream(
+            steering_result,
+            cast(stream.DiscordAskRelay, cast(object, relay)),
+            watch_for_final_answer_func=watch,
+        )
+
+        self.assertEqual(exit_code, 1)
+        self.assertIn("[failed]", relay.lines)
+        self.assertIn("worker crashed", output)
 
 
 if __name__ == "__main__":

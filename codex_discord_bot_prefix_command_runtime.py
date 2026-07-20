@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import asyncio  # noqa: ANYIO_OK
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from types import ModuleType
 from typing import Generic, Protocol, TypeVar, cast, TypeAlias
 
+import codex_app_server_transport as app_server_transport
 import codex_discord_prefix_approval_commands as discord_prefix_approval_commands
 import codex_discord_prefix_archive_commands as discord_prefix_archive_commands
 import codex_discord_prefix_command_deps_factory as discord_prefix_command_deps_factory
@@ -14,8 +16,10 @@ import codex_discord_prefix_new_command as discord_prefix_new_command
 import codex_discord_prefix_prompt_commands as discord_prefix_prompt_commands
 import codex_discord_prefix_qa_command as discord_prefix_qa_command
 import codex_discord_prefix_queue_commands as discord_prefix_queue_commands
+import codex_discord_prefix_resume_command as discord_prefix_resume_command
 import codex_discord_prefix_status_commands as discord_prefix_status_commands
 import codex_discord_prefix_steer_command as discord_prefix_steer_command
+import codex_discord_resume as discord_resume
 ModuleValue: TypeAlias = object
 
 
@@ -185,6 +189,34 @@ class BotPrefixCommandRuntime(Generic[BotT]):
 
     def make_prefix_queue_command_deps(self) -> discord_prefix_queue_commands.PrefixQueueCommandDeps:
         return self.make_prefix_command_deps_factory().make_prefix_queue_deps()
+
+    def make_prefix_resume_command_deps(self) -> discord_prefix_resume_command.PrefixResumeCommandDeps:
+        module = self.deps.module
+        return discord_prefix_resume_command.PrefixResumeCommandDeps(
+            send_chunks=cast(
+                discord_prefix_resume_command.SendChunksFunc,
+                getattr(module, "send_prefix_chunks"),
+            ),
+            recover_resident_thread_for_request=self.recover_resident_thread_for_request,
+            log_line=cast(Callable[[str], None], getattr(module, "log_line")),
+        )
+
+    async def recover_resident_thread_for_request(self, channel_id: int, ref: str | None) -> str:
+        module = self.deps.module
+        return await asyncio.to_thread(
+            discord_resume.recover_resident_thread_for_request,
+            app_server_transport.DEFAULT_CLIENT,
+            channel_id,
+            ref,
+            resolve_queue_command_target=cast(
+                discord_resume.ResolveQueueTargetFunc,
+                getattr(module, "resolve_queue_command_target"),
+            ),
+            resolve_selected_target=cast(
+                discord_resume.ResolveSelectedTargetFunc,
+                getattr(module, "resolve_selected_target"),
+            ),
+        )
 
     def make_prefix_archive_command_deps(self) -> discord_prefix_archive_commands.PrefixArchiveCommandDeps:
         return self.make_prefix_command_deps_factory().make_prefix_archive_deps()

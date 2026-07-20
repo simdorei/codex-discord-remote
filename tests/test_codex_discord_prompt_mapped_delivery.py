@@ -44,6 +44,7 @@ class DepsFixture:
     marked_discord_origin_prompts: list[tuple[str | None, str]] = field(default_factory=list)
     deactivated: list[str | None] = field(default_factory=list)
     app_menu_calls: list[tuple[str | None, str, str]] = field(default_factory=list)
+    resume_failures: list[tuple[str, str]] = field(default_factory=list)
     selected_thread_ids: list[str] = field(default_factory=list)
     logs: list[str] = field(default_factory=list)
 
@@ -90,6 +91,15 @@ class DepsFixture:
         self.app_menu_calls.append((target_thread_id, output, reason))
         return self.app_menu_result
 
+    async def send_resume_failure(
+        self,
+        channel: FakeChannel,
+        content: str,
+        target_thread_id: str,
+    ) -> None:
+        _ = channel
+        self.resume_failures.append((content, target_thread_id))
+
     def set_selected_thread_id(self, thread_id: str) -> None:
         self.selected_thread_ids.append(thread_id)
 
@@ -107,6 +117,7 @@ class DepsFixture:
             deactivate_session_mirror_output_target=self.deactivated.append,
             is_selected_thread_busy_error=lambda exit_code, output: self.busy,
             send_codex_app_menu_if_available=self.send_app_menu,
+            send_resume_failure=self.send_resume_failure,
             format_log_text_len=lambda output: len(output or ""),
             log=self.logs.append,
         )
@@ -233,6 +244,31 @@ class MappedPromptDeliveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result.handled)
         self.assertEqual(fixture.deactivated, ["thread-1"])
         self.assertEqual(channel.messages, ["Ask failed (transport exit 7)\n\nboom"])
+        self.assertEqual(fixture.resume_failures, [])
+
+    async def test_resume_timeout_failure_includes_resume_button_delivery(self) -> None:
+        fixture = DepsFixture(
+            transport_result=(
+                1,
+                "ERROR: resident app-server transport failed: "
+                + "Timed out waiting for app-server response to thread/resume.\n\nRun `!resume`.",
+            )
+        )
+        channel = FakeChannel()
+
+        result = await mapped_delivery.handle_mapped_prompt_delivery(
+            channel,
+            "please run",
+            "thread-1",
+            deps=fixture.build(),
+        )
+
+        self.assertTrue(result.handled)
+        self.assertEqual(channel.messages, [])
+        self.assertEqual(len(fixture.resume_failures), 1)
+        failure, target_thread_id = fixture.resume_failures[0]
+        self.assertEqual(target_thread_id, "thread-1")
+        self.assertIn("thread/resume", failure)
 
     async def test_wrong_thread_failure_hides_transport_details(self) -> None:
         output = (

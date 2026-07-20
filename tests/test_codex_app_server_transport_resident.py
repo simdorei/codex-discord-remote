@@ -10,6 +10,7 @@ from unittest import mock
 
 import codex_app_server_transport_process as process_mod
 import codex_app_server_transport_resident as resident_mod
+import codex_app_server_transport as transport_mod
 from codex_app_server_transport_replies import (
     CodexAppServerTransportError,
     JsonMapping,
@@ -175,6 +176,77 @@ class ResidentTransportStartTests(unittest.TestCase):
         self.assertFalse(transport.initialized)
 
 
+class ResidentTransportTimeoutBoundaryTests(unittest.TestCase):
+    def test_request_slot_wait_uses_the_request_timeout_budget(self) -> None:
+        transport = _RequestBoundaryProbe()
+        transport.hold_request_slot()
+        try:
+            with self.assertRaisesRegex(TimeoutError, "request slot for thread/read"):
+                _ = transport.request_started("thread/read", timeout_sec=0.01)
+        finally:
+            transport.release_request_slot()
+
+        self.assertEqual(transport.written_messages, [])
+
+    def test_response_for_active_request_is_recorded(self) -> None:
+        transport = _RequestBoundaryProbe()
+        transport.seed_active_request("active-request")
+
+        transport.handle_raw_line('{"id":"active-request","result":{"thread":{"id":"thread-1"}}}')
+
+        self.assertEqual(
+            transport.responses_snapshot(),
+            {"active-request": {"id": "active-request", "result": {"thread": {"id": "thread-1"}}}},
+        )
+
+    def test_unmatched_response_is_discarded_without_a_timeout_tombstone(self) -> None:
+        logs: list[str] = []
+        transport = _RequestBoundaryProbe(log_func=logs.append)
+
+        transport.handle_raw_line('{"id":"late-request","result":{"thread":{"id":"thread-1"}}}')
+
+        self.assertEqual(transport.responses_snapshot(), {})
+        self.assertEqual(logs, ["app_server_transport_late_response_discarded id=late-request"])
+
+
+class ResidentThreadResumeRetryTests(unittest.TestCase):
+    def test_resume_retries_once_with_remaining_budget_after_first_timeout(self) -> None:
+        clock_values = iter((100.0, 110.0))
+        logs: list[str] = []
+        requests: list[tuple[str, JsonMapping, float]] = []
+        transport = transport_mod.PersistentCodexAppServer(
+            executable_resolver=lambda: "codex.exe",
+            log_func=logs.append,
+            monotonic_func=lambda: next(clock_values),
+        )
+
+        def request(
+            method: str,
+            params: JsonMapping | None = None,
+            *,
+            timeout_sec: float = 10.0,
+        ) -> JsonObject:
+            requests.append((method, dict(params or {}), timeout_sec))
+            if len(requests) == 1:
+                raise TimeoutError("first resume timed out")
+            return {"thread": {"id": "thread-1"}}
+
+        with mock.patch.object(transport, "request", request):
+            result = transport.resume_thread("thread-1", timeout_sec=32.0)
+
+        self.assertEqual(result["thread"], {"id": "thread-1"})
+        self.assertEqual(
+            requests,
+            [
+                ("thread/resume", {"threadId": "thread-1"}, 10.0),
+                ("thread/resume", {"threadId": "thread-1"}, 22.0),
+            ],
+        )
+        self.assertEqual(len(logs), 1)
+        self.assertIn("app_server_thread_resume_retry", logs[0])
+        self.assertIn("thread=thread-1", logs[0])
+
+
 class _StartProbeTransport(ResidentCodexAppServerTransport):
     def __init__(self, *, executable: str, log_func: Callable[[str], None] | None = None) -> None:
         super().__init__(executable_resolver=lambda: executable, log_func=log_func)
@@ -212,6 +284,34 @@ class _StartProbeTransport(ResidentCodexAppServerTransport):
     @override
     def notify(self, method: str, params: JsonMapping | None = None) -> None:
         self.notifications.append((method, dict(params or {})))
+
+
+class _RequestBoundaryProbe(ResidentCodexAppServerTransport):
+    def __init__(self, *, log_func: Callable[[str], None] | None = None) -> None:
+        super().__init__(executable_resolver=lambda: "codex.exe", log_func=log_func)
+        self.written_messages: list[JsonObject] = []
+
+    def hold_request_slot(self) -> None:
+        _ = self._request_lock.acquire()
+
+    def release_request_slot(self) -> None:
+        self._request_lock.release()
+
+    def request_started(self, method: str, *, timeout_sec: float) -> JsonObject:
+        return self._request_started(method, {}, timeout_sec=timeout_sec)
+
+    def seed_active_request(self, request_id: str) -> None:
+        self._active_request_id = request_id
+
+    def handle_raw_line(self, raw_line: str) -> None:
+        self._handle_raw_line(raw_line)
+
+    def responses_snapshot(self) -> dict[str, JsonObject]:
+        return dict(self._responses)
+
+    @override
+    def _write_message(self, payload: JsonMapping) -> None:
+        self.written_messages.append(dict(payload))
 
 
 class _FakeThread:

@@ -82,8 +82,8 @@ class DiscordRunPromptSerializationIntegrationTests(unittest.IsolatedAsyncioTest
                 log_text = log_path.read_text(encoding="utf-8")
 
             self.assertEqual(calls, [("ask", "thread-a"), ("ask", "thread-b")])
-            self.assertEqual(target_a.messages, [("done thread-a", None)])
-            self.assertEqual(target_b.messages, [("done thread-b", None)])
+            self.assertEqual(target_a.messages, [("Final\n\ndone thread-a", None)])
+            self.assertEqual(target_b.messages, [("Final\n\ndone thread-b", None)])
             self.assertNotIn("codex_app_turn_wait target=thread-b active=thread-a", log_text)
             self.assertNotIn("ask_after_cross_session_wait_done exit=0 target=thread-b", log_text)
         finally:

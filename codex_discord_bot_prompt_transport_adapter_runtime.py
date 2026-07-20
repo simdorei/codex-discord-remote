@@ -9,6 +9,7 @@ from typing import Protocol, TypeAlias, cast
 import codex_app_server_transport as app_server_transport
 import codex_app_server_transport_delivery as app_server_delivery
 import codex_discord_ask_stream_factory as discord_ask_stream_factory
+import codex_discord_bot_prompt_resume_adapter as discord_prompt_resume_adapter
 import codex_discord_bot_prompt_transport_preprocess as discord_prompt_transport_preprocess
 import codex_discord_bot_prompt_transport_runtime as discord_bot_prompt_transport_runtime
 import codex_discord_prompt_busy_result as discord_prompt_busy_result
@@ -88,6 +89,7 @@ class BotPromptTransportAdapterRuntime:
                 ),
                 is_selected_thread_busy_error=self.is_selected_thread_busy_error,
                 send_codex_app_menu_if_available=self.send_codex_app_menu_if_available,
+                send_resume_failure=self.send_resume_failure,
                 handle_recorded_busy_transport_prompt=self.handle_recorded_busy_transport_prompt,
                 wait_for_mirrored_busy_delegation_settle=self.wait_for_mirrored_busy_delegation_settle,
                 mark_steering_handoff=cast(
@@ -174,6 +176,19 @@ class BotPromptTransportAdapterRuntime:
             target_thread_id,
             output,
             reason=reason,
+        )
+
+    async def send_resume_failure(
+        self,
+        channel: PromptChannel,
+        content: str,
+        target_thread_id: str,
+    ) -> None:
+        await discord_prompt_resume_adapter.send_resume_failure(
+            self.module,
+            channel,
+            content,
+            target_thread_id,
         )
 
     async def handle_recorded_busy_transport_prompt(

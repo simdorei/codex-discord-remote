@@ -145,9 +145,22 @@ class BotPromptWatchAdapterRuntime:
         stream_live: bool = False,
         stream_label: str = "",
         stream_callback: discord_stream.LineStreamFunc | None = None,
+        expected_turn_id: str | None = None,
     ) -> discord_stream.WatchForFinalAnswerResult:
         bridge = cast(object, getattr(self.module, "BRIDGE_FINAL_ANSWER"))
-        return cast(discord_stream.WatchForFinalAnswerFunc, getattr(bridge, "watch_for_final_answer"))(
+        watcher = cast(discord_stream.WatchForFinalAnswerFunc, getattr(bridge, "watch_for_final_answer"))
+        if expected_turn_id is not None:
+            return watcher(
+                session_path=session_path,
+                start_offset=start_offset,
+                timeout_sec=timeout_sec,
+                include_commentary=include_commentary,
+                stream_live=stream_live,
+                stream_label=stream_label,
+                stream_callback=stream_callback,
+                expected_turn_id=expected_turn_id,
+            )
+        return watcher(
             session_path=session_path,
             start_offset=start_offset,
             timeout_sec=timeout_sec,
@@ -166,9 +179,15 @@ class BotPromptWatchAdapterRuntime:
         return discord_steering_watch_runtime.make_post_approval_watch_result(
             target_thread_id,
             bridge=cast(discord_steering_watch_runtime.ApprovalWatchBridge, getattr(self.module, "BRIDGE_THREAD_STATE")),
+            get_active_turn_id=self.get_active_turn_id,
             log_line=self.log_line,
             expected_exceptions=(OSError, RuntimeError, sqlite_error_type),
         )
+
+    def get_active_turn_id(self, thread_id: str) -> str | None:
+        transport_module = cast(ModuleType, getattr(self.module, "app_server_transport"))
+        client = cast(object, getattr(transport_module, "DEFAULT_CLIENT"))
+        return cast(Callable[[str], str | None], getattr(client, "get_active_turn_id"))(thread_id)
 
     def require_relay_channel(self, channel: ModuleValue) -> discord_stream_relay.RelayChannel:
         return cast(

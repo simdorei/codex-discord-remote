@@ -13,7 +13,7 @@ from codex_discord_stream_relay_types import (
     LogFunc,
     ParseInteractiveNoticeFunc,
     RegisterDiscordRelayFunc,
-    RelayChannel,
+    RelayChannel as RelayChannel,
     RelayMode,
     SendChunksFunc,
     SendInteractivePromptFunc,
@@ -66,6 +66,7 @@ class DiscordAskRelay:
         self.suppressed_after_steering: bool = False
         self.saw_final: bool = False
         self.saw_aborted: bool = False
+        self.saw_failed: bool = False
         self.saw_timeout: bool = False
         self._send_futures: list[Future[None]] = []
         self._quiet_notice_future: Future[None] | None = None
@@ -95,6 +96,7 @@ class DiscordAskRelay:
             or self.quiet_notice_sent
             or self.saw_final
             or self.saw_aborted
+            or self.saw_failed
             or self.saw_timeout
         ):
             return
@@ -178,13 +180,21 @@ class DiscordAskRelay:
                 if not self._send_interactive_notice_if_detected(text):
                     self.saw_final = True
                     if self.send_final_blocks:
-                        self._send(text)
+                        self._send(f"Final\n\n{text}")
                         self.sent_live = True
             case "timeout":
                 self.saw_timeout = True
                 if self.send_timeout_blocks:
                     self._send(f"Timed out\n\n{text}")
                     self.sent_live = True
+            case "failed":
+                self.saw_failed = True
+                self._send(f"Failed\n\n{text}")
+                self.sent_live = True
+            case "transport_error":
+                self.saw_failed = True
+                self._send(f"Transport error\n\n{text}")
+                self.sent_live = True
             case None:
                 pass
         self.block_lines = []
@@ -204,6 +214,11 @@ class DiscordAskRelay:
             self.mode = "timeout"
             self.saw_timeout = True
             return
+        if line_kind in {"failed", "transport_error"}:
+            self._send_block()
+            self.mode = "failed" if line_kind == "failed" else "transport_error"
+            self.saw_failed = True
+            return
         if line_kind == "aborted":
             self._send_block()
             self.mode = None
@@ -220,7 +235,7 @@ class DiscordAskRelay:
                 self._schedule_quiet_notice()
             return
 
-        if self.mode in {"commentary", "final", "timeout"}:
+        if self.mode in {"commentary", "failed", "final", "timeout", "transport_error"}:
             self.block_lines.append(line)
             return
 

@@ -5,6 +5,7 @@ from typing import override
 
 from codex_app_server_transport_pending import PendingRequestState
 from codex_app_server_transport_replies import JsonObject
+from codex_app_server_transport_turn_outcomes import InterruptOrigin
 
 
 class PendingRequestStateTests(unittest.TestCase):
@@ -76,6 +77,96 @@ class PendingRequestStateTests(unittest.TestCase):
         )
 
         self.assertIsNone(state.active_turn_id("thread-1"))
+
+    def test_completed_notification_preserves_failed_status_and_error_by_exact_turn(self) -> None:
+        state = PendingRequestState()
+
+        state.record_notification(
+            {
+                "method": "turn/completed",
+                "params": {
+                    "threadId": "thread-1",
+                    "turn": {
+                        "id": "turn-1",
+                        "status": "failed",
+                        "items": [],
+                        "error": {"message": "model request failed"},
+                    },
+                },
+            },
+            self.logs.append,
+        )
+
+        completion = state.turn_completion("thread-1", "turn-1")
+        self.assertIsNotNone(completion)
+        assert completion is not None
+        self.assertEqual(completion.status.value, "failed")
+        self.assertEqual(completion.error_message, "model request failed")
+
+    def test_completed_notification_keeps_exact_interrupted_turn_without_active_start(self) -> None:
+        state = PendingRequestState()
+
+        state.record_notification(
+            {
+                "method": "turn/completed",
+                "params": {
+                    "threadId": "thread-1",
+                    "turn": {"id": "turn-2", "status": "interrupted", "items": []},
+                },
+            },
+            self.logs.append,
+        )
+
+        completion = state.turn_completion("thread-1", "turn-2")
+        self.assertIsNotNone(completion)
+        assert completion is not None
+        self.assertEqual(completion.status.value, "interrupted")
+        self.assertIsNone(state.active_turn_id("thread-1"))
+
+    def test_only_registered_exact_interrupt_is_attributed_to_remote_user_intent(self) -> None:
+        state = PendingRequestState()
+        state.record_notification(
+            {
+                "method": "turn/started",
+                "params": {"threadId": "thread-1", "turn": {"id": "turn-1", "status": "inProgress"}},
+            },
+            self.logs.append,
+        )
+        self.assertTrue(state.register_remote_interrupt_intent("thread-1", "turn-1", registered_at=1.0))
+
+        state.record_notification(
+            {
+                "method": "turn/completed",
+                "params": {
+                    "threadId": "thread-1",
+                    "turn": {"id": "turn-1", "status": "interrupted", "items": []},
+                },
+            },
+            self.logs.append,
+            now=2.0,
+        )
+
+        completion = state.turn_completion("thread-1", "turn-1")
+        assert completion is not None
+        self.assertIs(completion.interrupt_origin, InterruptOrigin.REMOTE_USER_INTENT)
+
+    def test_generic_interruption_stays_external_or_unknown(self) -> None:
+        state = PendingRequestState()
+
+        state.record_notification(
+            {
+                "method": "turn/completed",
+                "params": {
+                    "threadId": "thread-1",
+                    "turn": {"id": "turn-1", "status": "interrupted", "items": []},
+                },
+            },
+            self.logs.append,
+        )
+
+        completion = state.turn_completion("thread-1", "turn-1")
+        assert completion is not None
+        self.assertIs(completion.interrupt_origin, InterruptOrigin.EXTERNAL_OR_UNKNOWN)
 
     def test_resolve_request_removes_it_from_pending_requests(self) -> None:
         state = PendingRequestState()

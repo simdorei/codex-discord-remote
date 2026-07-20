@@ -73,6 +73,10 @@ class AppMenuSender(Protocol[ChannelContraT]):
     ) -> Awaitable[bool]: ...
 
 
+class ResumeFailureSender(Protocol[ChannelContraT]):
+    def __call__(self, channel: ChannelContraT, content: str, target_thread_id: str) -> Awaitable[None]: ...
+
+
 @dataclass(frozen=True, slots=True)
 class MappedPromptDeliveryDeps(Generic[ChannelT]):
     prepare_mapped_session_mirror_output: PrepareMappedSessionMirrorOutput[ChannelT]
@@ -87,6 +91,7 @@ class MappedPromptDeliveryDeps(Generic[ChannelT]):
     deactivate_session_mirror_output_target: OutputTargetDeactivator
     is_selected_thread_busy_error: BusyPredicate
     send_codex_app_menu_if_available: AppMenuSender[ChannelT]
+    send_resume_failure: ResumeFailureSender[ChannelT]
     format_log_text_len: TextLenFunc
     log: LogFunc
 
@@ -100,6 +105,10 @@ def format_mapped_transport_failure(exit_code: int, output: str) -> str:
     if "Prompt landed in a different thread" in output:
         return "Ask failed: Codex recorded this message in a different thread. I did not resend it here."
     return f"Ask failed (transport exit {exit_code})\n\n{output or '(no output)'}"
+
+
+def is_thread_resume_timeout(output: str) -> bool:
+    return "thread/resume" in output and "Timed out" in output
 
 
 async def handle_mapped_prompt_delivery(
@@ -139,5 +148,9 @@ async def handle_mapped_prompt_delivery(
         reason="ask_transport_no_wait_busy",
     ):
         return MappedPromptDeliveryResult(handled=True)
-    await deps.send_chunks(channel, format_mapped_transport_failure(exit_code, output))
+    failure = format_mapped_transport_failure(exit_code, output)
+    if target_thread_id and is_thread_resume_timeout(output):
+        await deps.send_resume_failure(channel, failure, target_thread_id)
+    else:
+        await deps.send_chunks(channel, failure)
     return MappedPromptDeliveryResult(handled=True)

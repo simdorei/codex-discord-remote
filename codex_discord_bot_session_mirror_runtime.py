@@ -13,6 +13,7 @@ import codex_discord_session_mirror_item_delivery as discord_session_mirror_item
 import codex_discord_session_mirror_target as discord_session_mirror_target
 from codex_session_events import JsonEvent
 from codex_thread_models import ThreadContextUsage, ThreadInfo
+from codex_app_server_transport_goal import GoalAbsent, ThreadGoalLookup
 ModuleValue: TypeAlias = object
 
 
@@ -99,6 +100,8 @@ class SessionMirrorRuntimeDeps(Generic[ChannelT]):
     log: LogFunc
     send_typing_pulse: Callable[[ChannelT, str], Awaitable[None]] = noop_send_typing_pulse
     is_thread_busy: Callable[[Path], bool] = lambda session_path: True
+    get_active_turn_id: Callable[[str], str | None] = lambda thread_id: None
+    get_thread_goal_lookup: Callable[[str], ThreadGoalLookup] = lambda thread_id: GoalAbsent()
 
 
 @dataclass(frozen=True, slots=True)
@@ -212,8 +215,13 @@ class SessionMirrorRuntime(Generic[ChannelT]):
             send_session_mirror_item=owner.send_session_mirror_item,
             claim_session_mirror_event=self.deps.claim_session_mirror_event,
             deactivate_session_mirror_output_target=self.deps.deactivate_session_mirror_output_target,
-            send_typing_pulse=self.deps.send_typing_pulse,
+            send_typing_pulse=lambda channel, target_thread_id, context: self.deps.send_typing_pulse(
+                channel,
+                context,
+            ),
             is_thread_busy=self.deps.is_thread_busy,
+            get_active_turn_id=self.deps.get_active_turn_id,
+            get_thread_goal_lookup=self.deps.get_thread_goal_lookup,
             log=self.deps.log,
         )
         await discord_session_mirror_target.mirror_session_target(target, deps=deps)

@@ -48,7 +48,7 @@ async def send_unclaimed_session_mirror_items(
     delivery_target_ref = target_ref or codex_thread_id
     for item in items:
         digest = item.get("digest") or ""
-        terminal_item = item.get("kind") in {"final", "aborted"}
+        terminal_item = item.get("kind") == "final"
         if digest and await deps.has_session_mirror_event(digest, codex_thread_id):
             continue
         await deps.send_session_mirror_item(

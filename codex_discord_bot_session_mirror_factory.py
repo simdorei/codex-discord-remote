@@ -10,6 +10,7 @@ import codex_discord_bot_session_mirror_runtime as session_mirror_runtime
 import codex_discord_session_mirror as discord_session_mirror
 import codex_discord_session_mirror_item_delivery as discord_session_mirror_item_delivery
 import codex_discord_session_mirror_target as discord_session_mirror_target
+import codex_app_server_transport as app_server_transport
 from codex_discord_text import env_flag, parse_bounded_int_arg
 from codex_session_events import JsonEvent
 from codex_thread_models import ThreadContextUsage, ThreadInfo
@@ -59,6 +60,19 @@ def make_session_mirror_runtime(
     log: Callable[[str], None],
     send_typing_pulse: Callable[[ChannelT, str], Awaitable[None]] | None = None,
 ) -> session_mirror_runtime.SessionMirrorRuntime[ChannelT]:
+    def app_server_enabled() -> bool:
+        return env_flag("CODEX_DISCORD_APP_SERVER_TRANSPORT", True)
+
+    def get_active_turn_id(thread_id: str) -> str | None:
+        if not app_server_enabled():
+            return None
+        return app_server_transport.DEFAULT_CLIENT.get_active_turn_id_or_raise(thread_id)
+
+    def get_thread_goal_lookup(thread_id: str) -> app_server_transport.ThreadGoalLookup:
+        if not app_server_enabled():
+            return app_server_transport.GoalAbsent()
+        return app_server_transport.DEFAULT_CLIENT.get_thread_goal_lookup(thread_id)
+
     def read_new_session_events(
         session_path: Path,
         cursor: int,
@@ -113,6 +127,8 @@ def make_session_mirror_runtime(
             log=log,
             send_typing_pulse=send_typing_pulse or session_mirror_runtime.noop_send_typing_pulse,
             is_thread_busy=lambda session_path: events_bridge.is_thread_busy(session_path),
+            get_active_turn_id=get_active_turn_id,
+            get_thread_goal_lookup=get_thread_goal_lookup,
         )
     )
 

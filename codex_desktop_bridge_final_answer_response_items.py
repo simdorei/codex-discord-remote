@@ -8,7 +8,6 @@ from codex_desktop_bridge_final_answer_types import (
     WatchForFinalAnswerResult,
     WatchState,
     append_commentary,
-    result_from_state,
 )
 
 
@@ -69,16 +68,7 @@ def _process_assistant_message_response_item(
     phase = payload.get("phase")
     if phase == "final_answer":
         state.final_answer = text
-        if stream_live:
-            state.did_stream_live = True
-            state.did_stream_final_live = True
-            deps.emit_watch_stream_block(
-                "[final_answer]",
-                state.final_answer,
-                stream_label=stream_label,
-                stream_callback=stream_callback,
-            )
-        return result_from_state("final", state)
+        return None
 
     if phase == "commentary" and include_commentary:
         state.did_stream_live = append_commentary(

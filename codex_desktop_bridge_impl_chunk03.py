@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from codex_desktop_bridge_impl_common import *
 
+import codex_desktop_bridge_final_answer_transport as final_answer_transport
+
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -238,6 +240,10 @@ def _make_final_answer_watch_deps() -> final_answer_watch.FinalAnswerWatchDeps:
         build_interactive_notice_from_function_call=build_interactive_notice_from_function_call,
         extract_message_text=extract_message_text,
         emit_watch_stream_block=emit_watch_stream_block,
+        get_thread_goal_status=final_answer_transport.get_thread_goal_status,
+        observe_turn_completion=final_answer_transport.observe_turn_completion,
+        get_thread_goal_lookup=final_answer_transport.get_thread_goal_lookup,
+        get_thread_goal_update=final_answer_transport.get_thread_goal_update,
     )
 
 __all__ = ('_make_desktop_process_deps', '_make_final_answer_watch_deps', '_make_pending_reply_deps', '_make_start_turn_sidecar_deps', 'annotations', 'archive_thread_once', 'archive_thread_with_lock_retry', 'check_codex_app_update', 'detect_running_codex_app_server_executable', 'discover_codex_desktop_executable', 'emit_watch_stream_block', 'ensure_codex_desktop_executable_configured', 'is_windowsapps_path', 'iter_codex_app_server_bin_candidates', 'load_thread_record_by_id', 'normalize_prompt_text', 'read_codex_app_package_version', 'resolve_codex_app_server_executable', 'resolve_new_thread_cwd', 'snapshot_recent_session_offsets', 'spawn_background_new_thread_runner', 'start_codex_desktop_process', 'start_turn_via_sidecar', 'stop_codex_archive_lock_candidates', 'stop_codex_desktop_processes', 'wait_for_prompt_delivery', 'wait_for_thread_record')

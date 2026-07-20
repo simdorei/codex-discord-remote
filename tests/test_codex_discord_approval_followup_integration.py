@@ -10,6 +10,8 @@ from typing import NoReturn, Protocol, cast, final
 from unittest import mock
 
 import codex_discord_bot as bot
+from codex_discord_steering import NativeExactWatchTarget
+from codex_thread_models import ThreadInfo
 
 
 class ThreadUnavailableError(RuntimeError):
@@ -74,6 +76,43 @@ async def resolve_approval_followup_channel(interaction: FakeInteraction) -> Mes
 
 @final
 class ApprovalFollowupIntegrationTests(unittest.IsolatedAsyncioTestCase):
+    def test_post_approval_watch_requires_and_preserves_exact_active_turn(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            session_path = Path(temp_dir) / "session.jsonl"
+            session_path.write_text("", encoding="utf-8")
+            thread = ThreadInfo("thread-1", "Title", temp_dir, 1, str(session_path), "gpt", "high", 0)
+            with (
+                mock.patch.object(bot.BRIDGE_THREAD_STATE, "choose_thread", return_value=thread),
+                mock.patch.object(bot.BRIDGE_THREAD_STATE, "get_thread_workspace_ref", return_value="project:1"),
+                mock.patch.object(
+                    bot.app_server_transport.DEFAULT_CLIENT,
+                    "get_active_turn_id",
+                    return_value="turn-42",
+                ),
+            ):
+                result = bot.make_post_approval_watch_result("thread-1")
+
+        self.assertIsNotNone(result)
+        assert result is not None
+        self.assertEqual(result.watch_target, NativeExactWatchTarget("turn-42"))
+
+    def test_post_approval_watch_skips_when_exact_turn_is_unavailable(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            session_path = Path(temp_dir) / "session.jsonl"
+            session_path.write_text("", encoding="utf-8")
+            thread = ThreadInfo("thread-1", "Title", temp_dir, 1, str(session_path), "gpt", "high", 0)
+            with (
+                mock.patch.object(bot.BRIDGE_THREAD_STATE, "choose_thread", return_value=thread),
+                mock.patch.object(
+                    bot.app_server_transport.DEFAULT_CLIENT,
+                    "get_active_turn_id",
+                    return_value=None,
+                ),
+            ):
+                result = bot.make_post_approval_watch_result("thread-1")
+
+        self.assertIsNone(result)
+
     def test_make_post_approval_watch_result_returns_none_when_thread_unavailable(self) -> None:
         def raise_unavailable(thread_id: str, cwd: str | None = None) -> NoReturn:
             _ = thread_id, cwd

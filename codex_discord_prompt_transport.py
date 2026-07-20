@@ -79,6 +79,15 @@ def _transport_error_output(exc: Exception) -> str:
                 "Run `!mirror sync`; it refreshes app-server thread availability and removes stale mirror mappings.",
             ]
         )
+    if isinstance(exc, TimeoutError) and "thread/resume" in message:
+        lines.extend(
+            [
+                "",
+                "A large conversation history or temporary PC load can delay restoring this Codex thread.",
+                "Run `!resume` to retry the restore, then resend the original message.",
+                "The failed prompt was not resent automatically.",
+            ]
+        )
     return "\n".join(lines)
 
 

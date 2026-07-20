@@ -81,6 +81,11 @@ def get_steering_bridge_module() -> discord_steering.SteeringBridgeLike:
 def make_app_server_steering_result(
     result: app_server_transport.AppServerDeliveryResult,
 ) -> discord_steering.SteeringPromptResult:
+    watch_target: discord_steering.WatchTarget = (
+        discord_steering.NativeExactWatchTarget(result.turn_id)
+        if result.turn_id
+        else discord_steering.RolloutOnlyWatchTarget()
+    )
     return discord_steering.SteeringPromptResult(
         result.exit_code,
         result.output,
@@ -89,4 +94,5 @@ def make_app_server_steering_result(
         session_path=result.session_path,
         start_offset=result.start_offset,
         delivery_pending=result.delivery_pending,
+        watch_target=watch_target,
     )

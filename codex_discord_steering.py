@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Iterator, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Protocol, TypeAlias
 
@@ -62,6 +62,19 @@ FormatLogTextLenFunc: TypeAlias = Callable[[str], int | str]
 
 
 @dataclass(frozen=True, slots=True)
+class NativeExactWatchTarget:
+    turn_id: str
+
+
+@dataclass(frozen=True, slots=True)
+class RolloutOnlyWatchTarget:
+    pass
+
+
+WatchTarget: TypeAlias = NativeExactWatchTarget | RolloutOnlyWatchTarget
+
+
+@dataclass(frozen=True, slots=True)
 class SteeringPromptResult:
     exit_code: int
     output: str
@@ -70,6 +83,7 @@ class SteeringPromptResult:
     session_path: str | None = None
     start_offset: int | None = None
     delivery_pending: bool = False
+    watch_target: WatchTarget = field(default_factory=RolloutOnlyWatchTarget)
 
     def __iter__(self) -> Iterator[int | str]:
         yield self.exit_code

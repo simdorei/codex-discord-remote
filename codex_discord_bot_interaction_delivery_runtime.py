@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio  # noqa: ANYIO_OK
 from collections.abc import Callable
+from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass
 from types import ModuleType
 from typing import cast
@@ -11,6 +12,7 @@ import codex_discord_delivery as discord_delivery
 import codex_discord_delivery_interactions as discord_delivery_interactions
 import codex_discord_delivery_state as discord_delivery_state
 import codex_discord_session_mirror_archive as discord_session_mirror_archive
+import codex_discord_interrupt_context as discord_interrupt_context
 
 
 @dataclass(frozen=True, slots=True)
@@ -24,26 +26,27 @@ class BotInteractionDeliveryRuntime:
         title: str,
         failure_title: str | None = None,
         archive_cleanup_owner: discord_session_mirror_archive.ArchiveMirrorCleanupOwner | None = None,
-        ) -> tuple[int, str]:
-        return await discord_bridge_send.run_bridge_and_send(
-            target,
-            argv,
-            title,
-            failure_title=failure_title,
-            archive_cleanup_owner=archive_cleanup_owner,
-            run_bridge_command_func=cast(Callable[[list[str]], tuple[int, str]], getattr(self.module, "run_bridge_command")),
-            cleanup_archive_mirror_after_bridge_command_func=cast(
-                Callable[
-                    [discord_session_mirror_archive.ArchiveMirrorCleanupOwner | None, list[str], int, str],
-                    str | None,
-                ],
-                getattr(self.module, "cleanup_archive_mirror_after_bridge_command"),
-            ),
-            split_delivery_chunks_func=cast(Callable[[str], list[str]], getattr(self.module, "split_delivery_chunks")),
-            send_chunks_func=cast(discord_bridge_send.SendChunksFunc[discord_delivery_state.Messageable, int], getattr(self.module, "send_chunks")),
-            format_log_argv_func=cast(Callable[[list[str]], str], getattr(self.module, "format_log_argv")),
-            log_func=cast(discord_delivery_state.LogFunc, getattr(self.module, "log_line")),
-        )
+    ) -> tuple[int, str]:
+        with self._stop_scope(argv):
+            return await discord_bridge_send.run_bridge_and_send(
+                target,
+                argv,
+                title,
+                failure_title=failure_title,
+                archive_cleanup_owner=archive_cleanup_owner,
+                run_bridge_command_func=cast(Callable[[list[str]], tuple[int, str]], getattr(self.module, "run_bridge_command")),
+                cleanup_archive_mirror_after_bridge_command_func=cast(
+                    Callable[
+                        [discord_session_mirror_archive.ArchiveMirrorCleanupOwner | None, list[str], int, str],
+                        str | None,
+                    ],
+                    getattr(self.module, "cleanup_archive_mirror_after_bridge_command"),
+                ),
+                split_delivery_chunks_func=cast(Callable[[str], list[str]], getattr(self.module, "split_delivery_chunks")),
+                send_chunks_func=cast(discord_bridge_send.SendChunksFunc[discord_delivery_state.Messageable, int], getattr(self.module, "send_chunks")),
+                format_log_argv_func=cast(Callable[[list[str]], str], getattr(self.module, "format_log_argv")),
+                log_func=cast(discord_delivery_state.LogFunc, getattr(self.module, "log_line")),
+            )
 
     async def run_interaction_bridge_and_send(
         self,
@@ -53,7 +56,8 @@ class BotInteractionDeliveryRuntime:
         failure_title: str | None = None,
     ) -> tuple[int, str]:
         run_bridge_command = cast(Callable[[list[str]], tuple[int, str]], getattr(self.module, "run_bridge_command"))
-        exit_code, output = await asyncio.to_thread(run_bridge_command, argv)
+        with self._stop_scope(argv):
+            exit_code, output = await asyncio.to_thread(run_bridge_command, argv)
         prefix = title if exit_code == 0 else f"{failure_title or title} failed (exit {exit_code})"
         log = cast(discord_delivery_state.LogFunc, getattr(self.module, "log_line"))
         format_log_argv = cast(Callable[[list[str]], str], getattr(self.module, "format_log_argv"))
@@ -68,6 +72,11 @@ class BotInteractionDeliveryRuntime:
             exit_code=exit_code,
         )
         return exit_code, output
+
+    def _stop_scope(self, argv: list[str]) -> AbstractContextManager[None]:
+        if argv and argv[0] == "stop":
+            return discord_interrupt_context.discord_remote_stop_scope()
+        return nullcontext()
 
     async def send_interaction_chunks(
         self,

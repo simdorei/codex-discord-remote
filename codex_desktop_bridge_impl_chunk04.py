@@ -15,6 +15,7 @@ def watch_for_final_answer(
     stream_live: bool = False,
     stream_label: str = "",
     stream_callback: Callable[[str], None] | None = None,
+    expected_turn_id: str | None = None,
 ) -> final_answer_watch.WatchForFinalAnswerResult:
     return final_answer_watch.watch_for_final_answer(
         session_path,
@@ -25,6 +26,7 @@ def watch_for_final_answer(
         stream_live=stream_live,
         stream_label=stream_label,
         stream_callback=stream_callback,
+        expected_turn_id=expected_turn_id,
     )
 
 def _print_background_watch_status(label: str, status: str) -> None:

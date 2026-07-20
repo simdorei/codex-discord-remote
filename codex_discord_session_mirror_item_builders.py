@@ -153,6 +153,12 @@ def format_session_mirror_text(item: SessionMirrorItem) -> str:
         return f"In progress\n\n{text}"
     if kind == "user":
         return f"Codex app user\n\n{text}"
+    if kind == "final":
+        return f"Final\n\n{text}"
     if kind == "aborted":
         return text or "Codex turn aborted."
+    if kind == "failed":
+        return f"Failed\n\n{text}"
+    if kind == "transport_error":
+        return f"Transport error\n\n{text}"
     return text

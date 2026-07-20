@@ -110,6 +110,8 @@ class BotSessionRunnerWiringRuntime:
         self._set("_make_prefix_steer_command_deps", runtime.make_prefix_steer_command_deps)
         self._set("_make_prefix_status_command_deps", runtime.make_prefix_status_command_deps)
         self._set("_make_prefix_queue_command_deps", runtime.make_prefix_queue_command_deps)
+        self._set("_make_prefix_resume_command_deps", runtime.make_prefix_resume_command_deps)
+        self._set("recover_resident_thread_for_request", runtime.recover_resident_thread_for_request)
         self._set("_make_prefix_archive_command_deps", runtime.make_prefix_archive_command_deps)
         self._set("_make_prefix_approval_command_deps", runtime.make_prefix_approval_command_deps)
         self._set("_make_prefix_qa_command_deps", runtime.make_prefix_qa_command_deps)

@@ -60,8 +60,14 @@ def background_watch_worker(
             deps.print_watch_status(label, "ready")
         elif result["status"] == "aborted":
             deps.print_watch_status(label, "aborted")
+        elif result["status"] == "progress":
+            deps.print_watch_status(label, "in_progress")
         elif result["status"] == "timeout":
             deps.print_watch_status(label, "watch_timeout")
+        elif result["status"] == "failed":
+            deps.print_watch_status(label, "failed")
+        elif result["status"] == "transport_error":
+            deps.print_watch_status(label, "transport_error")
     finally:
         with BACKGROUND_WATCHERS_LOCK:
             current = BACKGROUND_WATCHERS.get(thread.id)

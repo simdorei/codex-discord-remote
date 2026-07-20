@@ -5,9 +5,9 @@ from __future__ import annotations
 from collections.abc import Callable
 from contextlib import AbstractContextManager
 from pathlib import Path
-from typing import Literal, Protocol, TypedDict
+from typing import Literal, NotRequired, Protocol, TypedDict
 
-from codex_discord_steering import SteeringPromptResult
+from codex_discord_steering import NativeExactWatchTarget, SteeringPromptResult
 from codex_discord_stream_relay import DiscordAskRelay as DiscordAskRelay
 
 LineStreamFunc = Callable[[str], None]
@@ -27,11 +27,13 @@ class BuildUiAskArgvFunc(Protocol):
 
 
 class WatchForFinalAnswerResult(TypedDict):
-    status: Literal["aborted", "final", "timeout"]
+    status: Literal["aborted", "failed", "final", "progress", "timeout", "transport_error"]
     commentary: list[str]
     final_answer: str
     streamed_live: bool
     final_streamed_live: bool
+    error_message: NotRequired[str]
+    interrupt_origin: NotRequired[str]
 
 
 class WatchForFinalAnswerFunc(Protocol):
@@ -45,6 +47,7 @@ class WatchForFinalAnswerFunc(Protocol):
         stream_live: bool = False,
         stream_label: str = "",
         stream_callback: LineStreamFunc | None = None,
+        expected_turn_id: str | None = None,
     ) -> WatchForFinalAnswerResult: ...
 
 
@@ -158,14 +161,25 @@ def run_steering_watch_stream(
         output_lines.append(line)
 
     try:
-        result = watch_for_final_answer_func(
-            session_path=Path(session_path),
-            start_offset=start_offset,
-            timeout_sec=timeout_sec,
-            include_commentary=True,
-            stream_live=True,
-            stream_callback=relay_stream_line,
-        )
+        if isinstance(steering_result.watch_target, NativeExactWatchTarget):
+            result = watch_for_final_answer_func(
+                session_path=Path(session_path),
+                start_offset=start_offset,
+                timeout_sec=timeout_sec,
+                include_commentary=True,
+                stream_live=True,
+                stream_callback=relay_stream_line,
+                expected_turn_id=steering_result.watch_target.turn_id,
+            )
+        else:
+            result = watch_for_final_answer_func(
+                session_path=Path(session_path),
+                start_offset=start_offset,
+                timeout_sec=timeout_sec,
+                include_commentary=True,
+                stream_live=True,
+                stream_callback=relay_stream_line,
+            )
 
         if result["final_answer"]:
             if result.get("final_streamed_live"):
@@ -182,6 +196,23 @@ def run_steering_watch_stream(
             relay.feed_line("[aborted]")
             output_lines.append("[aborted]")
             return 0, "\n".join(output_lines).strip()
+
+        if result["status"] == "progress":
+            relay.feed_line("[ready]")
+            output_lines.append("[ready]")
+            return 0, "\n".join(output_lines).strip()
+
+        if result["status"] in {"failed", "transport_error"}:
+            marker = "[failed]" if result["status"] == "failed" else "[transport_error]"
+            relay.feed_line(marker)
+            output_lines.append(marker)
+            error_message = result.get("error_message") or "Codex terminal state could not be verified."
+            for line in error_message.splitlines():
+                relay.feed_line(line)
+                output_lines.append(line)
+            relay.feed_line("[ready]")
+            output_lines.append("[ready]")
+            return 1, "\n".join(output_lines).strip()
 
         relay.feed_line("[timeout]")
         output_lines.append("[timeout]")

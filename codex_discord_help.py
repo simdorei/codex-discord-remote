@@ -33,6 +33,7 @@ def build_help(*, qa_commands_enabled: bool, host_commands_enabled: bool = False
         "!open <ref>",
         "!open_abort <ref>",
         "!stop [ref]  (stop the running Codex reply for the mapped or selected thread)",
+        "!resume [ref]  (restore a mapped or selected Codex thread; does not resend the prompt)",
         "!status [ref]",
         "!settings [ref] --model <model> --effort <effort> --speed <speed>  (alias: !setting; omit a value to list options)",
         "!doctor",

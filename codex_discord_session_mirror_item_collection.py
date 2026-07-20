@@ -15,6 +15,8 @@ from codex_discord_session_mirror_item_append import (
     append_user_if_new as _append_user_if_new,
 )
 from codex_session_events import JsonValue
+from codex_app_server_transport_goal import ThreadGoalStatus, ThreadGoalUpdate
+from codex_app_server_transport_turn_outcomes import TurnCompletion, TurnStatus
 from codex_discord_session_mirror_item_builders import (
     SessionEvent,
     SessionMirrorItem,
@@ -182,7 +184,6 @@ def _collect_response_message(
         _append_agent_if_new(ctx, items, event, text, kind="commentary", phase=phase)
         return
     if role == "assistant" and phase == "final_answer":
-        _append_agent_if_new(ctx, items, event, text, kind="final", phase=phase)
         return
     if role == "user" and not text.lstrip().startswith(INTERNAL_RESPONSE_USER_PREFIXES):
         _append_user_if_new(ctx, items, event, text, phase)
@@ -211,8 +212,22 @@ def collect_session_mirror_items(
     build_interactive_notice_func: BuildInteractiveNoticeFunc,
     extract_message_text_func: ExtractMessageTextFunc,
     recent_text_ttl_seconds: float,
+    goal_status: ThreadGoalStatus | None = None,
+    turn_completions: dict[str, TurnCompletion] | None = None,
+    turn_completion_error: str = "",
+    goal_updates: dict[str, ThreadGoalUpdate] | None = None,
+    goal_lookup_error: str = "",
     make_text_digest_func: TextDigestFunc = item_builders.make_text_digest,
 ) -> list[SessionMirrorItem]:
+    completion_map = {} if turn_completions is None else turn_completions
+    latest_native_completed_turn_id = next(
+        (
+            turn_id
+            for turn_id, completion in reversed(list(completion_map.items()))
+            if completion.status is TurnStatus.COMPLETED
+        ),
+        None,
+    )
     ctx = CollectionContext(
         codex_thread_id=codex_thread_id,
         seen_agent_messages=seen_agent_messages,
@@ -222,6 +237,13 @@ def collect_session_mirror_items(
         extract_message_text=extract_message_text_func,
         recent_text_ttl_seconds=recent_text_ttl_seconds,
         make_text_digest=make_text_digest_func,
+        goal_status=goal_status,
+        latest_terminal_turn_id=latest_native_completed_turn_id or item_events.latest_terminal_turn_id(events),
+        terminal_turn_ids=set(),
+        turn_completions=completion_map,
+        turn_completion_error=turn_completion_error,
+        goal_updates={} if goal_updates is None else goal_updates,
+        goal_lookup_error=goal_lookup_error,
     )
     items: list[SessionMirrorItem] = []
     for event in events:

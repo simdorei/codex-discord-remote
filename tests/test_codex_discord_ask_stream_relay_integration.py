@@ -98,7 +98,7 @@ class DiscordAskStreamRelayIntegrationTests(unittest.IsolatedAsyncioTestCase):
             )
 
             self.assertEqual(message.channel.typing_events, ["enter", "exit"])
-            self.assertEqual(message.channel.messages, [("done", None)])
+            self.assertEqual(message.channel.messages, [("Final\n\ndone", None)])
         finally:
             bot.resolve_target_ref = original_resolve_target_ref
             bot.run_ask_stream = original_run_ask_stream

@@ -19,6 +19,30 @@ import codex_desktop_bridge_sidecar_resolver as sidecar_resolver
 import codex_windows_harness as harness
 
 
+def _final_turn_events(text: str) -> list[dict[str, object]]:
+    return [
+        {
+            "timestamp": "1",
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "assistant",
+                "phase": "final_answer",
+                "content": [{"type": "output_text", "text": text}],
+            },
+        },
+        {
+            "timestamp": "2",
+            "type": "event_msg",
+            "payload": {
+                "type": "task_complete",
+                "turn_id": "turn-1",
+                "last_agent_message": text,
+            },
+        },
+    ]
+
+
 class FakeFollowup:
     def __init__(self) -> None:
         self.messages: list[object] = []
@@ -256,6 +280,12 @@ class EnvPatch:
 
 class DiscordBotHelperTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
+        self._goal_status_patch = mock.patch.object(
+            bot.app_server_transport.DEFAULT_CLIENT,
+            "get_thread_goal_status",
+            return_value=None,
+        )
+        _ = self._goal_status_patch.start()
         self._old_mirror_db_path = bot.MIRROR_DB_PATH
         self._old_discord_log_path = os.environ.get("CODEX_DISCORD_LOG_PATH")
         self._old_active_session_mirror_output_targets = dict(bot.get_session_mirror_state().active_output_targets)
@@ -272,6 +302,7 @@ class DiscordBotHelperTests(unittest.IsolatedAsyncioTestCase):
         bot.init_mirror_db()
 
     def tearDown(self) -> None:
+        self._goal_status_patch.stop()
         bot.MIRROR_DB_PATH = self._old_mirror_db_path
         if self._old_discord_log_path is None:
             os.environ.pop("CODEX_DISCORD_LOG_PATH", None)
@@ -2354,7 +2385,7 @@ class DiscordBotHelperTests(unittest.IsolatedAsyncioTestCase):
         await asyncio.to_thread(relay.finish)
         await asyncio.sleep(0.08)
 
-        self.assertEqual(target.messages, [("done", None)])
+        self.assertEqual(target.messages, [("Final\n\ndone", None)])
         self.assertFalse(relay.quiet_notice_sent)
         self.assertTrue(relay.sent_live)
 
@@ -2382,7 +2413,7 @@ class DiscordBotHelperTests(unittest.IsolatedAsyncioTestCase):
             relay.feed_line("[ready]")
             await asyncio.to_thread(relay.finish)
 
-            self.assertEqual(sent, ["In progress\n\nchecking order", "done"])
+            self.assertEqual(sent, ["In progress\n\nchecking order", "Final\n\ndone"])
             self.assertTrue(relay.sent_live)
             self.assertTrue(relay.saw_final)
         finally:
@@ -2413,7 +2444,7 @@ class DiscordBotHelperTests(unittest.IsolatedAsyncioTestCase):
             relay.feed_line("[ready]")
             await asyncio.to_thread(relay.finish)
 
-            self.assertEqual(sent, ["done"])
+            self.assertEqual(sent, ["Final\n\ndone"])
             self.assertTrue(relay.sent_live)
             self.assertTrue(relay.saw_final)
         finally:
@@ -2468,7 +2499,7 @@ class DiscordBotHelperTests(unittest.IsolatedAsyncioTestCase):
             )
 
             self.assertEqual(exit_code, 0)
-            self.assertEqual(target.messages, [("steered done", None)])
+            self.assertEqual(target.messages, [("Final\n\nsteered done", None)])
             self.assertTrue(relay.sent_live)
             self.assertTrue(relay.saw_final)
         finally:
@@ -2523,7 +2554,10 @@ class DiscordBotHelperTests(unittest.IsolatedAsyncioTestCase):
             )
 
             self.assertEqual(exit_code, 0)
-            self.assertEqual(target.messages, [("In progress\n\nchecking files", None), ("done", None)])
+            self.assertEqual(
+                target.messages,
+                [("In progress\n\nchecking files", None), ("Final\n\ndone", None)],
+            )
             self.assertTrue(relay.sent_live)
             self.assertTrue(relay.saw_final)
         finally:
@@ -2552,6 +2586,14 @@ class DiscordBotHelperTests(unittest.IsolatedAsyncioTestCase):
                             "role": "assistant",
                             "phase": "final_answer",
                             "content": [{"type": "output_text", "text": "done"}],
+                        },
+                    },
+                    {
+                        "type": "event_msg",
+                        "payload": {
+                            "type": "task_complete",
+                            "turn_id": "turn-1",
+                            "last_agent_message": "done",
                         },
                     },
                 ], 1
@@ -2595,18 +2637,7 @@ class DiscordBotHelperTests(unittest.IsolatedAsyncioTestCase):
                 )
 
                 def fake_read_new_session_events(path, cursor):
-                    return [
-                        {
-                            "timestamp": "1",
-                            "type": "response_item",
-                            "payload": {
-                                "type": "message",
-                                "role": "assistant",
-                                "phase": "final_answer",
-                                "content": [{"type": "output_text", "text": "mirrored done"}],
-                            },
-                        }
-                    ], 42
+                    return _final_turn_events("mirrored done"), 42
 
                 bridge.read_new_session_events = fake_read_new_session_events
                 bot.get_or_init_session_mirror_cursor = lambda codex_thread_id, rollout_path, initial_cursor: 0
@@ -2643,7 +2674,7 @@ class DiscordBotHelperTests(unittest.IsolatedAsyncioTestCase):
                 )
                 await client.close()
 
-            self.assertEqual(target_channel.messages, [("mirrored done", None)])
+            self.assertEqual(target_channel.messages, [("Final\n\nmirrored done", None)])
             self.assertEqual(len(claims), 1)
             self.assertEqual(updates, [("thread-1", str(session_path), 42)])
         finally:
@@ -2683,18 +2714,7 @@ class DiscordBotHelperTests(unittest.IsolatedAsyncioTestCase):
 
                 def fake_read_new_session_events(path, cursor, *, max_events=None):
                     read_calls.append((cursor, max_events))
-                    return [
-                        {
-                            "timestamp": "1",
-                            "type": "response_item",
-                            "payload": {
-                                "type": "message",
-                                "role": "assistant",
-                                "phase": "final_answer",
-                                "content": [{"type": "output_text", "text": "archived tail"}],
-                            },
-                        }
-                    ], 42
+                    return _final_turn_events("archived tail"), 42
 
                 bridge.read_new_session_events = fake_read_new_session_events
                 bot.get_or_init_session_mirror_cursor = lambda codex_thread_id, rollout_path, initial_cursor: 0
@@ -2729,8 +2749,8 @@ class DiscordBotHelperTests(unittest.IsolatedAsyncioTestCase):
 
                 log_text = log_path.read_text(encoding="utf-8")
                 self.assertIn("session_mirror_archive_tail_only target=thread-1 reason=archive_recommended", log_text)
-                self.assertIn("session_mirror_archive_backlog_batch target=thread-1 events=1 max_events=200", log_text)
-                self.assertEqual(target_channel.messages, [("archived tail", None)])
+                self.assertIn("session_mirror_archive_backlog_batch target=thread-1 events=2 max_events=200", log_text)
+                self.assertEqual(target_channel.messages, [("Final\n\narchived tail", None)])
                 self.assertEqual(read_calls, [(0, 200)])
                 self.assertEqual(updates, [("thread-1", str(session_path), 42)])
         finally:
@@ -2771,18 +2791,7 @@ class DiscordBotHelperTests(unittest.IsolatedAsyncioTestCase):
                 bridge.should_recommend_archive = lambda thread, context_usage: True
 
                 def fake_read_new_session_events(path, cursor):
-                    return [
-                        {
-                            "timestamp": "1",
-                            "type": "response_item",
-                            "payload": {
-                                "type": "message",
-                                "role": "assistant",
-                                "phase": "final_answer",
-                                "content": [{"type": "output_text", "text": "active done"}],
-                            },
-                        }
-                    ], 42
+                    return _final_turn_events("active done"), 42
 
                 bridge.read_new_session_events = fake_read_new_session_events
                 bot.get_or_init_session_mirror_cursor = lambda codex_thread_id, rollout_path, initial_cursor: 0
@@ -2813,7 +2822,7 @@ class DiscordBotHelperTests(unittest.IsolatedAsyncioTestCase):
                 )
                 await client.close()
 
-            self.assertEqual(target_channel.messages, [("active done", None)])
+            self.assertEqual(target_channel.messages, [("Final\n\nactive done", None)])
             self.assertEqual(updates, [("thread-1", str(session_path), 42)])
             self.assertFalse(bot.is_active_session_mirror_output_target("thread-1"))
         finally:
@@ -2855,18 +2864,7 @@ class DiscordBotHelperTests(unittest.IsolatedAsyncioTestCase):
                 bridge.get_thread_context_usage = lambda thread: None
                 bridge.should_recommend_archive = lambda thread, context_usage: False
                 bridge.read_new_session_events = lambda path, cursor: (
-                    [
-                        {
-                            "timestamp": "1",
-                            "type": "response_item",
-                            "payload": {
-                                "type": "message",
-                                "role": "assistant",
-                                "phase": "final_answer",
-                                "content": [{"type": "output_text", "text": "must retry later"}],
-                            },
-                        }
-                    ],
+                    _final_turn_events("must retry later"),
                     42,
                 )
                 bot.get_or_init_session_mirror_cursor = lambda codex_thread_id, rollout_path, initial_cursor: 0
@@ -2939,18 +2937,7 @@ class DiscordBotHelperTests(unittest.IsolatedAsyncioTestCase):
                 bridge.get_thread_context_usage = lambda thread: None
                 bridge.should_recommend_archive = lambda thread, context_usage: True
                 bridge.read_new_session_events = lambda path, cursor: (
-                    [
-                        {
-                            "timestamp": "1",
-                            "type": "response_item",
-                            "payload": {
-                                "type": "message",
-                                "role": "assistant",
-                                "phase": "final_answer",
-                                "content": [{"type": "output_text", "text": "already claimed"}],
-                            },
-                        }
-                    ],
+                    _final_turn_events("already claimed"),
                     42,
                 )
                 bot.get_or_init_session_mirror_cursor = lambda codex_thread_id, rollout_path, initial_cursor: 0
@@ -3031,18 +3018,7 @@ class DiscordBotHelperTests(unittest.IsolatedAsyncioTestCase):
 
                 def fake_read_new_session_events(path, cursor):
                     read_cursors.append(cursor)
-                    return [
-                        {
-                            "timestamp": "1",
-                            "type": "response_item",
-                            "payload": {
-                                "type": "message",
-                                "role": "assistant",
-                                "phase": "final_answer",
-                                "content": [{"type": "output_text", "text": "pending done"}],
-                            },
-                        }
-                    ], 42
+                    return _final_turn_events("pending done"), 42
 
                 def fake_get_cursor(codex_thread_id, rollout_path, initial_cursor):
                     cursor_calls.append((codex_thread_id, rollout_path, initial_cursor))
@@ -3082,7 +3058,7 @@ class DiscordBotHelperTests(unittest.IsolatedAsyncioTestCase):
 
             self.assertEqual(cursor_calls, [])
             self.assertEqual(read_cursors, [0])
-            self.assertEqual(target_channel.messages, [("pending done", None)])
+            self.assertEqual(target_channel.messages, [("Final\n\npending done", None)])
             self.assertEqual(
                 updates,
                 [("thread-1", str(session_path), 0), ("thread-1", str(session_path), 42)],

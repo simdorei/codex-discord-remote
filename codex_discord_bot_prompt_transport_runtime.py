@@ -46,6 +46,7 @@ class BotPromptTransportRuntimeDeps(Generic[ChannelT, RelayT, SteeringResultT]):
     deactivate_session_mirror_output_target: discord_prompt_mapped_delivery.OutputTargetDeactivator
     is_selected_thread_busy_error: discord_prompt_mapped_delivery.BusyPredicate
     send_codex_app_menu_if_available: discord_prompt_mapped_delivery.AppMenuSender[ChannelT]
+    send_resume_failure: discord_prompt_mapped_delivery.ResumeFailureSender[ChannelT]
     handle_recorded_busy_transport_prompt: discord_prompt_busy_result.RecordedBusyHandler[ChannelT]
     wait_for_mirrored_busy_delegation_settle: discord_prompt_busy_result.BusySettleWaiter
     mark_steering_handoff: discord_prompt_busy_result.SteeringHandoffMarker
@@ -87,6 +88,7 @@ class BotPromptTransportRuntime(Generic[ChannelT, RelayT, SteeringResultT]):
             deactivate_session_mirror_output_target=self.deps.deactivate_session_mirror_output_target,
             is_selected_thread_busy_error=self.deps.is_selected_thread_busy_error,
             send_codex_app_menu_if_available=self.deps.send_codex_app_menu_if_available,
+            send_resume_failure=self.deps.send_resume_failure,
             format_log_text_len=self.deps.format_log_text_len,
             log=self.deps.log,
         )

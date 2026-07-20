@@ -6,6 +6,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 import codex_app_server_transport_delivery as delivery
+import codex_app_server_transport_threads as transport_threads
 from codex_app_server_transport_replies import JsonObject
 from codex_thread_models import ThreadInfo
 
@@ -20,6 +21,20 @@ class AppServerDeliveryResultTests(unittest.TestCase):
 
 
 class AppServerDeliveryFlowTests(unittest.TestCase):
+    def test_loading_budget_passes_only_remaining_time_to_resume(self) -> None:
+        client = _NotLoadedClient()
+        clock_values = iter((100.0, 108.0))
+
+        thread = transport_threads.ensure_thread_loaded(
+            client,
+            "thread-1",
+            timeout_sec=40.0,
+            monotonic_func=lambda: next(clock_values),
+        )
+
+        self.assertEqual(thread["id"], "thread-1")
+        self.assertEqual(client.resume_calls, [("thread-1", 32.0)])
+
     def test_start_turn_verified_delivery_preserves_context(self) -> None:
         with TemporaryDirectory() as temp_dir:
             session_path = Path(temp_dir) / "session.jsonl"
@@ -160,7 +175,8 @@ class FakeDeliveryClient:
         _ = include_turns
         return {"thread": {"id": thread_id, "status": {"type": "idle"}}}
 
-    def resume_thread(self, thread_id: str) -> JsonObject:
+    def resume_thread(self, thread_id: str, *, timeout_sec: float = 10.0) -> JsonObject:
+        _ = timeout_sec
         return {"thread": {"id": thread_id, "status": {"type": "idle"}}}
 
     def start_turn(self, thread_id: str, prompt: str) -> JsonObject:
@@ -174,6 +190,19 @@ class FakeDeliveryClient:
     def get_active_turn_id(self, thread_id: str) -> str | None:
         _ = thread_id
         return self.active_turn_id
+
+
+class _NotLoadedClient:
+    def __init__(self) -> None:
+        self.resume_calls: list[tuple[str, float]] = []
+
+    def read_thread(self, thread_id: str, *, include_turns: bool = False) -> JsonObject:
+        _ = include_turns
+        return {"thread": {"id": thread_id, "status": {"type": "notLoaded"}}}
+
+    def resume_thread(self, thread_id: str, *, timeout_sec: float = 10.0) -> JsonObject:
+        self.resume_calls.append((thread_id, timeout_sec))
+        return {"thread": {"id": thread_id, "status": {"type": "idle"}}}
 
 
 class FakeBridge:

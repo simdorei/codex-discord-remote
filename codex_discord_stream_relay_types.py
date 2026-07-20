@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable, Sequence
 from typing import Literal, Protocol, TypeAlias
 
-RelayMode = Literal["commentary", "final", "timeout"]
+RelayMode = Literal["commentary", "failed", "final", "timeout", "transport_error"]
 
 
 class RelayChannel(Protocol):
