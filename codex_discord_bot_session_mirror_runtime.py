@@ -24,8 +24,9 @@ CreateTaskFunc = Callable[[Coroutine[object, object, None]], asyncio.Task[None]]
 LogFunc = Callable[[str], None]
 
 
-async def noop_send_typing_pulse(channel: object, context: str) -> None:
+async def noop_send_typing_pulse(channel: object, target_thread_id: str, context: str) -> None:
     _ = channel
+    _ = target_thread_id
     _ = context
 
 
@@ -98,7 +99,7 @@ class SessionMirrorRuntimeDeps(Generic[ChannelT]):
     claim_session_mirror_event: Callable[[str, str], bool]
     deactivate_session_mirror_output_target: Callable[[str], None]
     log: LogFunc
-    send_typing_pulse: Callable[[ChannelT, str], Awaitable[None]] = noop_send_typing_pulse
+    send_typing_pulse: Callable[[ChannelT, str, str], Awaitable[None]] = noop_send_typing_pulse
     is_thread_busy: Callable[[Path], bool] = lambda session_path: True
     get_active_turn_id: Callable[[str], str | None] = lambda thread_id: None
     get_thread_goal_lookup: Callable[[str], ThreadGoalLookup] = lambda thread_id: GoalAbsent()
@@ -217,6 +218,7 @@ class SessionMirrorRuntime(Generic[ChannelT]):
             deactivate_session_mirror_output_target=self.deps.deactivate_session_mirror_output_target,
             send_typing_pulse=lambda channel, target_thread_id, context: self.deps.send_typing_pulse(
                 channel,
+                target_thread_id,
                 context,
             ),
             is_thread_busy=self.deps.is_thread_busy,

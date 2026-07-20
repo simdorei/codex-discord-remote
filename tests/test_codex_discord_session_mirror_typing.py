@@ -3,7 +3,10 @@ from __future__ import annotations
 import tempfile
 import unittest
 from pathlib import Path
+from typing import cast
+from unittest import mock
 
+import codex_discord_bot_session_mirror_runtime as bot_session_mirror_runtime
 import codex_discord_session_mirror as session_mirror
 import codex_discord_session_mirror_target as session_mirror_target
 
@@ -18,9 +21,43 @@ class FakeChannel:
 
 
 class SessionMirrorTypingTests(unittest.IsolatedAsyncioTestCase):
+    async def test_runtime_forwards_target_id_to_typing_pulse(self) -> None:
+        typing_pulses: list[tuple[int, str, str]] = []
+        runtime_deps = mock.Mock()
+        runtime_deps.get_archive_skip_logged.return_value = set()
+
+        async def send_typing_pulse(channel: FakeChannel, target_thread_id: str, context: str) -> None:
+            typing_pulses.append((channel.id, target_thread_id, context))
+
+        runtime_deps.send_typing_pulse = send_typing_pulse
+        runtime = bot_session_mirror_runtime.SessionMirrorRuntime(
+            cast(bot_session_mirror_runtime.SessionMirrorRuntimeDeps[FakeChannel], runtime_deps)
+        )
+        owner = mock.Mock()
+
+        async def exercise_runtime_callback(target: object, *, deps: object) -> None:
+            _ = target
+            callback = cast(
+                session_mirror_target.SessionMirrorTargetDeps[object, object, object, FakeChannel],
+                deps,
+            ).send_typing_pulse
+            await callback(FakeChannel(), "thread-1", "session_mirror_busy")
+
+        with mock.patch.object(
+            bot_session_mirror_runtime.discord_session_mirror_target,
+            "mirror_session_target",
+            exercise_runtime_callback,
+        ):
+            await runtime.mirror_session_target(
+                cast(bot_session_mirror_runtime.SessionMirrorOwner[FakeChannel], owner),
+                {"codex_thread_id": "thread-1", "discord_thread_id": 222},
+            )
+
+        self.assertEqual(typing_pulses, [(222, "thread-1", "session_mirror_busy")])
+
     async def test_active_output_target_without_events_sends_typing_pulse(self) -> None:
         channels: list[int] = []
-        typing_pulses: list[tuple[int, str]] = []
+        typing_pulses: list[tuple[int, str, str]] = []
         logs: list[str] = []
 
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp_dir:

@@ -83,8 +83,10 @@ class DiscordSessionMirrorLoopIntegrationTests(unittest.IsolatedAsyncioTestCase)
         self.assertIn("session_mirror_cycle_failed", log_text)
         self.assertIn("SessionMirrorTargetLoadError: session mirror target load unavailable", log_text)
 
-    async def test_session_mirror_loop_type_error_is_not_cycle_failed(self) -> None:
-        client = FakeSessionMirrorClient(close_after_checks=1)
+    async def test_session_mirror_loop_continues_after_unexpected_cycle_error(self) -> None:
+        calls: list[str] = []
+        sleeps: list[float] = []
+        client = FakeSessionMirrorClient(close_after_checks=2)
 
         async def fake_to_thread(
             func: Callable[[Path], list[SessionMirrorTarget]],
@@ -93,26 +95,24 @@ class DiscordSessionMirrorLoopIntegrationTests(unittest.IsolatedAsyncioTestCase)
             limit: int,
         ) -> list[SessionMirrorTarget]:
             _ = func, mirror_db_path, limit
-            raise BadSessionMirrorTargetDependencyError("bad session mirror target dependency")
+            calls.append("to_thread")
+            if len(calls) == 1:
+                raise BadSessionMirrorTargetDependencyError("bad session mirror target dependency")
+            return []
 
         async def fake_sleep(seconds: float) -> None:
-            _ = seconds
+            sleeps.append(seconds)
 
         with (
             mock.patch("codex_discord_bot.asyncio.to_thread", fake_to_thread),
             mock.patch("codex_discord_bot.asyncio.sleep", fake_sleep),
         ):
-            with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp_dir:
-                log_path = Path(temp_dir) / "discord-smoke.log"
-                with mock.patch.dict(os.environ, {"CODEX_DISCORD_LOG_PATH": str(log_path)}):
-                    with self.assertRaisesRegex(
-                        BadSessionMirrorTargetDependencyError,
-                        "bad session mirror target dependency",
-                    ):
-                        await SESSION_MIRROR_LOOP(cast(bot.CodexDiscordBot, client))
-                log_text = log_path.read_text(encoding="utf-8") if log_path.exists() else ""
+            log_text = await self._run_with_log(SESSION_MIRROR_LOOP(cast(bot.CodexDiscordBot, client)))
 
-        self.assertNotIn("session_mirror_cycle_failed", log_text)
+        self.assertEqual(calls, ["to_thread", "to_thread"])
+        self.assertEqual(sleeps, [0.01, 0.01])
+        self.assertIn("session_mirror_unexpected_error", log_text)
+        self.assertIn("BadSessionMirrorTargetDependencyError: bad session mirror target dependency", log_text)
 
 
 if __name__ == "__main__":

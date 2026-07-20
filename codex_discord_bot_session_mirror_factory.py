@@ -58,7 +58,7 @@ def make_session_mirror_runtime(
     deactivate_session_mirror_output_target: Callable[[str], None],
     events_bridge: SessionMirrorEventsBridge,
     log: Callable[[str], None],
-    send_typing_pulse: Callable[[ChannelT, str], Awaitable[None]] | None = None,
+    send_typing_pulse: Callable[[ChannelT, str, str], Awaitable[None]] | None = None,
 ) -> session_mirror_runtime.SessionMirrorRuntime[ChannelT]:
     def app_server_enabled() -> bool:
         return env_flag("CODEX_DISCORD_APP_SERVER_TRANSPORT", True)

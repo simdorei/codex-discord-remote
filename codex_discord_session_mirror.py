@@ -101,6 +101,8 @@ async def session_mirror_loop(deps: SessionMirrorLoopDeps) -> None:
             raise
         except deps.delivery_exceptions:
             deps.log("session_mirror_cycle_failed\n" + deps.format_traceback())
+        except Exception:  # noqa: BROAD_EXCEPT_OK - a background poller must survive unexpected cycle defects.
+            deps.log("session_mirror_unexpected_error\n" + deps.format_traceback())
         await deps.sleep(deps.poll_seconds)
 
 
