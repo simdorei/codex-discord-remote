@@ -64,7 +64,7 @@ def start_turn_no_wait(
             turn_id=turn_id,
             bridge_module=bridge_module,
         )
-    delivery_pending = delivered_thread is None and turn_id is None
+    delivery_pending = delivered_thread is None
     return successful_delivery_result(
         context,
         method="turn/start",
@@ -110,7 +110,7 @@ def steer_or_start_no_wait(
             turn_id=turn_id,
             bridge_module=bridge_module,
         )
-    delivery_pending = delivered_thread is None and turn_id is None
+    delivery_pending = delivered_thread is None
     return successful_delivery_result(
         context,
         method=method,
