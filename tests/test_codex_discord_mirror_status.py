@@ -205,44 +205,6 @@ class MirrorStatusTests(unittest.TestCase):
         self.assertIn("stale: 0", output)
         self.assertNotIn("other-thread", output)
 
-    def test_build_mirror_check_excludes_registered_gpt_db_rows(self) -> None:
-        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp_dir:
-            db_path = Path(temp_dir) / "mirror.sqlite"
-            with sqlite3.connect(db_path) as conn:
-                _ = conn.execute(
-                    "CREATE TABLE mirror_threads ("
-                    + "codex_thread_id TEXT PRIMARY KEY, "
-                    + "project_key TEXT NOT NULL, "
-                    + "thread_title TEXT NOT NULL, "
-                    + "discord_channel_id INTEGER NOT NULL, "
-                    + "discord_thread_id INTEGER NOT NULL, "
-                    + "updated_at REAL NOT NULL"
-                    + ")"
-                )
-                _ = conn.executemany(
-                    "INSERT INTO mirror_threads VALUES (?, ?, ?, ?, ?, ?)",
-                    [
-                        ("thread-1", "C:\\repo", "root", 111, 333, 2.0),
-                        ("gpt-thread", "codex:chats", "gpt", 222, 444, 1.0),
-                    ],
-                )
-
-            output = mirror_status.build_mirror_check(
-                threads=[FakeMirrorBridge.thread],
-                db_path=db_path,
-                init_mirror_db_func=lambda: None,
-                bridge_module=FakeMirrorBridge(),
-                filter_mirrorable_threads_func=lambda threads: threads,
-                get_project_key_func=lambda _thread: "C:\\repo",
-                get_project_name_func=lambda _thread: "repo",
-                excluded_db_thread_ids={"gpt-thread"},
-            )
-
-        self.assertIn("codex_threads: 1", output)
-        self.assertIn("mirrored_threads: 1", output)
-        self.assertIn("stale: 0", output)
-        self.assertNotIn("gpt-thread", output)
-
     def test_build_mirror_check_stale_rows_include_visibility_fields(self) -> None:
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp_dir:
             db_path = Path(temp_dir) / "mirror.sqlite"

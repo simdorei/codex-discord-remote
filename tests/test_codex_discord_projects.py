@@ -66,9 +66,6 @@ class DiscordProjectHelperTests(unittest.TestCase):
             data={"project-order": [r"C:\Repo"]},
         )
         projectless = FakeThread(r"C:\Users\me\Documents\Codex\2026-06-20\new-chat")
-        imported_chat = FakeThread(
-            r"C:\Users\me\Documents\Codex\2026-07-14\chatgpt-conversation-1234"
-        )
         unsaved = FakeThread(r"C:\Other")
 
         self.assertEqual(
@@ -80,24 +77,12 @@ class DiscordProjectHelperTests(unittest.TestCase):
             "c:/repo",
         )
         self.assertEqual(
-            projects.get_project_key(
-                imported_chat,
-                bridge_module=bridge,
-                projectless_chat_key="projectless-chat",
-            ),
-            "projectless-chat",
-        )
-        self.assertEqual(
-            projects.get_project_name(imported_chat, bridge_module=bridge),
-            "채팅",
-        )
-        self.assertEqual(
             projects.filter_mirrorable_threads(
-                [FakeThread(r"C:\Repo"), projectless, imported_chat, unsaved],
+                [FakeThread(r"C:\Repo"), projectless, unsaved],
                 bridge_module=bridge,
                 projectless_chat_key="projectless-chat",
             ),
-            [FakeThread(r"C:\Repo"), projectless, imported_chat],
+            [FakeThread(r"C:\Repo"), projectless],
         )
 
     def test_resolve_new_thread_cwd_prefers_mirrored_thread_then_project_channel(self) -> None:

@@ -31,7 +31,7 @@ class FakeDiscordThread:
     def __init__(self, thread_id: int) -> None:
         self.id = thread_id
         self.owner_id = 123
-        self.name = "Concurrent GPT"
+        self.name = "Concurrent Thread"
         self.deleted = False
 
     async def delete(self, *, reason: str) -> None:
@@ -41,7 +41,7 @@ class FakeDiscordThread:
 class FakeProjectChannel:
     def __init__(self, thread: FakeDiscordThread) -> None:
         self.threads = [thread]
-        self.name = "codex-gpt"
+        self.name = "codex-project"
 
     async def archived_threads(self, *, limit: int) -> AsyncIterator[FakeDiscordThread]:
         _ = limit

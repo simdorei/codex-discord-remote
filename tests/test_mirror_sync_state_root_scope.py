@@ -105,7 +105,7 @@ class MirrorSyncStateRootScopeTests(unittest.IsolatedAsyncioTestCase):
             else:
                 os.environ["CODEX_DISCORD_LOG_PATH"] = old_log_path
 
-    async def test_sync_preserves_active_gpt_root_and_prunes_archived_gpt_row(self) -> None:
+    async def test_sync_preserves_active_managed_root_and_prunes_archived_row(self) -> None:
         old_db_path = bot.MIRROR_DB_PATH
         bridge = bridge_module()
         old_load_user_root_threads = bridge.load_user_root_threads
@@ -145,39 +145,39 @@ class MirrorSyncStateRootScopeTests(unittest.IsolatedAsyncioTestCase):
                     )
                     _ = conn.execute(
                         "INSERT INTO mirror_projects VALUES (?, ?, ?, ?)",
-                        ("codex:chats", "GPT", 900, 1.0),
+                        ("legacy:chats", "Legacy", 900, 1.0),
                     )
                     _ = conn.execute(
                         "INSERT INTO mirror_threads VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                         (
-                            "gpt-root",
-                            "codex:chats",
-                            "GPT",
+                            "managed-root",
+                            "legacy:chats",
+                            "Legacy",
                             900,
                             901,
                             1.0,
-                            "gpt_chat",
+                            "legacy",
                             "active",
                         ),
                     )
                     _ = conn.execute(
                         "INSERT INTO mirror_threads VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                         (
-                            "gpt-archived",
-                            "codex:chats",
-                            "Archived GPT",
+                            "managed-archived",
+                            "legacy:chats",
+                            "Archived Legacy",
                             900,
                             902,
                             1.0,
-                            "gpt_chat",
+                            "legacy",
                             "active",
                         ),
                     )
                 ordinary = self.make_thread("ordinary-root", str(Path(temp_dir)))
-                gpt = self.make_thread("gpt-root", str(Path(temp_dir)))
+                managed = self.make_thread("managed-root", str(Path(temp_dir)))
                 mirrored_ids: list[str] = []
 
-                bridge.load_user_root_threads = lambda limit=0: [ordinary, gpt]
+                bridge.load_user_root_threads = lambda limit=0: [ordinary, managed]
                 bot.filter_mirrorable_threads = lambda _threads: (_ for _ in ()).throw(
                     AssertionError("mirror sync must use the list scope without project filtering")
                 )
@@ -194,7 +194,7 @@ class MirrorSyncStateRootScopeTests(unittest.IsolatedAsyncioTestCase):
                         project_key,
                         codex_thread.title,
                         project_channel.id,
-                        901 if codex_thread.id == "gpt-root" else 333,
+                        901 if codex_thread.id == "managed-root" else 333,
                     )
                     return SimpleNamespace(id=333)
 
@@ -211,16 +211,16 @@ class MirrorSyncStateRootScopeTests(unittest.IsolatedAsyncioTestCase):
                 output = await bot.sync_codex_mirror(codex_discord_bot(fake_bot))
 
                 with sqlite3.connect(bot.MIRROR_DB_PATH) as conn:
-                    gpt_row = conn.execute(
-                        "SELECT managed_by FROM mirror_threads WHERE codex_thread_id = 'gpt-root'"
+                    managed_row = conn.execute(
+                        "SELECT managed_by FROM mirror_threads WHERE codex_thread_id = 'managed-root'"
                     ).fetchone()
                     archived_row = conn.execute(
                         "SELECT codex_thread_id FROM mirror_threads "
-                        "WHERE codex_thread_id = 'gpt-archived'"
+                        "WHERE codex_thread_id = 'managed-archived'"
                     ).fetchone()
 
-            self.assertCountEqual(mirrored_ids, ["ordinary-root", "gpt-root"])
-            self.assertEqual(gpt_row, ("gpt_chat",))
+            self.assertCountEqual(mirrored_ids, ["ordinary-root", "managed-root"])
+            self.assertEqual(managed_row, ("legacy",))
             self.assertIsNone(archived_row)
             self.assertIn("threads: 2", output)
             self.assertIn("stale_threads_removed: 1", output)

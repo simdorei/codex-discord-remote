@@ -146,24 +146,22 @@ class MirrorSyncTests(unittest.IsolatedAsyncioTestCase):
                 db_path=db_path,
                 get_project_key=lambda thread: thread.project_key,
                 updated_before=30.0,
-                protected_thread_ids={"gpt-thread"},
-                protected_project_keys={"codex:chats"},
             )
 
         get_stale_threads.assert_called_once_with(
             db_path,
-            {"thread-1", "thread-2", "gpt-thread"},
+            {"thread-1", "thread-2"},
             updated_before=30.0,
         )
         get_stale_projects.assert_called_once_with(
             db_path,
-            {"project-a", "project-b", "codex:chats"},
+            {"project-a", "project-b"},
             updated_before=30.0,
         )
         delete_rows.assert_called_once_with(
             db_path,
-            {"thread-1", "thread-2", "gpt-thread"},
-            {"project-a", "project-b", "codex:chats"},
+            {"thread-1", "thread-2"},
+            {"project-a", "project-b"},
             updated_before=30.0,
         )
         get_remaining.assert_called_once_with(db_path)

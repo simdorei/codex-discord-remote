@@ -33,8 +33,8 @@ class FakeGuild:
 
 
 class MirrorSyncConcurrentCleanupTests(unittest.IsolatedAsyncioTestCase):
-    async def test_full_sync_keeps_gpt_mapping_created_after_scope_snapshot(self) -> None:
-        # Given: full sync already captured an active scope without a newly created GPT thread.
+    async def test_full_sync_keeps_mapping_created_after_scope_snapshot(self) -> None:
+        # Given: full sync already captured an active scope without a newly created mapping.
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp_dir:
             db_path = Path(temp_dir) / "mirror.sqlite"
             store.init_mirror_db(db_path)
@@ -88,18 +88,18 @@ class MirrorSyncConcurrentCleanupTests(unittest.IsolatedAsyncioTestCase):
                 with sqlite3.connect(db_path) as conn:
                     _ = conn.execute(
                         "INSERT INTO mirror_projects VALUES (?, ?, ?, ?)",
-                        ("codex:chats", "GPT", 900, 150.0),
+                        ("concurrent-project", "Concurrent", 900, 150.0),
                     )
                     _ = conn.execute(
                         "INSERT INTO mirror_threads VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                         (
-                            "gpt-created-during-sync",
-                            "codex:chats",
-                            "Concurrent GPT",
+                            "created-during-sync",
+                            "concurrent-project",
+                            "Concurrent Thread",
                             900,
                             901,
                             150.0,
-                            "gpt_chat",
+                            "ordinary",
                             "active",
                         ),
                     )
@@ -128,7 +128,7 @@ class MirrorSyncConcurrentCleanupTests(unittest.IsolatedAsyncioTestCase):
                 log=lambda message: None,
             )
 
-            # When: awaited mirror creation adds the GPT mapping before stale cleanup runs.
+            # When: awaited mirror creation adds the mapping before stale cleanup runs.
             with mock.patch.object(mirror_sync.time, "time", side_effect=lambda: clock["now"]):
                 _ = await mirror_sync.sync_codex_mirror("bot", deps=deps)
 
@@ -138,18 +138,18 @@ class MirrorSyncConcurrentCleanupTests(unittest.IsolatedAsyncioTestCase):
                     tuple[str] | None,
                     conn.execute(
                         "SELECT codex_thread_id FROM mirror_threads "
-                        + "WHERE codex_thread_id = 'gpt-created-during-sync'"
+                        + "WHERE codex_thread_id = 'created-during-sync'"
                     ).fetchone(),
                 )
                 concurrent_project_row = cast(
                     tuple[str] | None,
                     conn.execute(
-                        "SELECT project_key FROM mirror_projects WHERE project_key = 'codex:chats'"
+                        "SELECT project_key FROM mirror_projects WHERE project_key = 'concurrent-project'"
                     ).fetchone(),
                 )
 
-        self.assertEqual(concurrent_row, ("gpt-created-during-sync",))
-        self.assertEqual(concurrent_project_row, ("codex:chats",))
+        self.assertEqual(concurrent_row, ("created-during-sync",))
+        self.assertEqual(concurrent_project_row, ("concurrent-project",))
 
 
 if __name__ == "__main__":

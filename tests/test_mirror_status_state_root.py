@@ -96,14 +96,13 @@ class MirrorStatusStateRootTests(unittest.TestCase):
             bot.filter_app_server_available_threads = old_filter_app_server_available_threads
             bot.discord_mirror_status.build_mirror_check = old_status_builder
 
-    def test_build_mirror_check_includes_gpt_chat_created_root(self) -> None:
+    def test_build_mirror_check_includes_legacy_managed_state_root(self) -> None:
         old_db_path = bot.MIRROR_DB_PATH
         bridge = bridge_module()
         old_load_user_root_threads = bridge.load_user_root_threads
         old_filter_app_server_available_threads = bot.filter_app_server_available_threads
         old_status_builder = bot.discord_mirror_status.build_mirror_check
         observed_thread_ids: list[list[str]] = []
-        observed_excluded_ids: list[frozenset[str] | set[str]] = []
 
         try:
             with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp_dir:
@@ -119,19 +118,16 @@ class MirrorStatusStateRootTests(unittest.TestCase):
                         "(codex_thread_id, project_key, thread_title, discord_channel_id, "
                         "discord_thread_id, updated_at, managed_by) "
                         "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                        ("gpt-root", "codex:chats", "GPT", 900, 901, 1.0, "gpt_chat"),
+                        ("managed-root", "legacy:chats", "Legacy", 900, 901, 1.0, "legacy"),
                     )
 
                 ordinary = self.make_thread("ordinary-root", temp_dir)
-                gpt = self.make_thread("gpt-root", temp_dir)
-                bridge.load_user_root_threads = lambda limit=0: [ordinary, gpt]
+                managed = self.make_thread("managed-root", temp_dir)
+                bridge.load_user_root_threads = lambda limit=0: [ordinary, managed]
                 bot.filter_app_server_available_threads = lambda threads: list(threads)
 
                 def fake_build_mirror_check(**kwargs) -> str:
                     observed_thread_ids.append([thread.id for thread in kwargs["threads"]])
-                    observed_excluded_ids.append(
-                        kwargs.get("excluded_db_thread_ids", frozenset())
-                    )
                     return "Mirror check"
 
                 bot.discord_mirror_status.build_mirror_check = fake_build_mirror_check
@@ -139,8 +135,7 @@ class MirrorStatusStateRootTests(unittest.TestCase):
                 output = bot.build_mirror_check()
 
             self.assertEqual(output, "Mirror check")
-            self.assertEqual(observed_thread_ids, [["ordinary-root", "gpt-root"]])
-            self.assertEqual(observed_excluded_ids, [frozenset()])
+            self.assertEqual(observed_thread_ids, [["ordinary-root", "managed-root"]])
         finally:
             bot.MIRROR_DB_PATH = old_db_path
             bridge.load_user_root_threads = old_load_user_root_threads

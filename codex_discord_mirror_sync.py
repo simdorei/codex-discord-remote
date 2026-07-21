@@ -17,7 +17,6 @@ import codex_discord_mirror_scope as discord_mirror_scope
 import codex_discord_mirror_stale as discord_mirror_stale
 import codex_discord_mirror_sync_result as discord_mirror_sync_result
 import codex_discord_store as discord_store
-import codex_discord_user_root_scope as discord_user_root_scope
 from codex_discord_id_values import coerce_discord_id_value
 
 BotT = TypeVar("BotT")
@@ -162,24 +161,13 @@ async def sync_codex_mirror(
     )
 
     if limit is None:
-        gpt_registered_thread_ids = discord_user_root_scope.load_gpt_registered_thread_ids(
-            deps.db_path
-        )
-        active_thread_ids = {thread.id for thread in scope_threads}
-        protected_thread_ids = gpt_registered_thread_ids & active_thread_ids
         cleanup_result = await cleanup_full_mirror_sync(
-            guild,
-            category,
+            cast(discord.Guild, guild),
+            cast(discord.CategoryChannel, category),
             scope_threads,
             bot_user_id=deps.get_bot_user_id(bot),
             db_path=deps.db_path,
             get_project_key=deps.get_project_key,
-            protected_thread_ids=protected_thread_ids,
-            protected_project_keys=(
-                {discord_user_root_scope.GPT_PROJECT_KEY}
-                if protected_thread_ids
-                else set()
-            ),
             updated_before=cleanup_updated_before,
         )
         stale_threads = cleanup_result.stale_threads
@@ -219,21 +207,17 @@ async def sync_codex_mirror(
 
 
 async def cleanup_full_mirror_sync(
-    guild: GuildT,
-    category: CategoryT,
+    guild: discord.Guild,
+    category: discord.CategoryChannel,
     threads: Sequence[CleanupThreadT],
     *,
     bot_user_id: int | None,
     db_path: Path,
     get_project_key: Callable[[CleanupThreadT], str],
     updated_before: float,
-    protected_thread_ids: set[str] | frozenset[str] = frozenset(),
-    protected_project_keys: set[str] | frozenset[str] = frozenset(),
 ) -> MirrorFullCleanupResult:
-    valid_thread_ids = {thread.id for thread in threads} | set(protected_thread_ids)
-    valid_project_keys = {get_project_key(thread) for thread in threads} | set(
-        protected_project_keys
-    )
+    valid_thread_ids = {thread.id for thread in threads}
+    valid_project_keys = {get_project_key(thread) for thread in threads}
     stale_threads = cast(
         list[discord_mirror_stale.StaleMirrorThreadRow],
         discord_store.get_stale_mirror_thread_rows(db_path, valid_thread_ids, updated_before=updated_before),
@@ -243,24 +227,22 @@ async def cleanup_full_mirror_sync(
         discord_store.get_stale_mirror_project_rows(db_path, valid_project_keys, updated_before=updated_before),
     )
 
-    discord_guild = cast(discord.Guild, guild)
-    discord_category = cast(discord.CategoryChannel, category)
     discord_store.delete_stale_mirror_rows(
         db_path, valid_thread_ids, valid_project_keys, updated_before=updated_before
     )
     known_thread_ids, project_channel_ids = discord_store.get_remaining_mirror_discord_ids(db_path)
     stale_cleanup = await discord_mirror_stale.delete_stale_discord_threads(
-        discord_guild,
+        guild,
         _stale_thread_rows_for_discord_delete(stale_threads, known_thread_ids),
     )
     stale_project_cleanup = await discord_mirror_stale.delete_stale_project_channels(
-        discord_guild,
-        discord_category,
+        guild,
+        category,
         _stale_project_rows_for_discord_delete(stale_projects, project_channel_ids),
     )
 
     project_channels = await discord_mirror_channels.resolve_orphan_cleanup_project_channels(
-        discord_guild,
+        guild,
         project_channel_ids,
         fetch_failure_types=DISCORD_FETCH_FAILURE_EXCEPTIONS,
     )

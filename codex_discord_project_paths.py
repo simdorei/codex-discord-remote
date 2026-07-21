@@ -20,13 +20,9 @@ def is_codex_projectless_chat_cwd(cwd: str, *, bridge_module: BridgeProjectModul
     parts = re.split(r"[\\/]+", normalized)
     if len(parts) < 4:
         return False
-    leaf = parts[-1].lower()
     return (
         len(parts) >= 5
-        and (
-            leaf.startswith("new-chat")
-            or leaf.startswith("chatgpt-conversation-")
-        )
+        and parts[-1].lower().startswith("new-chat")
         and re.match(r"^\d{4}-\d{2}-\d{2}$", parts[-2] or "") is not None
         and parts[-3].lower() == "codex"
         and parts[-4].lower() == "documents"
