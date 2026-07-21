@@ -34,6 +34,17 @@ if (-not (Test-Path -LiteralPath $BotScript)) {
 function Get-WatchdogSystemHealthIssue {
     try {
         $cpuAverage = (Get-CimInstance Win32_Processor | Measure-Object -Property LoadPercentage -Average).Average
+        $performanceCpuAverage = $null
+        if (
+            $HealthCpuPercent -gt 0 -and
+            $cpuAverage -ne $null -and
+            [double]$cpuAverage -ge $HealthCpuPercent
+        ) {
+            $performanceCpuAverage = (
+                (Get-Counter '\Processor(_Total)\% Processor Time' -SampleInterval 1 -MaxSamples 5 -ErrorAction Stop).CounterSamples |
+                Measure-Object -Property CookedValue -Average
+            ).Average
+        }
         $os = Get-CimInstance Win32_OperatingSystem
         $freeMemoryMb = [math]::Floor([double]$os.FreePhysicalMemory / 1024)
     } catch {
@@ -43,9 +54,12 @@ function Get-WatchdogSystemHealthIssue {
 
     $issues = @()
     if ($HealthCpuPercent -gt 0 -and $cpuAverage -ne $null) {
-        $cpuPercent = [math]::Round([double]$cpuAverage, 1)
-        if ($cpuPercent -ge $HealthCpuPercent) {
-            $issues += "cpu_percent=$cpuPercent threshold=$HealthCpuPercent"
+        $wmiCpuPercent = [math]::Round([double]$cpuAverage, 1)
+        if ($wmiCpuPercent -ge $HealthCpuPercent -and $performanceCpuAverage -ne $null) {
+            $cpuPercent = [math]::Round([double]$performanceCpuAverage, 1)
+            if ($cpuPercent -ge $HealthCpuPercent) {
+                $issues += "cpu_percent=$cpuPercent threshold=$HealthCpuPercent"
+            }
         }
     }
     if ($HealthFreeMemoryMb -gt 0 -and $freeMemoryMb -le $HealthFreeMemoryMb) {
