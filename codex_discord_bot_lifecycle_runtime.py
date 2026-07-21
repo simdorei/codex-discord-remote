@@ -52,6 +52,7 @@ class BotLifecycleRuntimeDeps(Generic[GuildObjectT]):
         Awaitable[Sequence[SlashCommand]],
     ]
     run_ready_maintenance: Callable[[ReadyBot], Awaitable[None]]
+    restore_queue_runners: Callable[[ReadyBot], Awaitable[int]]
     send_startup_notice: Callable[[ReadyBot], Awaitable[None]]
     format_user_id: Callable[[discord_interaction_log.DiscordUserLogValue], str]
     delivery_exceptions: tuple[type[BaseException], ...]
@@ -98,6 +99,8 @@ class BotLifecycleRuntime(Generic[GuildObjectT]):
             )
         )
         await self.deps.run_ready_maintenance(bot)
+        restored_jobs = await self.deps.restore_queue_runners(bot)
+        self.deps.log(f"ready_queue_restore jobs={restored_jobs}")
         await self._call_optional_ready_hook(bot, "start_stop_marker_watcher")
         await self._call_optional_ready_hook(bot, "start_history_polling")
         await self.deps.send_startup_notice(bot)

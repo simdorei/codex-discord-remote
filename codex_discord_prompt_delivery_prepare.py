@@ -65,6 +65,7 @@ class PromptDeliveryPreparationResult:
     target_ref: str
     recent_offsets: RecentOffsets
     delegate_to_session_mirror: bool
+    mapped_result: mapped_delivery.MappedPromptDeliveryResult | None = None
 
 
 async def prepare_prompt_delivery(
@@ -89,7 +90,7 @@ async def prepare_prompt_delivery(
         deps=deps.make_mapped_prompt_delivery_deps(),
     )
     if mapped_result.handled:
-        return _handled(target_thread_id, target_ref)
+        return _handled(target_thread_id, target_ref, mapped_result=mapped_result)
     delegate_to_session_mirror = await deps.prepare_session_mirror_delegation(channel, target_thread_id)
     _target_thread, recent_offsets = await asyncio.to_thread(
         deps.snapshot_ask_prompt_delivery_state,
@@ -101,10 +102,16 @@ async def prepare_prompt_delivery(
         target_ref=target_ref,
         recent_offsets=recent_offsets,
         delegate_to_session_mirror=delegate_to_session_mirror,
+        mapped_result=None,
     )
 
 
-def _handled(target_thread_id: str | None, target_ref: str) -> PromptDeliveryPreparationResult:
+def _handled(
+    target_thread_id: str | None,
+    target_ref: str,
+    *,
+    mapped_result: mapped_delivery.MappedPromptDeliveryResult | None = None,
+) -> PromptDeliveryPreparationResult:
     recent_offsets: RecentOffsets = {}
     return PromptDeliveryPreparationResult(
         handled=True,
@@ -112,4 +119,5 @@ def _handled(target_thread_id: str | None, target_ref: str) -> PromptDeliveryPre
         target_ref=target_ref,
         recent_offsets=recent_offsets,
         delegate_to_session_mirror=False,
+        mapped_result=mapped_result,
     )

@@ -10,9 +10,12 @@ from typing import TypeAlias
 
 import codex_discord_queue_messages as discord_queue_messages
 import codex_discord_queue_targets as discord_queue_targets
+import codex_discord_durable_queue_runtime as durable_queue_runtime
 import codex_discord_runner as discord_runner
 import codex_discord_runtime as discord_runtime
 from codex_discord_runner_queue import QueueJobValue, RunnerMap, ThreadRunner
+from codex_discord_runner_queue import QueueJob
+from codex_discord_durable_queue_restore import QueueRestoreBot
 
 
 QueueRetractResult: TypeAlias = dict[str, int | bool | str]
@@ -34,7 +37,7 @@ class RunnerRuntimeDeps:
     get_queue_target_bridge: GetQueueTargetBridgeFunc
     get_mirrored_codex_thread_id: discord_queue_targets.GetMirroredCodexThreadIdFunc
     format_target_ref_for_log: FormatTargetRefForLogFunc
-    run_prompt_and_send: discord_runner.RunPromptAndSendFunc
+    durable_queue: durable_queue_runtime.DurableQueueRuntime
     send_chunks: discord_runner.SendTextFunc
     log: discord_runner.LogFunc
 
@@ -133,6 +136,22 @@ class RunnerRuntime:
         ack_sent: bool = False,
         source_message: QueueJobValue = None,
     ) -> int:
+        if target_thread_id:
+            job, _created, position = await self.deps.durable_queue.enqueue(
+                channel,
+                prompt,
+                target_thread_id,
+                queued=queued,
+                ack_sent=ack_sent,
+                source_message=source_message,
+            )
+            _ = await discord_runner.enqueue_existing_thread_ask(
+                job,
+                target_thread_id,
+                get_thread_runner_func=self.get_thread_runner,
+                thread_runner_loop_func=self.thread_runner_loop,
+            )
+            return position
         return await discord_runner.enqueue_thread_ask(
             channel,
             prompt,
@@ -151,6 +170,22 @@ class RunnerRuntime:
         channel_id: int | None = None,
         owner_user_id: int | None = None,
     ) -> QueueRetractResult:
+        if target_thread_id:
+            record = await self.deps.durable_queue.retract_job(
+                target_thread_id,
+                channel_id=channel_id,
+                owner_user_id=owner_user_id,
+            )
+            if record is not None:
+                result = await discord_runner.retract_thread_ask(
+                    target_thread_id,
+                    job_id=record.job_id,
+                    runners=self.deps.thread_runners,
+                    runners_lock=self.deps.thread_runners_lock,
+                    normalize_runner_key_func=discord_runtime.normalize_runner_key,
+                )
+                result["removed"] = 1
+                return result
         return await discord_runner.retract_thread_ask(
             target_thread_id,
             channel_id=channel_id,
@@ -162,7 +197,7 @@ class RunnerRuntime:
 
     async def report_thread_runner_job_failed(
         self,
-        job: QueueJobValue,
+        job: QueueJob,
         target_thread_id: str | None,
     ) -> None:
         await discord_runner.report_thread_runner_job_failed(
@@ -181,8 +216,24 @@ class RunnerRuntime:
             get_thread_runner_func=self.get_thread_runner,
             get_busy_state_func=self.deps.get_busy_state_for_thread,
             wait_for_idle_func=self.wait_for_codex_thread_idle,
-            run_prompt_and_send_func=self.deps.run_prompt_and_send,
+            queue_coordinator_deps=self.deps.durable_queue.coordinator_deps(),
             report_job_failed_func=self.report_thread_runner_job_failed,
             send_text_func=self.deps.send_chunks,
             log_func=self.deps.log,
         )
+
+    async def restore_durable_queue_runners(
+        self,
+        bot: QueueRestoreBot,
+    ) -> int:
+        jobs = await self.deps.durable_queue.restore_jobs(bot)
+        for job in jobs:
+            target_thread_id = str(job.get("target_thread_id") or "").strip() or None
+            _ = await discord_runner.enqueue_existing_thread_ask(
+                job,
+                target_thread_id,
+                get_thread_runner_func=self.get_thread_runner,
+                thread_runner_loop_func=self.thread_runner_loop,
+            )
+        self.deps.log(f"queue_restore_done jobs={len(jobs)}")
+        return len(jobs)

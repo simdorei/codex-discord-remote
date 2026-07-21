@@ -99,6 +99,17 @@ class MappedPromptDeliveryDeps(Generic[ChannelT]):
 @dataclass(frozen=True, slots=True)
 class MappedPromptDeliveryResult:
     handled: bool
+    accepted: bool = False
+    turn_id: str | None = None
+    error_message: str = ""
+
+
+def parse_app_server_delivery_turn_id(output: str) -> str | None:
+    prefix = "[app_server_delivery] turn_id="
+    for line in output.splitlines():
+        if line.startswith(prefix):
+            return line.removeprefix(prefix).strip() or None
+    return None
 
 
 def format_mapped_transport_failure(exit_code: int, output: str) -> str:
@@ -131,15 +142,21 @@ async def handle_mapped_prompt_delivery(
 
     async with deps.channel_typing(channel, context="ask_transport_no_wait"):
         exit_code, output = await deps.run_transport_prompt_no_wait(preprocessed.prompt, target_thread_id)
+    turn_id = parse_app_server_delivery_turn_id(output)
     deps.log(
         f"ask_transport_no_wait_done exit={exit_code} target={target_thread_id or '-'} "
         + f"output_len={deps.format_log_text_len(output)}"
     )
     if deps.is_delivery_confirmation_timeout(output):
         await deps.send_chunks(channel, deps.format_pending_ask_delivery_output(output))
-        return MappedPromptDeliveryResult(handled=True)
+        return MappedPromptDeliveryResult(
+            handled=True,
+            accepted=exit_code == 0 and turn_id is not None,
+            turn_id=turn_id,
+            error_message="" if exit_code == 0 else output,
+        )
     if exit_code == 0:
-        return MappedPromptDeliveryResult(handled=True)
+        return MappedPromptDeliveryResult(handled=True, accepted=True, turn_id=turn_id)
     deps.deactivate_session_mirror_output_target(target_thread_id)
     if deps.is_selected_thread_busy_error(exit_code, output) and await deps.send_codex_app_menu_if_available(
         channel,
@@ -147,10 +164,10 @@ async def handle_mapped_prompt_delivery(
         output,
         reason="ask_transport_no_wait_busy",
     ):
-        return MappedPromptDeliveryResult(handled=True)
+        return MappedPromptDeliveryResult(handled=True, error_message=output)
     failure = format_mapped_transport_failure(exit_code, output)
     if target_thread_id and is_thread_resume_timeout(output):
         await deps.send_resume_failure(channel, failure, target_thread_id)
     else:
         await deps.send_chunks(channel, failure)
-    return MappedPromptDeliveryResult(handled=True)
+    return MappedPromptDeliveryResult(handled=True, error_message=output)

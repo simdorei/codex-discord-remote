@@ -84,6 +84,7 @@ class DiscordOnReadyStaleBusyIntegrationTests(unittest.IsolatedAsyncioTestCase):
             mock.patch.object(bot, "cleanup_expired_persistent_component_claims", lambda: 0),
             mock.patch.object(discord_store, "cleanup_processed_discord_messages", _noop_store_cleanup),
             mock.patch.object(discord_store, "cleanup_session_mirror_events", _noop_store_cleanup),
+            mock.patch.object(bot, "restore_durable_queue_runners", mock.AsyncMock(return_value=0)),
         ):
             await _on_ready()(ReadyClient(calls, fail_stale_busy_cleanup))
 
@@ -101,6 +102,7 @@ class DiscordOnReadyStaleBusyIntegrationTests(unittest.IsolatedAsyncioTestCase):
             mock.patch.object(bot, "cleanup_expired_persistent_component_claims", lambda: 0),
             mock.patch.object(discord_store, "cleanup_processed_discord_messages", _noop_store_cleanup),
             mock.patch.object(discord_store, "cleanup_session_mirror_events", _noop_store_cleanup),
+            mock.patch.object(bot, "restore_durable_queue_runners", mock.AsyncMock(return_value=0)),
             self.assertRaisesRegex(TypeError, "bad stale busy wrapper dependency"),
         ):
             await _on_ready()(ReadyClient(calls, fail_stale_busy_cleanup))

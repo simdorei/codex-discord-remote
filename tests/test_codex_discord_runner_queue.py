@@ -1,11 +1,26 @@
 from __future__ import annotations
 
-from types import SimpleNamespace
-from typing import cast, override
+from dataclasses import dataclass
+from typing import override
 import unittest
 
 import codex_discord_runner_queue as runner_queue
 from codex_discord_runtime import normalize_runner_key
+
+
+@dataclass(frozen=True, slots=True)
+class FakeChannel:
+    id: int
+
+
+@dataclass(frozen=True, slots=True)
+class FakeAuthor:
+    id: int
+
+
+@dataclass(frozen=True, slots=True)
+class FakeMessage:
+    author: FakeAuthor
 
 
 class RunnerQueueTests(unittest.IsolatedAsyncioTestCase):
@@ -20,8 +35,8 @@ class RunnerQueueTests(unittest.IsolatedAsyncioTestCase):
         async def fake_loop(target_thread_id: str | None) -> None:
             calls.append(target_thread_id)
 
-        channel = SimpleNamespace(id=222)
-        source_message = SimpleNamespace(author=SimpleNamespace(id=7))
+        channel = FakeChannel(id=222)
+        source_message = FakeMessage(author=FakeAuthor(id=7))
 
         size = await runner_queue.enqueue_thread_ask(
             channel,
@@ -42,13 +57,13 @@ class RunnerQueueTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(await runner_queue.is_thread_runner_busy("thread-1"))
 
     async def test_retract_removes_latest_matching_queued_job(self) -> None:
-        channel = SimpleNamespace(id=222)
-        other_channel = SimpleNamespace(id=333)
-        owner_message = SimpleNamespace(author=SimpleNamespace(id=7))
-        other_owner_message = SimpleNamespace(author=SimpleNamespace(id=9))
+        channel = FakeChannel(id=222)
+        other_channel = FakeChannel(id=333)
+        owner_message = FakeMessage(author=FakeAuthor(id=7))
+        other_owner_message = FakeMessage(author=FakeAuthor(id=9))
         runner = await runner_queue.get_thread_runner("thread-1")
         queue = runner["queue"]
-        jobs = [
+        jobs: list[runner_queue.QueueJob] = [
             {"channel": channel, "prompt": "first matching", "source_message": owner_message},
             {"channel": channel, "prompt": "other owner", "source_message": other_owner_message},
             {"channel": channel, "prompt": "latest matching", "source_message": owner_message},
@@ -66,9 +81,7 @@ class RunnerQueueTests(unittest.IsolatedAsyncioTestCase):
         remaining_prompts: list[str] = []
         while not queue.empty():
             job = queue.get_nowait()
-            if isinstance(job, dict):
-                job_data = cast(dict[str, object], job)
-                remaining_prompts.append(str(job_data.get("prompt")))
+            remaining_prompts.append(str(job.get("prompt")))
             queue.task_done()
 
         self.assertEqual(result["removed"], 1)

@@ -43,6 +43,17 @@ from codex_discord_store_processed_messages import (
     is_processed_discord_message_id as is_processed_discord_message_id,
     mark_processed_discord_message_id as mark_processed_discord_message_id,
 )
+from codex_discord_store_queue import (
+    QueueEnqueueResult as QueueEnqueueResult,
+    StoredQueueJob as StoredQueueJob,
+    begin_queue_job_attempt as begin_queue_job_attempt,
+    complete_queue_job as complete_queue_job,
+    enqueue_queue_job as enqueue_queue_job,
+    flush_queue_jobs as flush_queue_jobs,
+    list_queue_jobs as list_queue_jobs,
+    mark_queue_job_running as mark_queue_job_running,
+    retract_queue_job as retract_queue_job,
+)
 from codex_discord_store_schema import init_store_schema
 from codex_discord_store_session_mirror import (
     claim_session_mirror_event as claim_session_mirror_event,

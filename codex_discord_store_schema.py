@@ -10,6 +10,7 @@ STORE_SCHEMA_TABLES: tuple[str, ...] = (
     "discord_processed_messages",
     "codex_session_mirror_offsets",
     "codex_session_mirror_events",
+    "codex_turn_queue",
 )
 
 STORE_SCHEMA_STATEMENTS: tuple[str, ...] = (
@@ -64,6 +65,32 @@ STORE_SCHEMA_STATEMENTS: tuple[str, ...] = (
         "event_digest TEXT PRIMARY KEY, "
         "codex_thread_id TEXT NOT NULL, "
         "created_at REAL NOT NULL)"
+    ),
+    (
+        "CREATE TABLE IF NOT EXISTS codex_turn_queue ("
+        "job_id TEXT PRIMARY KEY, "
+        "target_thread_id TEXT NOT NULL, "
+        "channel_id INTEGER NOT NULL, "
+        "owner_user_id INTEGER, "
+        "discord_message_id INTEGER, "
+        "prompt TEXT NOT NULL, "
+        "queued INTEGER NOT NULL, "
+        "ack_sent INTEGER NOT NULL, "
+        "state TEXT NOT NULL, "
+        "attempt_count INTEGER NOT NULL, "
+        "turn_id TEXT, "
+        "baseline_turn_ids TEXT NOT NULL, "
+        "last_error TEXT NOT NULL DEFAULT '', "
+        "created_at REAL NOT NULL, "
+        "updated_at REAL NOT NULL)"
+    ),
+    (
+        "CREATE UNIQUE INDEX IF NOT EXISTS codex_turn_queue_message_id "
+        "ON codex_turn_queue(discord_message_id) WHERE discord_message_id IS NOT NULL"
+    ),
+    (
+        "CREATE INDEX IF NOT EXISTS codex_turn_queue_target_order "
+        "ON codex_turn_queue(target_thread_id, created_at, job_id)"
     ),
 )
 

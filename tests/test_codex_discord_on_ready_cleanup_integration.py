@@ -65,6 +65,7 @@ class DiscordOnReadyCleanupIntegrationTests(unittest.IsolatedAsyncioTestCase):
         with (
             mock.patch.object(bot, "cleanup_expired_busy_choices", lambda: 3),
             mock.patch.object(bot, "cleanup_expired_persistent_component_claims", lambda: 2),
+            mock.patch.object(bot, "restore_durable_queue_runners", mock.AsyncMock(return_value=0)),
         ):
             await _on_ready()(ReadyClient(calls))
 
@@ -93,6 +94,7 @@ class DiscordOnReadyCleanupIntegrationTests(unittest.IsolatedAsyncioTestCase):
             mock.patch.object(bot, "cleanup_expired_persistent_component_claims", fail_claims),
             mock.patch.object(discord_store, "cleanup_processed_discord_messages", fail_processed),
             mock.patch.object(discord_store, "cleanup_session_mirror_events", fail_session),
+            mock.patch.object(bot, "restore_durable_queue_runners", mock.AsyncMock(return_value=0)),
         ):
             await _on_ready()(ReadyClient(calls))
 

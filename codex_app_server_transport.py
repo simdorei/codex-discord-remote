@@ -41,6 +41,7 @@ from codex_app_server_transport_turn_outcomes import (
     TurnCompletionTransportError as TurnCompletionTransportError,
     TurnStatus as TurnStatus,
     parse_thread_turn_completions,
+    parse_thread_turn_states,
 )
 
 
@@ -159,6 +160,20 @@ class PersistentCodexAppServer(ResidentCodexAppServerTransport):
             if cached is not None:
                 completions[turn_id] = cached
         return completions
+
+    def get_thread_turn_states(
+        self,
+        thread_id: str,
+        *,
+        timeout_sec: float = 3.0,
+    ) -> dict[str, TurnCompletion]:
+        result = self.read_thread(thread_id, include_turns=True, timeout_sec=timeout_sec)
+        states = parse_thread_turn_states(result, expected_thread_id=thread_id)
+        for turn_id in list(states):
+            cached = self.get_cached_turn_completion(thread_id, turn_id)
+            if cached is not None:
+                states[turn_id] = cached
+        return states
 
     def resume_thread(self, thread_id: str, *, timeout_sec: float = INITIAL_RESUME_TIMEOUT_SEC) -> JsonObject:
         deadline = self.monotonic_func() + max(timeout_sec, 0.0)

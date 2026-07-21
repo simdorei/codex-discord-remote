@@ -3,9 +3,13 @@ from __future__ import annotations
 import asyncio  # noqa: ANYIO_OK
 from collections.abc import Callable
 from dataclasses import dataclass
+from pathlib import Path
 from types import ModuleType
 from typing import cast, TypeAlias
 
+import codex_app_server_transport as app_server_transport
+import codex_discord_durable_queue_runtime as durable_queue_runtime
+import codex_discord_prompt_delivery_prepare as prompt_delivery_prepare
 import codex_discord_queue_targets as discord_queue_targets
 import codex_discord_runner as discord_runner
 import codex_discord_runner_runtime as discord_runner_runtime
@@ -52,14 +56,39 @@ class BotRunnerAdapterRuntime:
                     Callable[..., str],
                     self._module_func("format_discord_command_label"),
                 )(target_ref, limit=80),
+                durable_queue=self.make_durable_queue_runtime(),
+                send_chunks=self.send_chunks,
+                log=lambda message: cast(Callable[[str], None], self._module_func("log_line"))(message),
+            )
+        )
+
+    def make_durable_queue_runtime(self) -> durable_queue_runtime.DurableQueueRuntime:
+        client = app_server_transport.DEFAULT_CLIENT
+        return durable_queue_runtime.DurableQueueRuntime(
+            durable_queue_runtime.DurableQueueRuntimeDeps(
+                get_db_path=lambda: cast(Path, getattr(self.module, "MIRROR_DB_PATH")),
+                get_turn_states=lambda thread_id: client.get_thread_turn_states(
+                    thread_id,
+                    timeout_sec=8.0,
+                ),
+                wait_for_live_turn=lambda thread_id, turn_id, timeout_sec: client.wait_for_turn_completion(
+                    thread_id,
+                    turn_id,
+                    timeout_sec=timeout_sec,
+                ),
                 run_prompt_and_send=self.run_prompt_and_send,
                 send_chunks=self.send_chunks,
                 log=lambda message: cast(Callable[[str], None], self._module_func("log_line"))(message),
             )
         )
 
-    async def run_prompt_and_send(self, channel: ModuleValue, prompt: str, **kwargs: ModuleValue) -> None:
-        await cast(discord_runner.RunPromptAndSendFunc, self._module_func("run_prompt_and_send"))(
+    async def run_prompt_and_send(
+        self,
+        channel: ModuleValue,
+        prompt: str,
+        **kwargs: ModuleValue,
+    ) -> prompt_delivery_prepare.PromptDeliveryPreparationResult:
+        return await cast(durable_queue_runtime.PromptSender, self._module_func("run_prompt_and_send"))(
             channel,
             prompt,
             **kwargs,

@@ -41,6 +41,7 @@ class BotLifecycleAdapterRuntime:
                 make_guild_object=self.make_guild_object,
                 wait_for_slash_sync=self.wait_for_slash_sync,
                 run_ready_maintenance=self.run_ready_maintenance,
+                restore_queue_runners=self.restore_queue_runners,
                 send_startup_notice=self.send_startup_notice,
                 format_user_id=discord_interaction_log.format_discord_user_id_for_log,
                 delivery_exceptions=cast(tuple[type[BaseException], ...], getattr(self.module, "DISCORD_DELIVERY_EXCEPTIONS")),
@@ -77,6 +78,12 @@ class BotLifecycleAdapterRuntime:
                 self._module_func("_make_ready_maintenance_deps"),
             )(bot)
         )
+
+    async def restore_queue_runners(self, bot: discord_bot_lifecycle_runtime.ReadyBot) -> int:
+        return await cast(
+            Callable[[object], Awaitable[int]],
+            self._module_func("restore_durable_queue_runners"),
+        )(bot)
 
     async def send_startup_notice(self, bot: discord_bot_lifecycle_runtime.ReadyBot) -> None:
         runtime_config = cast(object, getattr(self.module, "discord_runtime_config"))

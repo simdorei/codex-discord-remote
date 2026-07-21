@@ -130,6 +130,7 @@ class DiscordOnReadyStartupNotifyIntegrationTests(unittest.IsolatedAsyncioTestCa
             mock.patch.object(bot, "cleanup_expired_persistent_component_claims", lambda: 0),
             mock.patch.object(discord_store, "cleanup_processed_discord_messages", _noop_store_cleanup),
             mock.patch.object(discord_store, "cleanup_session_mirror_events", _noop_store_cleanup),
+            mock.patch.object(bot, "restore_durable_queue_runners", mock.AsyncMock(return_value=0)),
             mock.patch.object(runtime_config, "discord_startup_notify_enabled", lambda: True),
             mock.patch.object(_discord_abc(), "Messageable", FakeMessageable),
         ):
@@ -154,6 +155,7 @@ class DiscordOnReadyStartupNotifyIntegrationTests(unittest.IsolatedAsyncioTestCa
             mock.patch.object(bot, "cleanup_expired_persistent_component_claims", lambda: 0),
             mock.patch.object(discord_store, "cleanup_processed_discord_messages", _noop_store_cleanup),
             mock.patch.object(discord_store, "cleanup_session_mirror_events", _noop_store_cleanup),
+            mock.patch.object(bot, "restore_durable_queue_runners", mock.AsyncMock(return_value=0)),
             mock.patch.object(runtime_config, "discord_startup_notify_enabled", lambda: True),
             mock.patch.object(_discord_abc(), "Messageable", FakeMessageable),
             self.assertRaisesRegex(TypeError, "bad startup fetch dependency"),
@@ -171,6 +173,7 @@ class DiscordOnReadyStartupNotifyIntegrationTests(unittest.IsolatedAsyncioTestCa
             mock.patch.object(bot, "cleanup_expired_persistent_component_claims", lambda: 0),
             mock.patch.object(discord_store, "cleanup_processed_discord_messages", _noop_store_cleanup),
             mock.patch.object(discord_store, "cleanup_session_mirror_events", _noop_store_cleanup),
+            mock.patch.object(bot, "restore_durable_queue_runners", mock.AsyncMock(return_value=0)),
             mock.patch.object(runtime_config, "discord_startup_notify_enabled", lambda: True),
             mock.patch.object(_discord_abc(), "Messageable", FakeMessageable),
             mock.patch.object(bot, "send_chunks", fail_send),

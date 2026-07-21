@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-# pyright: reportUnknownMemberType=false, reportUnknownVariableType=false
+# pyright: reportAttributeAccessIssue=false, reportUnknownMemberType=false, reportUnknownVariableType=false
 import asyncio  # noqa: ANYIO_OK
 from dataclasses import dataclass
 from pathlib import Path
@@ -10,7 +10,7 @@ from typing import cast
 import unittest
 
 import codex_discord_bot as bot
-from codex_discord_runner_queue import QueueItem, QueueJob, QueueJobValue, ThreadRunner
+from codex_discord_runner_queue import QueueJob, ThreadRunner
 import codex_discord_runtime as discord_runtime
 
 from tests.test_codex_discord_bot import EnvPatch, FakeBot, FakeMessage, FakeTarget
@@ -37,52 +37,6 @@ def make_source_message(
 
 
 class DiscordRunnerQueueIntegrationTests(unittest.IsolatedAsyncioTestCase):
-    async def test_thread_runner_accepts_send_capable_channel(self) -> None:
-        original_run_prompt_and_send = bot.run_prompt_and_send
-        calls: list[tuple[QueueJobValue, str, str | None, bool]] = []
-        target_thread_id = "duck-channel-thread"
-
-        async def fake_run_prompt_and_send(
-            channel: QueueJobValue,
-            prompt: str,
-            *,
-            queued: bool = False,
-            ack_sent: bool = False,
-            source_message: QueueJobValue = None,
-            target_thread_id: str | None = None,
-        ) -> None:
-            _ = (queued, source_message)
-            calls.append((channel, prompt, target_thread_id, ack_sent))
-
-        try:
-            bot.run_prompt_and_send = fake_run_prompt_and_send
-            channel = FakeTarget()
-
-            _ = await bot.enqueue_thread_ask(
-                channel,
-                "hello",
-                target_thread_id,
-                ack_sent=True,
-            )
-            runner = await bot.get_thread_runner(target_thread_id)
-            queue = runner["queue"]
-            self.assertIsInstance(queue, asyncio.Queue)
-            _ = await asyncio.wait_for(queue.join(), timeout=1)
-
-            self.assertEqual(calls, [(channel, "hello", target_thread_id, True)])
-        finally:
-            bot.run_prompt_and_send = original_run_prompt_and_send
-            runner = await bot.get_thread_runner(target_thread_id)
-            task = runner["task"]
-            if task is not None and not task.done():
-                _ = task.cancel()
-                try:
-                    await task
-                except asyncio.CancelledError as exc:
-                    _ = exc
-            async with bot.THREAD_RUNNERS_LOCK:
-                _ = bot.THREAD_RUNNERS.pop(discord_runtime.normalize_runner_key(target_thread_id), None)
-
     async def test_thread_runner_job_failure_reports_short_channel_message(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             log_path = Path(temp_dir) / "discord-smoke.log"
@@ -111,7 +65,7 @@ class DiscordRunnerQueueIntegrationTests(unittest.IsolatedAsyncioTestCase):
         try:
             await queue.put({"prompt": "queued prompt"})
             runner: ThreadRunner = {
-                "queue": cast(asyncio.Queue[QueueItem], queue),
+                "queue": queue,
                 "task": None,
                 "active": True,
                 "target_thread_id": "thread-1",
@@ -134,7 +88,7 @@ class DiscordRunnerQueueIntegrationTests(unittest.IsolatedAsyncioTestCase):
     async def test_prefix_retract_uses_mapped_thread_queue(self) -> None:
         key = discord_runtime.normalize_runner_key("thread-1")
         message = FakeMessage(content="!retract", channel_id=222)
-        queued_source = FakeMessage(channel_id=222)
+        queued_source = make_source_message(channel_id=222)
         queue: asyncio.Queue[QueueJob] = asyncio.Queue()
         original_mirror_db_path = bot.MIRROR_DB_PATH
         try:
@@ -151,16 +105,15 @@ class DiscordRunnerQueueIntegrationTests(unittest.IsolatedAsyncioTestCase):
                         """,
                         ("thread-1", "project", "title", 111, 222, 1.0),
                     )
-                await queue.put(
-                    {
-                        "channel": queued_source.channel,
-                        "prompt": "queued prompt",
-                        "target_thread_id": "thread-1",
-                        "source_message": queued_source,
-                    }
-                )
+                queued_job: QueueJob = {
+                    "channel": queued_source.channel,
+                    "prompt": "queued prompt",
+                    "target_thread_id": "thread-1",
+                    "source_message": queued_source,
+                }
+                await queue.put(queued_job)
                 runner: ThreadRunner = {
-                    "queue": cast(asyncio.Queue[QueueItem], queue),
+                    "queue": queue,
                     "task": None,
                     "active": False,
                     "target_thread_id": "thread-1",
@@ -216,7 +169,7 @@ class DiscordRunnerQueueIntegrationTests(unittest.IsolatedAsyncioTestCase):
             for job in jobs:
                 await queue.put(job)
             runner: ThreadRunner = {
-                "queue": cast(asyncio.Queue[QueueItem], queue),
+                "queue": queue,
                 "task": None,
                 "active": False,
                 "target_thread_id": "thread-1",

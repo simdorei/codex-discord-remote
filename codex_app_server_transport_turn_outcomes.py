@@ -93,12 +93,32 @@ def parse_thread_turn_completions(
     return completions
 
 
+def parse_thread_turn_states(
+    result: JsonObject,
+    *,
+    expected_thread_id: str,
+) -> dict[str, TurnCompletion]:
+    thread_id, turns = _parse_thread_turn_list(result, expected_thread_id=expected_thread_id)
+    states: dict[str, TurnCompletion] = {}
+    for turn in turns:
+        state = parse_turn_payload(
+            thread_id,
+            turn,
+            require_terminal=False,
+            include_in_progress=True,
+        )
+        if state is not None:
+            states[state.turn_id] = state
+    return states
+
+
 def parse_turn_payload(
     thread_id: str,
     turn: Mapping[str, JsonValue],
     *,
     remote_user_intent: bool = False,
     require_terminal: bool,
+    include_in_progress: bool = False,
 ) -> TurnCompletion | None:
     if not thread_id:
         raise CodexAppServerTransportError("turn payload had no thread id.")
@@ -115,7 +135,8 @@ def parse_turn_payload(
     if status is TurnStatus.IN_PROGRESS:
         if require_terminal:
             raise CodexAppServerTransportError("turn/completed carried an inProgress turn.")
-        return None
+        if not include_in_progress:
+            return None
     error_message = _parse_error_message(turn, status)
     duration_value = turn.get("durationMs")
     duration_ms = duration_value if isinstance(duration_value, int) and not isinstance(duration_value, bool) else None
@@ -134,6 +155,28 @@ def parse_turn_payload(
         interrupt_origin=interrupt_origin,
         duration_ms=duration_ms,
     )
+
+
+def _parse_thread_turn_list(
+    result: JsonObject,
+    *,
+    expected_thread_id: str,
+) -> tuple[str, list[JsonObject]]:
+    thread = result.get("thread")
+    if not isinstance(thread, dict):
+        raise CodexAppServerTransportError("thread/read returned an invalid thread payload.")
+    thread_id = str(thread.get("id") or "").strip()
+    if thread_id != expected_thread_id:
+        raise CodexAppServerTransportError("thread/read returned a different thread.")
+    turns = thread.get("turns")
+    if not isinstance(turns, list):
+        raise CodexAppServerTransportError("thread/read returned invalid turns.")
+    parsed_turns: list[JsonObject] = []
+    for turn in turns:
+        if not isinstance(turn, dict):
+            raise CodexAppServerTransportError("thread/read returned an invalid turn payload.")
+        parsed_turns.append(turn)
+    return thread_id, parsed_turns
 
 
 def _parse_error_message(turn: Mapping[str, JsonValue], status: TurnStatus) -> str:

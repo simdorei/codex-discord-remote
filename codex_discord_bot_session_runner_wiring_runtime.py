@@ -54,6 +54,7 @@ class BotSessionRunnerWiringRuntime:
         self._set("retract_thread_ask", runner_runtime.retract_thread_ask)
         self._set("report_thread_runner_job_failed", runner_runtime.report_thread_runner_job_failed)
         self._set("thread_runner_loop", runner_runtime.thread_runner_loop)
+        self._set("restore_durable_queue_runners", runner_runtime.restore_durable_queue_runners)
 
     def _install_context_exhaustion_helpers(self) -> None:
         self._set("is_context_exhausted_no_reply_state", discord_session_mirror_delegation.is_context_exhausted_no_reply_state)

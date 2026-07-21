@@ -94,6 +94,7 @@ class DiscordOnReadyStartupOrderIntegrationTests(unittest.IsolatedAsyncioTestCas
             mock.patch.object(bot, "cleanup_expired_persistent_component_claims", lambda: 0),
             mock.patch.object(discord_store, "cleanup_processed_discord_messages", _noop_store_cleanup),
             mock.patch.object(discord_store, "cleanup_session_mirror_events", _noop_store_cleanup),
+            mock.patch.object(bot, "restore_durable_queue_runners", mock.AsyncMock(return_value=0)),
         ):
             await self._run_until_startup(client, ["stop", "history", "mirror", "startup"])
 
@@ -112,6 +113,7 @@ class DiscordOnReadyStartupOrderIntegrationTests(unittest.IsolatedAsyncioTestCas
             mock.patch.object(bot, "cleanup_expired_persistent_component_claims", lambda: 0),
             mock.patch.object(discord_store, "cleanup_processed_discord_messages", _noop_store_cleanup),
             mock.patch.object(discord_store, "cleanup_session_mirror_events", _noop_store_cleanup),
+            mock.patch.object(bot, "restore_durable_queue_runners", mock.AsyncMock(return_value=0)),
             mock.patch.object(runtime_config, "discord_startup_notify_enabled", lambda: True),
             mock.patch.object(_discord_abc(), "Messageable", FakeMessageable),
             mock.patch.object(bot, "send_chunks", fake_send_chunks),

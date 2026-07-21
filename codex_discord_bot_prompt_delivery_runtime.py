@@ -109,7 +109,7 @@ class BotPromptDeliveryRuntime(Generic[ChannelT, RelayT, SendResultT]):
         ack_sent: bool = False,
         source_message: discord_busy.BusyChoiceSource | None = None,
         target_thread_id: str | None = None,
-    ) -> None:
+    ) -> discord_prompt_delivery_prepare.PromptDeliveryPreparationResult:
         target_thread_id, _target_ref = self.deps.resolve_target_ref(target_thread_id)
         lock = self.deps.get_ask_delivery_lock(target_thread_id)
         waited = lock.locked()
@@ -118,7 +118,7 @@ class BotPromptDeliveryRuntime(Generic[ChannelT, RelayT, SendResultT]):
         async with lock:
             if waited:
                 self.deps.log(f"ask_delivery_wait_done target={target_thread_id or '-'}")
-            await self._run_prompt_and_send_unlocked(
+            return await self._run_prompt_and_send_unlocked(
                 channel,
                 prompt,
                 queued=queued,
@@ -164,7 +164,7 @@ class BotPromptDeliveryRuntime(Generic[ChannelT, RelayT, SendResultT]):
         ack_sent: bool = False,
         source_message: discord_busy.BusyChoiceSource | None = None,
         target_thread_id: str | None = None,
-    ) -> None:
+    ) -> discord_prompt_delivery_prepare.PromptDeliveryPreparationResult:
         preparation = await discord_prompt_delivery_prepare.prepare_prompt_delivery(
             channel,
             discord_prompt_delivery_prepare.PromptDeliveryPreparationRequest(
@@ -176,7 +176,7 @@ class BotPromptDeliveryRuntime(Generic[ChannelT, RelayT, SendResultT]):
             deps=self.make_prompt_delivery_preparation_deps(),
         )
         if preparation.handled:
-            return
+            return preparation
 
         async def send_retry_notice_chunks(channel: ChannelT, text: str) -> SendResultT:
             return await self.deps.send_chunks(channel, text)
@@ -241,3 +241,4 @@ class BotPromptDeliveryRuntime(Generic[ChannelT, RelayT, SendResultT]):
                 log=self.deps.log,
             ),
         )
+        return preparation
