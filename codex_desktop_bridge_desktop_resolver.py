@@ -67,6 +67,8 @@ def iter_codex_desktop_registry_candidates() -> Iterator[tuple[str, Path]]:
         return
 
     app_paths = (
+        (winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\App Paths\ChatGPT.exe"),
+        (winreg.HKEY_LOCAL_MACHINE, r"Software\Microsoft\Windows\CurrentVersion\App Paths\ChatGPT.exe"),
         (winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\App Paths\Codex.exe"),
         (winreg.HKEY_LOCAL_MACHINE, r"Software\Microsoft\Windows\CurrentVersion\App Paths\Codex.exe"),
     )
@@ -90,15 +92,20 @@ def iter_codex_desktop_registry_candidates() -> Iterator[tuple[str, Path]]:
         for child_name in subkeys:
             child_subkey = f"{base_subkey}\\{child_name}"
             display_name = read_registry_string(root, child_subkey, "DisplayName")
-            if "codex" not in display_name.lower():
+            if "codex" not in display_name.lower() and "chatgpt" not in display_name.lower():
                 continue
             display_icon = normalize_executable_candidate(read_registry_string(root, child_subkey, "DisplayIcon"))
             if display_icon is not None:
                 yield (f"registry:{child_subkey}:DisplayIcon", display_icon)
             install_location = read_registry_string(root, child_subkey, "InstallLocation")
-            install_path = normalize_executable_candidate(str(Path(install_location) / "Codex.exe")) if install_location else None
-            if install_path is not None:
-                yield (f"registry:{child_subkey}:InstallLocation", install_path)
+            for executable_name in ("ChatGPT.exe", "Codex.exe"):
+                install_path = (
+                    normalize_executable_candidate(str(Path(install_location) / executable_name))
+                    if install_location
+                    else None
+                )
+                if install_path is not None:
+                    yield (f"registry:{child_subkey}:InstallLocation", install_path)
 
 
 def iter_default_codex_desktop_candidates() -> Iterator[tuple[str, Path]]:
@@ -190,7 +197,8 @@ def detect_codex_desktop_executable_via_powershell() -> tuple[Path | None, str]:
         run_powershell_capture(
             " ".join(
                 (
-                    "Get-Process -Name Codex -ErrorAction SilentlyContinue",
+                    "@('ChatGPT', 'Codex') | ForEach-Object {",
+                    "Get-Process -Name $_ -ErrorAction SilentlyContinue }",
                     "| Where-Object { $_.Path }",
                     "| Select-Object -First 1 -ExpandProperty Path",
                 )
@@ -209,9 +217,10 @@ def detect_codex_desktop_executable_via_powershell() -> tuple[Path | None, str]:
         )
     )
     if install_root:
-        candidate = normalize_executable_candidate(str(Path(install_root) / "app" / "Codex.exe"))
-        if candidate is not None:
-            return (candidate, "powershell:Get-AppxPackage")
+        for executable_name in ("ChatGPT.exe", "Codex.exe"):
+            candidate = normalize_executable_candidate(str(Path(install_root) / "app" / executable_name))
+            if candidate is not None:
+                return (candidate, "powershell:Get-AppxPackage")
 
     return (None, "")
 

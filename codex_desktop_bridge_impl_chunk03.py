@@ -125,7 +125,7 @@ def stop_codex_archive_lock_candidates() -> list[str]:
     lines.append(f"codex_app_server_stop_details: {make_console_safe_text(app_server_details)}")
     return lines
 
-def start_codex_desktop_process(executable_path: Path) -> subprocess.Popen[str]:
+def start_codex_desktop_process(executable_path: Path) -> desktop_process.StartedDesktopProcess:
     return desktop_process.start_codex_desktop_process(
         executable_path,
         deps=_make_desktop_process_deps(),

@@ -26,6 +26,46 @@ $LauncherLogPath = Join-Path $ScriptDir 'discord_launcher.log'
 . (Join-Path $ScriptDir 'codex-discord-watchdog-runtime.ps1')
 . (Join-Path $ScriptDir 'codex-discord-watchdog-restart-runtime.ps1')
 
+function Test-ChatGptDesktopProcessAlive {
+    $desktopProcess = Get-Process -Name 'ChatGPT' -ErrorAction SilentlyContinue |
+        Where-Object {
+            $_.Path -like '*\WindowsApps\OpenAI.Codex_*\app\ChatGPT.exe'
+        } |
+        Select-Object -First 1
+    return $null -ne $desktopProcess
+}
+
+function Ensure-ChatGptDesktopRunning {
+    param([switch]$DryRun)
+
+    if (Test-ChatGptDesktopProcessAlive) {
+        return
+    }
+
+    $package = Get-AppxPackage -Name 'OpenAI.Codex' -ErrorAction Stop |
+        Select-Object -First 1
+    if ($null -eq $package) {
+        throw 'ChatGPT AppX package OpenAI.Codex is not installed.'
+    }
+
+    $manifest = Get-AppxPackageManifest -Package $package
+    $application = @($manifest.Package.Applications.Application) |
+        Where-Object { $_.Id -eq 'App' } |
+        Select-Object -First 1
+    if ($null -eq $application) {
+        throw 'ChatGPT AppX application id App is not registered.'
+    }
+
+    $appUserModelId = "$($package.PackageFamilyName)!$($application.Id)"
+    if ($DryRun) {
+        Write-Output "chatgpt_would_start app_id=$appUserModelId"
+        return
+    }
+
+    Start-Process -FilePath 'explorer.exe' -ArgumentList @("shell:AppsFolder\$appUserModelId")
+    Write-LauncherLog "watchdog_chatgpt_start app_id=$appUserModelId"
+}
+
 if (-not (Test-Path -LiteralPath $BotScript)) {
     Write-LauncherLog "watchdog_error reason=bot_script_missing script=$BotScript"
     exit 1
@@ -141,6 +181,8 @@ if (Test-Path -LiteralPath $DisablePath) {
     }
     exit 0
 }
+
+Ensure-ChatGptDesktopRunning -DryRun:$DryRun
 
 if (Test-Path -LiteralPath $RestartRequestPath) {
     if ($DryRun) {

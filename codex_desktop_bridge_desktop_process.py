@@ -6,7 +6,7 @@ import sys
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol
+from typing import Final, Protocol
 
 from codex_desktop_bridge_desktop_process_scripts import build_stop_codex_app_server_script
 
@@ -16,6 +16,7 @@ IterCandidates = Callable[[], Iterable[tuple[str, Path]]]
 PersistEnvValue = Callable[[Path, str, str], bool]
 SetEnvironValue = Callable[[str, str], None]
 WhichExecutable = Callable[[str], str | None]
+CHATGPT_APP_USER_MODEL_ID: Final = "OpenAI.Codex_2p2nqsd0c76g0!App"
 
 
 class RunProcess(Protocol):
@@ -40,7 +41,26 @@ class StartProcess(Protocol):
         close_fds: bool,
         creationflags: int,
         text: bool,
-    ) -> subprocess.Popen[str]: ...
+    ) -> StartedDesktopProcess: ...
+
+
+class StartedDesktopProcess(Protocol):
+    @property
+    def pid(self) -> int: ...
+
+    def poll(self) -> int | None: ...
+
+
+@dataclass(frozen=True, slots=True)
+class ShellActivatedDesktopProcess:
+    launcher: StartedDesktopProcess
+
+    @property
+    def pid(self) -> int:
+        return self.launcher.pid
+
+    def poll(self) -> None:
+        return None
 
 
 @dataclass(frozen=True, slots=True)
@@ -70,6 +90,10 @@ def iter_default_codex_desktop_candidates(environ: Mapping[str, str]) -> Iterato
         if not base:
             continue
         for candidate in (
+            Path(base) / "Programs" / "ChatGPT" / "ChatGPT.exe",
+            Path(base) / "ChatGPT" / "ChatGPT.exe",
+            Path(base) / "Programs" / "Codex" / "ChatGPT.exe",
+            Path(base) / "Codex" / "ChatGPT.exe",
             Path(base) / "Programs" / "Codex" / "Codex.exe",
             Path(base) / "Codex" / "Codex.exe",
         ):
@@ -201,7 +225,7 @@ def start_codex_desktop_process(
     executable_path: Path,
     *,
     deps: DesktopProcessDeps,
-) -> subprocess.Popen[str]:
+) -> StartedDesktopProcess:
     creationflags = 0
     creationflags |= deps.create_new_process_group
     if sys.platform == "darwin":
@@ -214,6 +238,20 @@ def start_codex_desktop_process(
                 creationflags=0,
                 text=True,
             )
+    if (
+        sys.platform == "win32"
+        and executable_path.name.casefold() == "chatgpt.exe"
+        and any(parent.name.casefold() == "windowsapps" for parent in executable_path.parents)
+    ):
+        explorer = deps.which("explorer") or "explorer.exe"
+        launcher = deps.start_process(
+            [explorer, f"shell:AppsFolder\\{CHATGPT_APP_USER_MODEL_ID}"],
+            cwd=str(executable_path.parent),
+            close_fds=True,
+            creationflags=0,
+            text=True,
+        )
+        return ShellActivatedDesktopProcess(launcher)
     return deps.start_process(
         [str(executable_path)],
         cwd=str(executable_path.parent),
